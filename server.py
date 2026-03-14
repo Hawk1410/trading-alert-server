@@ -16,10 +16,9 @@ def home():
 @app.route("/webhook", methods=["POST"])
 def webhook():
 
-    # Accept both JSON and plain text alerts
-    data = request.get_json(silent=True)
-
-    if data is None:
+    try:
+        data = request.get_json(force=True)
+    except:
         data = {"message": request.data.decode("utf-8")}
 
     alert_entry = {
@@ -27,26 +26,23 @@ def webhook():
         "data": data
     }
 
-    # Load existing alerts
     if os.path.exists(ALERTS_FILE):
         with open(ALERTS_FILE, "r") as f:
             try:
                 alerts = json.load(f)
-            except json.JSONDecodeError:
+            except:
                 alerts = []
     else:
         alerts = []
 
-    # Add new alert
     alerts.append(alert_entry)
 
-    # Save alerts
     with open(ALERTS_FILE, "w") as f:
         json.dump(alerts, f, indent=2)
 
-    print("Alert received:", data)
+    print("Alert received:", alert_entry)
 
-    return {"status": "received", "saved_alerts": len(alerts)}
+    return {"status": "ok", "alerts_saved": len(alerts)}
 
 
 if __name__ == "__main__":
