@@ -103,3 +103,4 @@ def webhook():
                 trade_open = False
 
     return "ok"
+
