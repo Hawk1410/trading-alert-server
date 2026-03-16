@@ -17,6 +17,21 @@ SHORT_THRESHOLD = 0.3
 STOP_LOSS = 0.4
 TAKE_PROFIT = 0.8
 
+import os
+import psycopg2
+from flask import Flask, request, jsonify
+
+app = Flask(__name__)
+
+def get_db_connection():
+    return psycopg2.connect(
+        host=os.getenv("DB_HOST"),
+        port=os.getenv("DB_PORT"),
+        dbname=os.getenv("DB_NAME"),
+        user=os.getenv("DB_USER"),
+        password=os.getenv("DB_PASSWORD")
+    )
+
 
 @app.route("/")
 def home():
