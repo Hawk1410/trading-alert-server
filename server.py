@@ -1,50 +1,35 @@
 from flask import Flask, request
-import json
+import csv
 import os
 from datetime import datetime
 
 app = Flask(__name__)
 
-ALERTS_FILE = "alerts.json"
-
-
 @app.route("/", methods=["GET"])
 def home():
     return "Trading Alert Server Running"
 
-
 @app.route("/webhook", methods=["POST"])
 def webhook():
+    data = request.json or {}
 
-    try:
-        data = request.get_json(force=True)
-    except:
-        data = {"message": request.data.decode("utf-8")}
+    print("Alert received:", data)
 
-    alert_entry = {
-        "received_at": datetime.utcnow().isoformat() + "Z",
-        "data": data
-    }
+    file_exists = os.path.isfile("trade_signals.csv")
 
-    if os.path.exists(ALERTS_FILE):
-        with open(ALERTS_FILE, "r") as f:
-            try:
-                alerts = json.load(f)
-            except:
-                alerts = []
-    else:
-        alerts = []
+    with open("trade_signals.csv", "a", newline="") as f:
+        writer = csv.writer(f)
+        if not file_exists:
+            writer.writerow(["received_at", "symbol", "price", "time", "exchange"])
+        writer.writerow([
+            datetime.utcnow().isoformat(),
+            data.get("symbol", ""),
+            data.get("price", ""),
+            data.get("time", ""),
+            data.get("exchange", "")
+        ])
 
-    alerts.append(alert_entry)
-
-    with open(ALERTS_FILE, "w") as f:
-        json.dump(alerts, f, indent=2)
-
-    print("Alert received:", alert_entry)
-
-    return {"status": "ok", "alerts_saved": len(alerts)}
-
+    return {"status": "received"}, 200
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=10000)
