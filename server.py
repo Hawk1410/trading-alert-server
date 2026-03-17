@@ -1,4 +1,3 @@
-
 from flask import Flask, request, jsonify
 import os
 import psycopg2
@@ -16,7 +15,6 @@ def get_db_connection():
         os.getenv("DATABASE_URL"),
         sslmode="require",
         connect_timeout=10,
-    
     )
 
 
@@ -63,14 +61,17 @@ def webhook():
         conn.autocommit = True
         cursor = conn.cursor()
 
+        # Store current signal
         cursor.execute(
             """
             INSERT INTO signal_history
             (symbol, price, vwap, distance_from_vwap_pct, decision)
             VALUES (%s, %s, %s, %s, %s)
-            """ ,
+            RETURNING id
+            """,
             (symbol, price, vwap, distance, decision),
         )
+        new_signal_id = cursor.fetchone()[0]
 
         print("\n==============================")
         print("Signal received")
@@ -79,7 +80,37 @@ def webhook():
         print("VWAP:", vwap)
         print("Distance from VWAP:", round(distance, 3), "%")
         print("Decision:", decision)
+        print("Signal ID:", new_signal_id)
 
+        # Fill forward-price columns for earlier signals
+        cursor.execute(
+            """
+            UPDATE signal_history
+            SET price_after_3_candles = %s
+            WHERE id = %s AND price_after_3_candles IS NULL
+            """,
+            (price, new_signal_id - 3),
+        )
+
+        cursor.execute(
+            """
+            UPDATE signal_history
+            SET price_after_5_candles = %s
+            WHERE id = %s AND price_after_5_candles IS NULL
+            """,
+            (price, new_signal_id - 5),
+        )
+
+        cursor.execute(
+            """
+            UPDATE signal_history
+            SET price_after_10_candles = %s
+            WHERE id = %s AND price_after_10_candles IS NULL
+            """,
+            (price, new_signal_id - 10),
+        )
+
+        # Load current bot state
         cursor.execute(
             """
             SELECT trade_open, direction, entry_price, stop_price, target_price, opened_at, symbol
@@ -94,6 +125,7 @@ def webhook():
 
         trade_open, direction, entry_price, stop_price, target_price, opened_at, state_symbol = state
 
+        # Entry logic
         if not trade_open:
             if decision == "LONG":
                 entry_price = price
@@ -111,7 +143,7 @@ def webhook():
                         opened_at = NOW(),
                         symbol = %s
                     WHERE id = 1
-                    """ ,
+                    """,
                     ("LONG", entry_price, stop_price, target_price, symbol),
                 )
 
@@ -137,7 +169,7 @@ def webhook():
                         opened_at = NOW(),
                         symbol = %s
                     WHERE id = 1
-                    """ ,
+                    """,
                     ("SHORT", entry_price, stop_price, target_price, symbol),
                 )
 
@@ -150,6 +182,7 @@ def webhook():
             else:
                 print("No trade opened")
 
+        # Trade management
         else:
             print("\nTrade currently open:", direction)
 
@@ -182,7 +215,7 @@ def webhook():
                     INSERT INTO trade_history
                     (symbol, direction, entry_price, stop_price, target_price, exit_price, result, pnl_pct, opened_at, closed_at)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                    """ ,
+                    """,
                     (
                         state_symbol,
                         direction,
@@ -228,10 +261,8 @@ def webhook():
             cursor.close()
         if conn:
             conn.close()
-            
 
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
-
