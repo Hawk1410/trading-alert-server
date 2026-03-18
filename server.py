@@ -4,8 +4,7 @@ import psycopg2
 
 app = Flask(__name__)
 
-LONG_THRESHOLD = -0.7
-SHORT_THRESHOLD = 0.6
+LONG_THRESHOLD = -1.0
 STOP_LOSS = 0.4
 TAKE_PROFIT = 0.8
 MIN_ATR = 80
@@ -56,14 +55,12 @@ def webhook():
         decision = "HOLD"
         if distance < LONG_THRESHOLD and atr > MIN_ATR:
             decision = "LONG"
-        elif distance > SHORT_THRESHOLD and atr > MIN_ATR:
-            decision = "SHORT"
 
         conn = get_db_connection()
         conn.autocommit = True
         cursor = conn.cursor()
 
-        # Store current signal
+        # Store signal
         cursor.execute(
             """
             INSERT INTO signal_history
@@ -81,45 +78,27 @@ def webhook():
         print("Price:", price)
         print("VWAP:", vwap)
         print("ATR:", atr)
-        print("Distance from VWAP:", round(distance, 3), "%")
+        print("Distance:", round(distance, 3), "%")
         print("Decision:", decision)
         print("Signal ID:", new_signal_id)
 
-        # Fill forward-price columns for earlier signals
+        # Forward fill future prices
         cursor.execute(
-            """
-            UPDATE signal_history
-            SET price_after_3_candles = %s
-            WHERE id = %s AND price_after_3_candles IS NULL
-            """,
+            "UPDATE signal_history SET price_after_3_candles = %s WHERE id = %s AND price_after_3_candles IS NULL",
             (price, new_signal_id - 3),
         )
-
         cursor.execute(
-            """
-            UPDATE signal_history
-            SET price_after_5_candles = %s
-            WHERE id = %s AND price_after_5_candles IS NULL
-            """,
+            "UPDATE signal_history SET price_after_5_candles = %s WHERE id = %s AND price_after_5_candles IS NULL",
             (price, new_signal_id - 5),
         )
-
         cursor.execute(
-            """
-            UPDATE signal_history
-            SET price_after_10_candles = %s
-            WHERE id = %s AND price_after_10_candles IS NULL
-            """,
+            "UPDATE signal_history SET price_after_10_candles = %s WHERE id = %s AND price_after_10_candles IS NULL",
             (price, new_signal_id - 10),
         )
 
-        # Load current bot state
+        # Load bot state
         cursor.execute(
-            """
-            SELECT trade_open, direction, entry_price, stop_price, target_price, opened_at, symbol
-            FROM bot_state
-            WHERE id = 1
-            """
+            "SELECT trade_open, direction, entry_price, stop_price, target_price, opened_at, symbol FROM bot_state WHERE id = 1"
         )
         state = cursor.fetchone()
 
@@ -128,66 +107,33 @@ def webhook():
 
         trade_open, direction, entry_price, stop_price, target_price, opened_at, state_symbol = state
 
-        # Entry logic
-        if not trade_open:
-            if decision == "LONG":
-                entry_price = price
-                stop_price = entry_price * (1 - STOP_LOSS / 100)
-                target_price = entry_price * (1 + TAKE_PROFIT / 100)
+        # ENTRY
+        if not trade_open and decision == "LONG":
+            entry_price = price
+            stop_price = entry_price * (1 - STOP_LOSS / 100)
+            target_price = entry_price * (1 + TAKE_PROFIT / 100)
 
-                cursor.execute(
-                    """
-                    UPDATE bot_state
-                    SET trade_open = TRUE,
-                        direction = %s,
-                        entry_price = %s,
-                        stop_price = %s,
-                        target_price = %s,
-                        opened_at = NOW(),
-                        symbol = %s
-                    WHERE id = 1
-                    """,
-                    ("LONG", entry_price, stop_price, target_price, symbol),
-                )
+            cursor.execute(
+                """
+                UPDATE bot_state
+                SET trade_open = TRUE,
+                    direction = %s,
+                    entry_price = %s,
+                    stop_price = %s,
+                    target_price = %s,
+                    opened_at = NOW(),
+                    symbol = %s
+                WHERE id = 1
+                """,
+                ("LONG", entry_price, stop_price, target_price, symbol),
+            )
 
-                print("\nTRADE OPENED")
-                print("Direction: LONG")
-                print("Entry:", entry_price)
-                print("Stop:", stop_price)
-                print("Target:", target_price)
+            print("\nTRADE OPENED")
+            print("Entry:", entry_price)
 
-            elif decision == "SHORT":
-                entry_price = price
-                stop_price = entry_price * (1 + STOP_LOSS / 100)
-                target_price = entry_price * (1 - TAKE_PROFIT / 100)
-
-                cursor.execute(
-                    """
-                    UPDATE bot_state
-                    SET trade_open = TRUE,
-                        direction = %s,
-                        entry_price = %s,
-                        stop_price = %s,
-                        target_price = %s,
-                        opened_at = NOW(),
-                        symbol = %s
-                    WHERE id = 1
-                    """,
-                    ("SHORT", entry_price, stop_price, target_price, symbol),
-                )
-
-                print("\nTRADE OPENED")
-                print("Direction: SHORT")
-                print("Entry:", entry_price)
-                print("Stop:", stop_price)
-                print("Target:", target_price)
-
-            else:
-                print("No trade opened")
-
-        # Trade management
-        else:
-            print("\nTrade currently open:", direction)
+        # MANAGEMENT
+        elif trade_open:
+            print("\nTrade open:", direction)
 
             close_trade = False
             result = None
@@ -200,18 +146,8 @@ def webhook():
                     result = "WIN"
                     close_trade = True
 
-            elif direction == "SHORT":
-                if price >= float(stop_price):
-                    result = "LOSS"
-                    close_trade = True
-                elif price <= float(target_price):
-                    result = "WIN"
-                    close_trade = True
-
             if close_trade:
                 pnl_pct = ((price - float(entry_price)) / float(entry_price)) * 100
-                if direction == "SHORT":
-                    pnl_pct = -pnl_pct
 
                 cursor.execute(
                     """
@@ -248,10 +184,7 @@ def webhook():
 
                 print("\nTRADE CLOSED")
                 print("Result:", result)
-                print("Exit:", price)
-                print("PnL %:", round(pnl_pct, 3))
-            else:
-                print("Trade remains open")
+                print("PnL:", round(pnl_pct, 3))
 
         return jsonify({"status": "ok"}), 200
 
