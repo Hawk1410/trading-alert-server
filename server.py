@@ -4,7 +4,7 @@ import psycopg2
 
 app = Flask(__name__)
 
-LONG_THRESHOLD = -1.0
+LONG_THRESHOLD = -1.2
 STOP_LOSS = 0.4
 TAKE_PROFIT = 0.8
 MIN_ATR = 80
@@ -78,7 +78,7 @@ def webhook():
         print("Price:", price)
         print("VWAP:", vwap)
         print("ATR:", atr)
-        print("Distance:", round(distance, 3), "%")
+        print("Distance from VWAP:", round(distance, 3), "%")
         print("Decision:", decision)
         print("Signal ID:", new_signal_id)
 
