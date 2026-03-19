@@ -4,7 +4,7 @@ import psycopg2
 
 app = Flask(__name__)
 
-LONG_THRESHOLD = -1.2
+LONG_THRESHOLD = -1.4
 STOP_LOSS = 0.4
 TAKE_PROFIT = 0.8
 MIN_ATR = 80
