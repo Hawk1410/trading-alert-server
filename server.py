@@ -4,7 +4,10 @@ import psycopg2
 
 app = Flask(__name__)
 
-LONG_THRESHOLD = -1.4
+# === STRATEGY CONFIG ===
+LONG_THRESHOLD = -1.4          # Primary entry filter
+EXTREME_THRESHOLD = -1.6       # Future use (strong edge zone)
+
 STOP_LOSS = 0.4
 TAKE_PROFIT = 0.8
 MIN_ATR = 80
@@ -52,9 +55,19 @@ def webhook():
 
         distance = ((price - vwap) / vwap) * 100
 
+        # === DECISION LOGIC ===
         decision = "HOLD"
-        if distance < LONG_THRESHOLD and atr > MIN_ATR:
+
+        if atr <= MIN_ATR:
+            reason = "ATR too low"
+        elif distance >= LONG_THRESHOLD:
+            reason = "Not far enough from VWAP"
+        else:
             decision = "LONG"
+            reason = "Valid VWAP deviation"
+
+        # Highlight extreme setups (for future analysis)
+        extreme_flag = distance < EXTREME_THRESHOLD
 
         conn = get_db_connection()
         conn.autocommit = True
@@ -78,8 +91,10 @@ def webhook():
         print("Price:", price)
         print("VWAP:", vwap)
         print("ATR:", atr)
-        print("Distance from VWAP:", round(distance, 3), "%")
+        print("Distance:", round(distance, 3), "%")
         print("Decision:", decision)
+        print("Reason:", reason)
+        print("Extreme setup:", extreme_flag)
         print("Signal ID:", new_signal_id)
 
         # Forward fill future prices
@@ -107,7 +122,7 @@ def webhook():
 
         trade_open, direction, entry_price, stop_price, target_price, opened_at, state_symbol = state
 
-        # ENTRY
+        # === ENTRY ===
         if not trade_open and decision == "LONG":
             entry_price = price
             stop_price = entry_price * (1 - STOP_LOSS / 100)
@@ -128,12 +143,12 @@ def webhook():
                 ("LONG", entry_price, stop_price, target_price, symbol),
             )
 
-            print("\nTRADE OPENED")
+            print("\n🚀 TRADE OPENED")
             print("Entry:", entry_price)
 
-        # MANAGEMENT
+        # === MANAGEMENT ===
         elif trade_open:
-            print("\nTrade open:", direction)
+            print("\nTrade open:", direction, "| Symbol:", state_symbol)
 
             close_trade = False
             result = None
@@ -182,7 +197,7 @@ def webhook():
                     """
                 )
 
-                print("\nTRADE CLOSED")
+                print("\n✅ TRADE CLOSED")
                 print("Result:", result)
                 print("PnL:", round(pnl_pct, 3))
 
