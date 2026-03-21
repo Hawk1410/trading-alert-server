@@ -5,8 +5,8 @@ import psycopg2
 app = Flask(__name__)
 
 # === STRATEGY CONFIG ===
-LONG_THRESHOLD = -1.4          # Primary entry filter
-EXTREME_THRESHOLD = -1.6       # Future use (strong edge zone)
+LONG_THRESHOLD = -1.3
+EXTREME_THRESHOLD = -1.6
 
 STOP_LOSS = 0.4
 TAKE_PROFIT = 0.8
@@ -40,6 +40,145 @@ def health():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+# ================================
+# 📊 COMMAND CENTRE ENDPOINT
+# ================================
+@app.route("/stats")
+def stats():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # === PERFORMANCE (ALL TIME) ===
+        cursor.execute("""
+            SELECT
+                COUNT(*),
+                ROUND(AVG(pnl_pct), 3),
+                ROUND(AVG(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) * 100, 1)
+            FROM trade_history
+        """)
+        trades, avg_pnl, win_rate = cursor.fetchone()
+
+        # === PERFORMANCE (LAST 24H) ===
+        cursor.execute("""
+            SELECT
+                COUNT(*),
+                ROUND(AVG(pnl_pct), 3),
+                ROUND(AVG(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) * 100, 1)
+            FROM trade_history
+            WHERE opened_at >= NOW() - INTERVAL '24 hours'
+        """)
+        trades_24h, avg_pnl_24h, win_rate_24h = cursor.fetchone()
+
+        # === SIGNAL FLOW ===
+        cursor.execute("""
+            SELECT
+                COUNT(*),
+                COUNT(*) FILTER (WHERE decision = 'LONG'),
+                COUNT(*) FILTER (WHERE decision = 'HOLD')
+            FROM signal_history
+        """)
+        total_signals, long_signals, hold_signals = cursor.fetchone()
+
+        # === CONVERSION RATE ===
+        conversion_rate = 0
+        if total_signals > 0:
+            conversion_rate = round((long_signals / total_signals) * 100, 2)
+
+        # === VWAP DISTANCE STATS ===
+        cursor.execute("""
+            SELECT
+                ROUND(MIN(distance_from_vwap_pct), 3),
+                ROUND(MAX(distance_from_vwap_pct), 3),
+                ROUND(AVG(distance_from_vwap_pct), 3)
+            FROM signal_history
+        """)
+        min_dist, max_dist, avg_dist = cursor.fetchone()
+
+        # === TRADE DISTANCE (EDGE DATA) ===
+        cursor.execute("""
+            SELECT
+                ROUND(AVG(distance_from_vwap_pct), 3),
+                ROUND(MIN(distance_from_vwap_pct), 3),
+                ROUND(MAX(distance_from_vwap_pct), 3)
+            FROM signal_history
+            WHERE decision = 'LONG'
+        """)
+        trade_avg_dist, trade_min_dist, trade_max_dist = cursor.fetchone()
+
+        # === LAST SIGNAL ===
+        cursor.execute("""
+            SELECT symbol, price, vwap, distance_from_vwap_pct, decision, created_at
+            FROM signal_history
+            ORDER BY created_at DESC
+            LIMIT 1
+        """)
+        last_signal = cursor.fetchone()
+
+        # === LAST 5 TRADES ===
+        cursor.execute("""
+            SELECT symbol, result, pnl_pct, entry_price, exit_price, opened_at
+            FROM trade_history
+            ORDER BY opened_at DESC
+            LIMIT 5
+        """)
+        recent_trades = cursor.fetchall()
+
+        # === CURRENT TRADE STATE ===
+        cursor.execute("""
+            SELECT trade_open, direction, entry_price, stop_price, target_price, symbol
+            FROM bot_state WHERE id = 1
+        """)
+        state = cursor.fetchone()
+
+        cursor.close()
+        conn.close()
+
+        return jsonify({
+            "performance_all_time": {
+                "trades": trades,
+                "avg_pnl": avg_pnl,
+                "win_rate": win_rate
+            },
+            "performance_24h": {
+                "trades": trades_24h,
+                "avg_pnl": avg_pnl_24h,
+                "win_rate": win_rate_24h
+            },
+            "signals": {
+                "total": total_signals,
+                "long": long_signals,
+                "hold": hold_signals
+            },
+            "conversion": {
+                "rate_pct": conversion_rate
+            },
+            "vwap_stats": {
+                "min_distance": min_dist,
+                "max_distance": max_dist,
+                "avg_distance": avg_dist
+            },
+            "trade_distance": {
+                "avg": trade_avg_dist,
+                "min": trade_min_dist,
+                "max": trade_max_dist
+            },
+            "last_signal": last_signal,
+            "recent_trades": recent_trades,
+            "current_trade": {
+                "open": state[0],
+                "direction": state[1],
+                "entry": state[2],
+                "stop": state[3],
+                "target": state[4],
+                "symbol": state[5]
+            }
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
     conn = None
@@ -66,14 +205,12 @@ def webhook():
             decision = "LONG"
             reason = "Valid VWAP deviation"
 
-        # Highlight extreme setups (for future analysis)
         extreme_flag = distance < EXTREME_THRESHOLD
 
         conn = get_db_connection()
         conn.autocommit = True
         cursor = conn.cursor()
 
-        # Store signal
         cursor.execute(
             """
             INSERT INTO signal_history
@@ -97,7 +234,7 @@ def webhook():
         print("Extreme setup:", extreme_flag)
         print("Signal ID:", new_signal_id)
 
-        # Forward fill future prices
+        # Forward fill
         cursor.execute(
             "UPDATE signal_history SET price_after_3_candles = %s WHERE id = %s AND price_after_3_candles IS NULL",
             (price, new_signal_id - 3),
@@ -111,7 +248,6 @@ def webhook():
             (price, new_signal_id - 10),
         )
 
-        # Load bot state
         cursor.execute(
             "SELECT trade_open, direction, entry_price, stop_price, target_price, opened_at, symbol FROM bot_state WHERE id = 1"
         )
@@ -122,7 +258,7 @@ def webhook():
 
         trade_open, direction, entry_price, stop_price, target_price, opened_at, state_symbol = state
 
-        # === ENTRY ===
+        # ENTRY
         if not trade_open and decision == "LONG":
             entry_price = price
             stop_price = entry_price * (1 - STOP_LOSS / 100)
@@ -146,7 +282,7 @@ def webhook():
             print("\n🚀 TRADE OPENED")
             print("Entry:", entry_price)
 
-        # === MANAGEMENT ===
+        # MANAGEMENT
         elif trade_open:
             print("\nTrade open:", direction, "| Symbol:", state_symbol)
 
