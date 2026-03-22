@@ -40,73 +40,56 @@ def health():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
-# ================================
-# 📊 COMMAND CENTRE ENDPOINT
-# ================================
 @app.route("/stats")
 def stats():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        # === PERFORMANCE (ALL TIME) ===
         cursor.execute("""
-            SELECT
-                COUNT(*),
-                ROUND(AVG(pnl_pct), 3),
-                ROUND(AVG(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) * 100, 1)
+            SELECT COUNT(*),
+                   ROUND(AVG(pnl_pct), 3),
+                   ROUND(AVG(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) * 100, 1)
             FROM trade_history
         """)
         trades, avg_pnl, win_rate = cursor.fetchone()
 
-        # === PERFORMANCE (LAST 24H) ===
         cursor.execute("""
-            SELECT
-                COUNT(*),
-                ROUND(AVG(pnl_pct), 3),
-                ROUND(AVG(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) * 100, 1)
+            SELECT COUNT(*),
+                   ROUND(AVG(pnl_pct), 3),
+                   ROUND(AVG(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) * 100, 1)
             FROM trade_history
             WHERE opened_at >= NOW() - INTERVAL '24 hours'
         """)
         trades_24h, avg_pnl_24h, win_rate_24h = cursor.fetchone()
 
-        # === SIGNAL FLOW ===
         cursor.execute("""
-            SELECT
-                COUNT(*),
-                COUNT(*) FILTER (WHERE decision = 'LONG'),
-                COUNT(*) FILTER (WHERE decision = 'HOLD')
+            SELECT COUNT(*),
+                   COUNT(*) FILTER (WHERE decision = 'LONG'),
+                   COUNT(*) FILTER (WHERE decision = 'HOLD')
             FROM signal_history
         """)
         total_signals, long_signals, hold_signals = cursor.fetchone()
 
-        # === CONVERSION RATE ===
-        conversion_rate = 0
-        if total_signals > 0:
-            conversion_rate = round((long_signals / total_signals) * 100, 2)
+        conversion_rate = round((long_signals / total_signals) * 100, 2) if total_signals else 0
 
-        # === VWAP DISTANCE STATS ===
         cursor.execute("""
-            SELECT
-                ROUND(MIN(distance_from_vwap_pct), 3),
-                ROUND(MAX(distance_from_vwap_pct), 3),
-                ROUND(AVG(distance_from_vwap_pct), 3)
+            SELECT ROUND(MIN(distance_from_vwap_pct), 3),
+                   ROUND(MAX(distance_from_vwap_pct), 3),
+                   ROUND(AVG(distance_from_vwap_pct), 3)
             FROM signal_history
         """)
         min_dist, max_dist, avg_dist = cursor.fetchone()
 
-        # === TRADE DISTANCE (EDGE DATA) ===
         cursor.execute("""
-            SELECT
-                ROUND(AVG(distance_from_vwap_pct), 3),
-                ROUND(MIN(distance_from_vwap_pct), 3),
-                ROUND(MAX(distance_from_vwap_pct), 3)
+            SELECT ROUND(AVG(distance_from_vwap_pct), 3),
+                   ROUND(MIN(distance_from_vwap_pct), 3),
+                   ROUND(MAX(distance_from_vwap_pct), 3)
             FROM signal_history
             WHERE decision = 'LONG'
         """)
         trade_avg_dist, trade_min_dist, trade_max_dist = cursor.fetchone()
 
-        # === LAST SIGNAL ===
         cursor.execute("""
             SELECT symbol, price, vwap, distance_from_vwap_pct, decision, created_at
             FROM signal_history
@@ -115,7 +98,6 @@ def stats():
         """)
         last_signal = cursor.fetchone()
 
-        # === LAST 5 TRADES ===
         cursor.execute("""
             SELECT symbol, result, pnl_pct, entry_price, exit_price, opened_at
             FROM trade_history
@@ -124,7 +106,6 @@ def stats():
         """)
         recent_trades = cursor.fetchall()
 
-        # === CURRENT TRADE STATE ===
         cursor.execute("""
             SELECT trade_open, direction, entry_price, stop_price, target_price, symbol
             FROM bot_state WHERE id = 1
@@ -150,9 +131,7 @@ def stats():
                 "long": long_signals,
                 "hold": hold_signals
             },
-            "conversion": {
-                "rate_pct": conversion_rate
-            },
+            "conversion": {"rate_pct": conversion_rate},
             "vwap_stats": {
                 "min_distance": min_dist,
                 "max_distance": max_dist,
@@ -194,7 +173,6 @@ def webhook():
 
         distance = ((price - vwap) / vwap) * 100
 
-        # === DECISION LOGIC ===
         decision = "HOLD"
 
         if atr <= MIN_ATR:
@@ -204,8 +182,6 @@ def webhook():
         else:
             decision = "LONG"
             reason = "Valid VWAP deviation"
-
-        extreme_flag = distance < EXTREME_THRESHOLD
 
         conn = get_db_connection()
         conn.autocommit = True
@@ -223,38 +199,17 @@ def webhook():
         new_signal_id = cursor.fetchone()[0]
 
         print("\n==============================")
-        print("Signal received")
-        print("Symbol:", symbol)
-        print("Price:", price)
-        print("VWAP:", vwap)
-        print("ATR:", atr)
-        print("Distance:", round(distance, 3), "%")
-        print("Decision:", decision)
-        print("Reason:", reason)
-        print("Extreme setup:", extreme_flag)
-        print("Signal ID:", new_signal_id)
+        print("Signal:", symbol, "| Distance:", round(distance, 3), "% | Decision:", decision)
 
-        # Forward fill
-        cursor.execute(
-            "UPDATE signal_history SET price_after_3_candles = %s WHERE id = %s AND price_after_3_candles IS NULL",
-            (price, new_signal_id - 3),
-        )
-        cursor.execute(
-            "UPDATE signal_history SET price_after_5_candles = %s WHERE id = %s AND price_after_5_candles IS NULL",
-            (price, new_signal_id - 5),
-        )
-        cursor.execute(
-            "UPDATE signal_history SET price_after_10_candles = %s WHERE id = %s AND price_after_10_candles IS NULL",
-            (price, new_signal_id - 10),
-        )
-
-        cursor.execute(
-            "SELECT trade_open, direction, entry_price, stop_price, target_price, opened_at, symbol FROM bot_state WHERE id = 1"
-        )
+        # Load state
+        cursor.execute("""
+            SELECT trade_open, direction, entry_price, stop_price, target_price, opened_at, symbol
+            FROM bot_state WHERE id = 1
+        """)
         state = cursor.fetchone()
 
         if state is None:
-            return jsonify({"status": "error", "message": "bot_state row missing"}), 500
+            return jsonify({"status": "error"}), 500
 
         trade_open, direction, entry_price, stop_price, target_price, opened_at, state_symbol = state
 
@@ -264,8 +219,7 @@ def webhook():
             stop_price = entry_price * (1 - STOP_LOSS / 100)
             target_price = entry_price * (1 + TAKE_PROFIT / 100)
 
-            cursor.execute(
-                """
+            cursor.execute("""
                 UPDATE bot_state
                 SET trade_open = TRUE,
                     direction = %s,
@@ -275,16 +229,15 @@ def webhook():
                     opened_at = NOW(),
                     symbol = %s
                 WHERE id = 1
-                """,
-                ("LONG", entry_price, stop_price, target_price, symbol),
-            )
+            """, ("LONG", entry_price, stop_price, target_price, symbol))
 
-            print("\n🚀 TRADE OPENED")
-            print("Entry:", entry_price)
+            print("🚀 TRADE OPENED:", symbol, entry_price)
 
-        # MANAGEMENT
+        # MANAGEMENT (FIXED)
         elif trade_open:
-            print("\nTrade open:", direction, "| Symbol:", state_symbol)
+            if symbol != state_symbol:
+                print(f"⚠️ Ignoring {symbol} update for active {state_symbol} trade")
+                return jsonify({"status": "ignored"}), 200
 
             close_trade = False
             result = None
@@ -300,27 +253,22 @@ def webhook():
             if close_trade:
                 pnl_pct = ((price - float(entry_price)) / float(entry_price)) * 100
 
-                cursor.execute(
-                    """
-                    INSERT INTO trade_history
-                    (symbol, direction, entry_price, stop_price, target_price, exit_price, result, pnl_pct, opened_at, closed_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                    """,
-                    (
-                        state_symbol,
-                        direction,
-                        float(entry_price),
-                        float(stop_price),
-                        float(target_price),
-                        price,
-                        result,
-                        pnl_pct,
-                        opened_at,
-                    ),
-                )
+                # SAFETY GUARD (prevent corrupted trades)
+                if pnl_pct < -5:
+                    print("🚨 Abnormal PnL detected, skipping trade record")
+                else:
+                    cursor.execute("""
+                        INSERT INTO trade_history
+                        (symbol, direction, entry_price, stop_price, target_price, exit_price, result, pnl_pct, opened_at, closed_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                    """, (
+                        state_symbol, direction,
+                        float(entry_price), float(stop_price),
+                        float(target_price), price,
+                        result, pnl_pct, opened_at
+                    ))
 
-                cursor.execute(
-                    """
+                cursor.execute("""
                     UPDATE bot_state
                     SET trade_open = FALSE,
                         direction = NULL,
@@ -330,12 +278,9 @@ def webhook():
                         opened_at = NULL,
                         symbol = NULL
                     WHERE id = 1
-                    """
-                )
+                """)
 
-                print("\n✅ TRADE CLOSED")
-                print("Result:", result)
-                print("PnL:", round(pnl_pct, 3))
+                print("✅ TRADE CLOSED:", result, round(pnl_pct, 3))
 
         return jsonify({"status": "ok"}), 200
 
