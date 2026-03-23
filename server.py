@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 import os
 import psycopg2
+import requests
 
 app = Flask(__name__)
 
@@ -11,6 +12,28 @@ EXTREME_THRESHOLD = -1.5
 STOP_LOSS = 0.4
 TAKE_PROFIT = 0.8
 MIN_ATR = 80
+
+
+# ================================
+# 📩 TELEGRAM FUNCTION
+# ================================
+def send_telegram(msg):
+    token = os.getenv("TELEGRAM_TOKEN")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+
+    if not token or not chat_id:
+        print("⚠️ Telegram not configured")
+        return
+
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+
+    try:
+        requests.post(url, json={
+            "chat_id": chat_id,
+            "text": msg
+        })
+    except Exception as e:
+        print("Telegram error:", e)
 
 
 def get_db_connection():
@@ -35,13 +58,16 @@ def health():
         cur.fetchone()
         cur.close()
         conn.close()
-        return jsonify({"status": "ok", "database": "connected"})
+        return jsonify({"status": "ok"})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
-@app.route("/stats")
-def stats():
+# ================================
+# 📊 DAILY REPORT
+# ================================
+@app.route("/daily-report")
+def daily_report():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -51,113 +77,32 @@ def stats():
                    ROUND(AVG(pnl_pct), 3),
                    ROUND(AVG(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) * 100, 1)
             FROM trade_history
-        """)
-        trades, avg_pnl, win_rate = cursor.fetchone()
-
-        cursor.execute("""
-            SELECT COUNT(*),
-                   ROUND(AVG(pnl_pct), 3),
-                   ROUND(AVG(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) * 100, 1)
-            FROM trade_history
             WHERE opened_at >= NOW() - INTERVAL '24 hours'
         """)
-        trades_24h, avg_pnl_24h, win_rate_24h = cursor.fetchone()
 
-        cursor.execute("""
-            SELECT COUNT(*),
-                   COUNT(*) FILTER (WHERE decision = 'LONG'),
-                   COUNT(*) FILTER (WHERE decision = 'HOLD')
-            FROM signal_history
-        """)
-        total_signals, long_signals, hold_signals = cursor.fetchone()
+        trades, avg_pnl, win_rate = cursor.fetchone()
 
-        conversion_rate = round((long_signals / total_signals) * 100, 2) if total_signals else 0
+        msg = (
+            f"📊 DAILY REPORT\n"
+            f"Trades: {trades}\n"
+            f"Win rate: {win_rate}%\n"
+            f"Avg PnL: {avg_pnl}%"
+        )
 
-        cursor.execute("""
-            SELECT ROUND(MIN(distance_from_vwap_pct), 3),
-                   ROUND(MAX(distance_from_vwap_pct), 3),
-                   ROUND(AVG(distance_from_vwap_pct), 3)
-            FROM signal_history
-        """)
-        min_dist, max_dist, avg_dist = cursor.fetchone()
-
-        cursor.execute("""
-            SELECT ROUND(AVG(distance_from_vwap_pct), 3),
-                   ROUND(MIN(distance_from_vwap_pct), 3),
-                   ROUND(MAX(distance_from_vwap_pct), 3)
-            FROM signal_history
-            WHERE decision = 'LONG'
-        """)
-        trade_avg_dist, trade_min_dist, trade_max_dist = cursor.fetchone()
-
-        cursor.execute("""
-            SELECT symbol, price, vwap, distance_from_vwap_pct, decision, created_at
-            FROM signal_history
-            ORDER BY created_at DESC
-            LIMIT 1
-        """)
-        last_signal = cursor.fetchone()
-
-        cursor.execute("""
-            SELECT symbol, result, pnl_pct, entry_price, exit_price, opened_at
-            FROM trade_history
-            ORDER BY opened_at DESC
-            LIMIT 5
-        """)
-        recent_trades = cursor.fetchall()
-
-        cursor.execute("""
-            SELECT trade_open, direction, entry_price, stop_price, target_price, symbol
-            FROM bot_state WHERE id = 1
-        """)
-        state = cursor.fetchone()
+        send_telegram(msg)
 
         cursor.close()
         conn.close()
 
-        return jsonify({
-            "performance_all_time": {
-                "trades": trades,
-                "avg_pnl": avg_pnl,
-                "win_rate": win_rate
-            },
-            "performance_24h": {
-                "trades": trades_24h,
-                "avg_pnl": avg_pnl_24h,
-                "win_rate": win_rate_24h
-            },
-            "signals": {
-                "total": total_signals,
-                "long": long_signals,
-                "hold": hold_signals
-            },
-            "conversion": {"rate_pct": conversion_rate},
-            "vwap_stats": {
-                "min_distance": min_dist,
-                "max_distance": max_dist,
-                "avg_distance": avg_dist
-            },
-            "trade_distance": {
-                "avg": trade_avg_dist,
-                "min": trade_min_dist,
-                "max": trade_max_dist
-            },
-            "last_signal": last_signal,
-            "recent_trades": recent_trades,
-            "current_trade": {
-                "open": state[0],
-                "direction": state[1],
-                "entry": state[2],
-                "stop": state[3],
-                "target": state[4],
-                "symbol": state[5]
-            }
-        })
+        return jsonify({"status": "sent"})
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
+# ================================
+# 🚀 WEBHOOK
+# ================================
 @app.route("/webhook", methods=["POST"])
 def webhook():
     conn = None
@@ -183,50 +128,36 @@ def webhook():
             decision = "LONG"
             reason = "Valid VWAP deviation"
 
-        # 🔥 Detect extreme setups
         is_extreme = distance < EXTREME_THRESHOLD
 
         conn = get_db_connection()
         conn.autocommit = True
         cursor = conn.cursor()
 
-        cursor.execute(
-            """
+        # SAVE SIGNAL
+        cursor.execute("""
             INSERT INTO signal_history
             (symbol, price, vwap, distance_from_vwap_pct, decision, is_extreme)
             VALUES (%s, %s, %s, %s, %s, %s)
-            """,
-            (symbol, price, vwap, distance, decision, is_extreme),
-        )
+        """, (symbol, price, vwap, distance, decision, is_extreme))
 
-        print("\n==============================")
-        print("Signal:", symbol, "| Distance:", round(distance, 3), "% | Decision:", decision)
-
-        if is_extreme:
-            print("🔥 EXTREME SETUP DETECTED")
-
-        # Load state
+        # LOAD STATE
         cursor.execute("""
             SELECT trade_open, direction, entry_price, stop_price, target_price, opened_at, symbol
             FROM bot_state WHERE id = 1
         """)
         state = cursor.fetchone()
 
-        if state is None:
-            return jsonify({"status": "error"}), 500
-
         trade_open, direction, entry_price, stop_price, target_price, opened_at, state_symbol = state
 
+        # ================================
         # ENTRY
+        # ================================
         if not trade_open and decision == "LONG":
 
-            if is_extreme:
-                print("🔥 EXTREME TRADE ENTRY")
-            else:
-                print("🟡 NORMAL TRADE ENTRY")
-
             entry_price = price
-            entry_distance = distance  # 🔥 STORE TRUE ENTRY DISTANCE
+            entry_distance = distance
+
             stop_price = entry_price * (1 - STOP_LOSS / 100)
             target_price = entry_price * (1 + TAKE_PROFIT / 100)
 
@@ -242,12 +173,23 @@ def webhook():
                 WHERE id = 1
             """, ("LONG", entry_price, stop_price, target_price, symbol))
 
-            print("🚀 TRADE OPENED:", symbol, entry_price)
+            print("🚀 TRADE OPENED:", symbol)
 
+            # 📩 TELEGRAM ALERT
+            send_telegram(
+                f"🚀 TRADE OPENED\n"
+                f"{symbol}\n"
+                f"Entry: {entry_price}\n"
+                f"Distance: {round(entry_distance, 3)}%\n"
+                f"{'🔥 EXTREME' if is_extreme else '🟡 NORMAL'}"
+            )
+
+        # ================================
         # MANAGEMENT
+        # ================================
         elif trade_open:
+
             if symbol != state_symbol:
-                print(f"⚠️ Ignoring {symbol} update for active {state_symbol} trade")
                 return jsonify({"status": "ignored"}), 200
 
             close_trade = False
@@ -264,25 +206,43 @@ def webhook():
             if close_trade:
                 pnl_pct = ((price - float(entry_price)) / float(entry_price)) * 100
 
-                if pnl_pct < -5:
-                    print("🚨 Abnormal PnL detected, skipping trade record")
-                else:
-                    cursor.execute("""
-                        INSERT INTO trade_history
-                        (symbol, direction, entry_price, stop_price, target_price, exit_price, result, pnl_pct, opened_at, closed_at, entry_distance)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), %s)
-                    """, (
-                        state_symbol,
-                        direction,
-                        float(entry_price),
-                        float(stop_price),
-                        float(target_price),
-                        price,
-                        result,
-                        pnl_pct,
-                        opened_at,
-                        entry_distance  # 🔥 USE STORED ENTRY VALUE
-                    ))
+                cursor.execute("""
+                    INSERT INTO trade_history
+                    (symbol, direction, entry_price, stop_price, target_price, exit_price, result, pnl_pct, opened_at, closed_at, entry_distance)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), %s)
+                """, (
+                    state_symbol,
+                    direction,
+                    float(entry_price),
+                    float(stop_price),
+                    float(target_price),
+                    price,
+                    result,
+                    pnl_pct,
+                    opened_at,
+                    entry_distance
+                ))
+
+                print("✅ TRADE CLOSED:", result)
+
+                # 📩 TELEGRAM CLOSE ALERT
+                send_telegram(
+                    f"✅ TRADE CLOSED\n"
+                    f"{state_symbol}\n"
+                    f"Result: {result}\n"
+                    f"PnL: {round(pnl_pct, 3)}%"
+                )
+
+                # 🔥 WIN STREAK ALERT
+                cursor.execute("""
+                    SELECT result FROM trade_history
+                    ORDER BY opened_at DESC
+                    LIMIT 3
+                """)
+                last = [r[0] for r in cursor.fetchall()]
+
+                if last.count("WIN") == 3:
+                    send_telegram("🔥 3 WIN STREAK")
 
                 cursor.execute("""
                     UPDATE bot_state
@@ -296,13 +256,11 @@ def webhook():
                     WHERE id = 1
                 """)
 
-                print("✅ TRADE CLOSED:", result, round(pnl_pct, 3))
-
         return jsonify({"status": "ok"}), 200
 
     except Exception as e:
         print("ERROR:", str(e))
-        return jsonify({"status": "error", "message": str(e)}), 500
+        return jsonify({"error": str(e)}), 500
 
     finally:
         if cursor:
