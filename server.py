@@ -15,23 +15,24 @@ MIN_ATR = 80
 
 
 # ================================
-# 📩 TELEGRAM FUNCTION
+# 📩 TELEGRAM FUNCTION (SAFE)
 # ================================
 def send_telegram(msg):
-    token = os.getenv("TELEGRAM_TOKEN")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID")
-
-    if not token or not chat_id:
-        print("⚠️ Telegram not configured")
-        return
-
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-
     try:
+        token = os.getenv("TELEGRAM_TOKEN")
+        chat_id = os.getenv("TELEGRAM_CHAT_ID")
+
+        if not token or not chat_id:
+            print("⚠️ Telegram not configured")
+            return
+
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+
         requests.post(url, json={
             "chat_id": chat_id,
             "text": msg
-        })
+        }, timeout=5)
+
     except Exception as e:
         print("Telegram error:", e)
 
@@ -141,14 +142,14 @@ def webhook():
             VALUES (%s, %s, %s, %s, %s, %s)
         """, (symbol, price, vwap, distance, decision, is_extreme))
 
-        # LOAD STATE
+        # LOAD STATE (WITH entry_distance)
         cursor.execute("""
-            SELECT trade_open, direction, entry_price, stop_price, target_price, opened_at, symbol
+            SELECT trade_open, direction, entry_price, stop_price, target_price, opened_at, symbol, entry_distance
             FROM bot_state WHERE id = 1
         """)
         state = cursor.fetchone()
 
-        trade_open, direction, entry_price, stop_price, target_price, opened_at, state_symbol = state
+        trade_open, direction, entry_price, stop_price, target_price, opened_at, state_symbol, entry_distance = state
 
         # ================================
         # ENTRY
@@ -169,13 +170,13 @@ def webhook():
                     stop_price = %s,
                     target_price = %s,
                     opened_at = NOW(),
-                    symbol = %s
+                    symbol = %s,
+                    entry_distance = %s
                 WHERE id = 1
-            """, ("LONG", entry_price, stop_price, target_price, symbol))
+            """, ("LONG", entry_price, stop_price, target_price, symbol, entry_distance))
 
             print("🚀 TRADE OPENED:", symbol)
 
-            # 📩 TELEGRAM ALERT
             send_telegram(
                 f"🚀 TRADE OPENED\n"
                 f"{symbol}\n"
@@ -225,7 +226,6 @@ def webhook():
 
                 print("✅ TRADE CLOSED:", result)
 
-                # 📩 TELEGRAM CLOSE ALERT
                 send_telegram(
                     f"✅ TRADE CLOSED\n"
                     f"{state_symbol}\n"
@@ -233,7 +233,7 @@ def webhook():
                     f"PnL: {round(pnl_pct, 3)}%"
                 )
 
-                # 🔥 WIN STREAK ALERT
+                # WIN STREAK CHECK
                 cursor.execute("""
                     SELECT result FROM trade_history
                     ORDER BY opened_at DESC
@@ -252,7 +252,8 @@ def webhook():
                         stop_price = NULL,
                         target_price = NULL,
                         opened_at = NULL,
-                        symbol = NULL
+                        symbol = NULL,
+                        entry_distance = NULL
                     WHERE id = 1
                 """)
 
@@ -267,3 +268,8 @@ def webhook():
             cursor.close()
         if conn:
             conn.close()
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
