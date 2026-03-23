@@ -14,6 +14,33 @@ TAKE_PROFIT = 0.8
 MIN_ATR = 80
 
 
+@app.route("/stats")
+def stats():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT COUNT(*),
+                   ROUND(AVG(pnl_pct), 3),
+                   ROUND(AVG(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) * 100, 1)
+            FROM trade_history
+        """)
+        trades, avg_pnl, win_rate = cursor.fetchone()
+
+        cursor.close()
+        conn.close()
+
+        return jsonify({
+            "trades": trades,
+            "avg_pnl": avg_pnl,
+            "win_rate": win_rate
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 # ================================
 # 📩 TELEGRAM FUNCTION (SAFE)
 # ================================
