@@ -193,11 +193,11 @@ def webhook():
         cursor.execute(
             """
             INSERT INTO signal_history
-            (symbol, price, vwap, distance_from_vwap_pct, decision)
-            VALUES (%s, %s, %s, %s, %s)
+            (symbol, price, vwap, distance_from_vwap_pct, decision, is_extreme)
+            VALUES (%s, %s, %s, %s, %s, %s)
             RETURNING id
             """,
-            (symbol, price, vwap, distance, decision),
+            (symbol, price, vwap, distance, decision, is_extreme),
         )
 
         print("\n==============================")
