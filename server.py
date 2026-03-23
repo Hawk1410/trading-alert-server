@@ -195,7 +195,6 @@ def webhook():
             INSERT INTO signal_history
             (symbol, price, vwap, distance_from_vwap_pct, decision, is_extreme)
             VALUES (%s, %s, %s, %s, %s, %s)
-            RETURNING id
             """,
             (symbol, price, vwap, distance, decision, is_extreme),
         )
@@ -227,6 +226,7 @@ def webhook():
                 print("🟡 NORMAL TRADE ENTRY")
 
             entry_price = price
+            entry_distance = distance  # 🔥 STORE TRUE ENTRY DISTANCE
             stop_price = entry_price * (1 - STOP_LOSS / 100)
             target_price = entry_price * (1 + TAKE_PROFIT / 100)
 
@@ -269,13 +269,19 @@ def webhook():
                 else:
                     cursor.execute("""
                         INSERT INTO trade_history
-                        (symbol, direction, entry_price, stop_price, target_price, exit_price, result, pnl_pct, opened_at, closed_at)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                        (symbol, direction, entry_price, stop_price, target_price, exit_price, result, pnl_pct, opened_at, closed_at, entry_distance)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), %s)
                     """, (
-                        state_symbol, direction,
-                        float(entry_price), float(stop_price),
-                        float(target_price), price,
-                        result, pnl_pct, opened_at
+                        state_symbol,
+                        direction,
+                        float(entry_price),
+                        float(stop_price),
+                        float(target_price),
+                        price,
+                        result,
+                        pnl_pct,
+                        opened_at,
+                        entry_distance  # 🔥 USE STORED ENTRY VALUE
                     ))
 
                 cursor.execute("""
