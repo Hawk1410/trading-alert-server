@@ -183,6 +183,9 @@ def webhook():
             decision = "LONG"
             reason = "Valid VWAP deviation"
 
+        # 🔥 Detect extreme setups
+        is_extreme = distance < EXTREME_THRESHOLD
+
         conn = get_db_connection()
         conn.autocommit = True
         cursor = conn.cursor()
@@ -196,10 +199,12 @@ def webhook():
             """,
             (symbol, price, vwap, distance, decision),
         )
-        new_signal_id = cursor.fetchone()[0]
 
         print("\n==============================")
         print("Signal:", symbol, "| Distance:", round(distance, 3), "% | Decision:", decision)
+
+        if is_extreme:
+            print("🔥 EXTREME SETUP DETECTED")
 
         # Load state
         cursor.execute("""
@@ -215,6 +220,12 @@ def webhook():
 
         # ENTRY
         if not trade_open and decision == "LONG":
+
+            if is_extreme:
+                print("🔥 EXTREME TRADE ENTRY")
+            else:
+                print("🟡 NORMAL TRADE ENTRY")
+
             entry_price = price
             stop_price = entry_price * (1 - STOP_LOSS / 100)
             target_price = entry_price * (1 + TAKE_PROFIT / 100)
@@ -233,7 +244,7 @@ def webhook():
 
             print("🚀 TRADE OPENED:", symbol, entry_price)
 
-        # MANAGEMENT (FIXED)
+        # MANAGEMENT
         elif trade_open:
             if symbol != state_symbol:
                 print(f"⚠️ Ignoring {symbol} update for active {state_symbol} trade")
@@ -253,7 +264,6 @@ def webhook():
             if close_trade:
                 pnl_pct = ((price - float(entry_price)) / float(entry_price)) * 100
 
-                # SAFETY GUARD (prevent corrupted trades)
                 if pnl_pct < -5:
                     print("🚨 Abnormal PnL detected, skipping trade record")
                 else:
@@ -293,4 +303,3 @@ def webhook():
             cursor.close()
         if conn:
             conn.close()
-
