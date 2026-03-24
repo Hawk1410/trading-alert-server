@@ -6,7 +6,7 @@ import requests
 app = Flask(__name__)
 
 # === STRATEGY CONFIG ===
-LONG_THRESHOLD = -1.3
+LONG_THRESHOLD = -1.2
 EXTREME_THRESHOLD = -1.5
 
 STOP_LOSS = 0.4
@@ -295,5 +295,10 @@ def webhook():
             cursor.close()
         if conn:
             conn.close()
+
+@app.route("/test")
+def test():
+    send_telegram("🔥 BOT TEST WORKING")
+    return {"status": "ok"}
 
 
