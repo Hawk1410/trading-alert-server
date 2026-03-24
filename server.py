@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify
 import os
 import psycopg2
 import requests
+import traceback
 
 app = Flask(__name__)
 
@@ -51,11 +52,10 @@ def send_telegram(msg):
 
 
 # ================================
-# 🔥 FUTURE PRICE UPDATER
+# 🔥 FUTURE PRICE UPDATER (SAFE)
 # ================================
 def update_future_prices(cursor, current_price):
     try:
-        # 3 candles (15 mins)
         cursor.execute("""
             UPDATE signal_history
             SET price_after_3_candles = %s
@@ -63,7 +63,6 @@ def update_future_prices(cursor, current_price):
             AND created_at <= NOW() - INTERVAL '15 minutes'
         """, (current_price,))
 
-        # 5 candles (25 mins)
         cursor.execute("""
             UPDATE signal_history
             SET price_after_5_candles = %s
@@ -71,7 +70,6 @@ def update_future_prices(cursor, current_price):
             AND created_at <= NOW() - INTERVAL '25 minutes'
         """, (current_price,))
 
-        # 10 candles (50 mins)
         cursor.execute("""
             UPDATE signal_history
             SET price_after_10_candles = %s
@@ -81,6 +79,7 @@ def update_future_prices(cursor, current_price):
 
     except Exception as e:
         print("Future update error:", e)
+        print(traceback.format_exc())
 
 
 # ================================
@@ -173,21 +172,16 @@ def webhook():
         distance = ((price - vwap) / vwap) * 100
 
         decision = "HOLD"
-        reason = ""
 
         # ================================
         # DECISION LOGIC
         # ================================
         if atr <= MIN_ATR:
-            reason = "ATR too low"
-
+            pass
         elif distance < 0:
             decision = "LONG"
-            reason = "Below VWAP"
-
         elif distance > 0:
             decision = "SHORT"
-            reason = "Above VWAP"
 
         is_extreme = distance < EXTREME_THRESHOLD
 
@@ -198,8 +192,11 @@ def webhook():
         conn.autocommit = True
         cursor = conn.cursor()
 
-        # 🔥 UPDATE OLD ROWS FIRST
-        update_future_prices(cursor, price)
+        # 🔥 SAFE FUTURE UPDATE (won’t crash server)
+        try:
+            update_future_prices(cursor, price)
+        except Exception as e:
+            print("Skipped future update:", e)
 
         # ================================
         # SAVE SIGNAL
@@ -232,7 +229,7 @@ def webhook():
         trade_open, direction, entry_price, stop_price, target_price, opened_at, state_symbol, entry_distance = state
 
         # ================================
-        # ENTRY (LONG ONLY)
+        # ENTRY
         # ================================
         if not trade_open and decision == "LONG":
 
@@ -319,6 +316,7 @@ def webhook():
 
     except Exception as e:
         print("ERROR:", str(e))
+        print(traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
     finally:
