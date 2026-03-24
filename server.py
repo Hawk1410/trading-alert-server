@@ -6,17 +6,30 @@ import requests
 app = Flask(__name__)
 
 # === STRATEGY CONFIG ===
-LONG_THRESHOLD = -1.3
-SHORT_THRESHOLD = 1.3
+LONG_THRESHOLD = 999  # testing mode (change later)
+SHORT_THRESHOLD = 999  # for data collection
+
 EXTREME_THRESHOLD = -1.5
 
 STOP_LOSS = 0.4
 TAKE_PROFIT = 0.8
-MIN_ATR = 80
+
+MIN_ATR = 0  # testing mode (IMPORTANT)
 
 
 # ================================
-# 📩 TELEGRAM FUNCTION
+# DB CONNECTION
+# ================================
+def get_db_connection():
+    return psycopg2.connect(
+        os.getenv("DATABASE_URL"),
+        sslmode="require",
+        connect_timeout=10,
+    )
+
+
+# ================================
+# TELEGRAM
 # ================================
 def send_telegram(msg):
     try:
@@ -38,14 +51,9 @@ def send_telegram(msg):
         print("Telegram error:", e)
 
 
-def get_db_connection():
-    return psycopg2.connect(
-        os.getenv("DATABASE_URL"),
-        sslmode="require",
-        connect_timeout=10,
-    )
-
-
+# ================================
+# HEALTH
+# ================================
 @app.route("/")
 def home():
     return "Trading bot running"
@@ -66,7 +74,53 @@ def health():
 
 
 # ================================
-# 🚀 WEBHOOK
+# TEST TELEGRAM
+# ================================
+@app.route("/test")
+def test():
+    send_telegram("🔥 BOT TEST WORKING")
+    return {"status": "ok"}
+
+
+# ================================
+# DAILY REPORT
+# ================================
+@app.route("/daily-report")
+def daily_report():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT COUNT(*),
+                   ROUND(AVG(pnl_pct), 3),
+                   ROUND(AVG(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) * 100, 1)
+            FROM trade_history
+            WHERE opened_at >= NOW() - INTERVAL '24 hours'
+        """)
+
+        trades, avg_pnl, win_rate = cursor.fetchone()
+
+        msg = (
+            f"📊 DAILY REPORT\n"
+            f"Trades: {trades}\n"
+            f"Win rate: {win_rate}%\n"
+            f"Avg PnL: {avg_pnl}%"
+        )
+
+        send_telegram(msg)
+
+        cursor.close()
+        conn.close()
+
+        return jsonify({"status": "sent"})
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ================================
+# WEBHOOK
 # ================================
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -81,37 +135,56 @@ def webhook():
         vwap = float(data["vwap"])
         atr = float(data["atr"])
 
-        # NEW DATA
-        momentum = data.get("momentum", "unknown")
-        vwap_trend = data.get("vwap_trend", "unknown")
+        momentum = data.get("momentum")
+        vwap_trend = data.get("vwap_trend")
 
         distance = ((price - vwap) / vwap) * 100
 
         decision = "HOLD"
+        reason = ""
 
+        # ================================
+        # DECISION LOGIC (LONG + SHORT DATA)
+        # ================================
         if atr <= MIN_ATR:
             reason = "ATR too low"
-        elif distance < LONG_THRESHOLD:
-            decision = "LONG"
-        elif distance > SHORT_THRESHOLD:
-            decision = "SHORT_SIGNAL"
 
-        print(f"{symbol} | dist: {round(distance,3)} | mom: {momentum} | vwap_trend: {vwap_trend} | decision: {decision}")
+        elif distance < 0:
+            decision = "LONG"
+            reason = "Below VWAP"
+
+        elif distance > 0:
+            decision = "SHORT"
+            reason = "Above VWAP"
 
         is_extreme = distance < EXTREME_THRESHOLD
 
+        # ================================
+        # SAVE SIGNAL (NOW WITH ATR + DATA)
+        # ================================
         conn = get_db_connection()
         conn.autocommit = True
         cursor = conn.cursor()
 
-        # SAVE SIGNAL (UPDATED)
         cursor.execute("""
             INSERT INTO signal_history
-            (symbol, price, vwap, distance_from_vwap_pct, decision, is_extreme, momentum, vwap_trend)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        """, (symbol, price, vwap, distance, decision, is_extreme, momentum, vwap_trend))
+            (symbol, price, vwap, distance_from_vwap_pct, atr, decision, is_extreme, momentum, vwap_trend)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            symbol,
+            price,
+            vwap,
+            distance,
+            atr,
+            decision,
+            is_extreme,
+            momentum,
+            vwap_trend
+        ))
 
+        # ================================
         # LOAD STATE
+        # ================================
         cursor.execute("""
             SELECT trade_open, direction, entry_price, stop_price, target_price, opened_at, symbol, entry_distance
             FROM bot_state WHERE id = 1
@@ -120,7 +193,9 @@ def webhook():
 
         trade_open, direction, entry_price, stop_price, target_price, opened_at, state_symbol, entry_distance = state
 
-        # ENTRY
+        # ================================
+        # ENTRY (ONLY LONG FOR NOW)
+        # ================================
         if not trade_open and decision == "LONG":
 
             entry_price = price
@@ -142,16 +217,19 @@ def webhook():
                 WHERE id = 1
             """, ("LONG", entry_price, stop_price, target_price, symbol, entry_distance))
 
+            print("🚀 TRADE OPENED:", symbol)
+
             send_telegram(
                 f"🚀 TRADE OPENED\n"
                 f"{symbol}\n"
                 f"Entry: {entry_price}\n"
                 f"Distance: {round(entry_distance, 3)}%\n"
-                f"Momentum: {momentum}\n"
-                f"VWAP Trend: {vwap_trend}"
+                f"{'🔥 EXTREME' if is_extreme else '🟡 NORMAL'}"
             )
 
+        # ================================
         # MANAGEMENT
+        # ================================
         elif trade_open:
 
             if symbol != state_symbol:
@@ -188,6 +266,8 @@ def webhook():
                     entry_distance
                 ))
 
+                print("✅ TRADE CLOSED:", result)
+
                 send_telegram(
                     f"✅ TRADE CLOSED\n"
                     f"{state_symbol}\n"
@@ -219,12 +299,3 @@ def webhook():
             cursor.close()
         if conn:
             conn.close()
-
-
-# ================================
-# 🧪 TEST
-# ================================
-@app.route("/test")
-def test():
-    send_telegram("🔥 BOT TEST WORKING")
-    return {"status": "ok"}
