@@ -4,7 +4,7 @@ import psycopg2
 import requests
 import traceback
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 
 app = Flask(__name__)
 
@@ -134,7 +134,7 @@ def webhook():
         distance_abs = price - vwap
 
         # ================================
-        # CONTEXT CALCULATIONS
+        # CONTEXT
         # ================================
         signal_id = str(uuid.uuid4())
         session = get_session()
@@ -191,16 +191,50 @@ def webhook():
             (momentum == "down" and trend_15m == "down")
         ) else "counter"
 
-        # Entry strength (simple version)
+        # Entry strength
         entry_signal_strength = confluence_score * 25
 
-        # Market regime (basic)
+        # Market regime
         market_regime = "trend" if atr > 0.5 else "range"
 
         trade_taken = False
 
         # ================================
-        # SAVE SIGNAL
+        # ONLY TRADE ON 5m
+        # ================================
+        if timeframe == "5":
+
+            cursor.execute("""
+                SELECT trade_open, direction, entry_price, stop_price, target_price, opened_at, symbol
+                FROM bot_state WHERE id = 1
+            """)
+            state = cursor.fetchone()
+
+            trade_open, direction, entry_price, stop_price, target_price, opened_at, state_symbol = state
+
+            if not trade_open and decision_model == "LONG":
+
+                stop_price = price * (1 - STOP_LOSS / 100)
+                target_price = price * (1 + TAKE_PROFIT / 100)
+
+                cursor.execute("""
+                    UPDATE bot_state
+                    SET trade_open = TRUE,
+                        direction = %s,
+                        entry_price = %s,
+                        stop_price = %s,
+                        target_price = %s,
+                        opened_at = NOW(),
+                        symbol = %s
+                    WHERE id = 1
+                """, ("LONG", price, stop_price, target_price, symbol))
+
+                trade_taken = True  # 🔥 KEY LINE
+
+                send_telegram(f"🚀 LONG {symbol} @ {price}")
+
+        # ================================
+        # SAVE SIGNAL (AFTER decision)
         # ================================
         cursor.execute("""
             INSERT INTO signal_history (
@@ -220,45 +254,6 @@ def webhook():
             entry_signal_strength, trade_taken, confluence_score,
             trend_alignment, market_regime
         ))
-
-        # ================================
-        # ONLY TRADE ON 5m
-        # ================================
-        if timeframe != "5":
-            return jsonify({"status": "logged_only"}), 200
-
-        # ================================
-        # LOAD STATE
-        # ================================
-        cursor.execute("""
-            SELECT trade_open, direction, entry_price, stop_price, target_price, opened_at, symbol
-            FROM bot_state WHERE id = 1
-        """)
-        state = cursor.fetchone()
-
-        trade_open, direction, entry_price, stop_price, target_price, opened_at, state_symbol = state
-
-        # ================================
-        # ENTRY
-        # ================================
-        if not trade_open and decision_model == "LONG":
-
-            stop_price = price * (1 - STOP_LOSS / 100)
-            target_price = price * (1 + TAKE_PROFIT / 100)
-
-            cursor.execute("""
-                UPDATE bot_state
-                SET trade_open = TRUE,
-                    direction = %s,
-                    entry_price = %s,
-                    stop_price = %s,
-                    target_price = %s,
-                    opened_at = NOW(),
-                    symbol = %s
-                WHERE id = 1
-            """, ("LONG", price, stop_price, target_price, symbol))
-
-            send_telegram(f"🚀 LONG {symbol} @ {price}")
 
         return jsonify({"status": "ok"}), 200
 
