@@ -123,9 +123,12 @@ def webhook():
 
         momentum = data.get("momentum")
         vwap_trend = data.get("vwap_trend")
-        timeframe = data.get("timeframe")  # 👈 NEW
+        timeframe = data.get("timeframe")
+        volume = float(data.get("volume", 0))
+        candle_time = int(float(data.get("candle_time", 0)))
 
         distance = ((price - vwap) / vwap) * 100
+        distance_abs = price - vwap  # 🔥 NEW
 
         # ================================
         # DB
@@ -141,32 +144,6 @@ def webhook():
             pass
 
         # ================================
-        # SAVE SIGNAL (NOW WITH TIMEFRAME)
-        # ================================
-        cursor.execute("""
-            INSERT INTO signal_history
-            (symbol, price, vwap, distance_from_vwap_pct, atr, decision, is_extreme, momentum, vwap_trend, timeframe)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """, (
-            symbol,
-            price,
-            vwap,
-            distance,
-            atr,
-            "SIGNAL",
-            distance < -1.5,
-            momentum,
-            vwap_trend,
-            timeframe
-        ))
-
-        # ================================
-        # ONLY TRADE ON 5m
-        # ================================
-        if timeframe != "5":
-            return jsonify({"status": "logged_only"}), 200
-
-        # ================================
         # GET 15m TREND
         # ================================
         cursor.execute("""
@@ -180,28 +157,58 @@ def webhook():
 
         trend_15m = result[0] if result else None
 
-        decision = "HOLD"
+        # ================================
+        # MODEL DECISION
+        # ================================
+        decision_model = "HOLD"
 
-        # ================================
-        # STRATEGY V1
-        # ================================
         if atr > MIN_ATR:
 
-            # LONG
             if (
                 distance < -0.5
                 and momentum == "up"
                 and trend_15m == "up"
             ):
-                decision = "LONG"
+                decision_model = "LONG"
 
-            # SHORT
             elif (
                 distance > 0.5
                 and momentum == "down"
                 and trend_15m == "down"
             ):
-                decision = "SHORT"
+                decision_model = "SHORT"
+
+        # ================================
+        # SAVE SIGNAL (FULL DATASET)
+        # ================================
+        cursor.execute("""
+            INSERT INTO signal_history
+            (symbol, price, vwap, distance_from_vwap_pct, distance_abs, atr, volume, decision, decision_model, is_extreme, momentum, vwap_trend, timeframe, candle_time)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            symbol,
+            price,
+            vwap,
+            distance,
+            distance_abs,
+            atr,
+            volume,
+            "SIGNAL",
+            decision_model,
+            distance < -1.5,
+            momentum,
+            vwap_trend,
+            timeframe,
+            candle_time
+        ))
+
+        # ================================
+        # ONLY TRADE ON 5m
+        # ================================
+        if timeframe != "5":
+            return jsonify({"status": "logged_only"}), 200
+
+        decision = decision_model
 
         # ================================
         # LOAD STATE
