@@ -6,15 +6,14 @@ import requests
 app = Flask(__name__)
 
 # === STRATEGY CONFIG ===
-LONG_THRESHOLD = 999  # testing mode (change later)
-SHORT_THRESHOLD = 999  # for data collection
-
+LONG_THRESHOLD = 999
+SHORT_THRESHOLD = 999
 EXTREME_THRESHOLD = -1.5
 
 STOP_LOSS = 0.4
 TAKE_PROFIT = 0.8
 
-MIN_ATR = 0  # testing mode (IMPORTANT)
+MIN_ATR = 0
 
 
 # ================================
@@ -49,6 +48,39 @@ def send_telegram(msg):
 
     except Exception as e:
         print("Telegram error:", e)
+
+
+# ================================
+# 🔥 FUTURE PRICE UPDATER
+# ================================
+def update_future_prices(cursor, current_price):
+    try:
+        # 3 candles (15 mins)
+        cursor.execute("""
+            UPDATE signal_history
+            SET price_after_3_candles = %s
+            WHERE price_after_3_candles IS NULL
+            AND created_at <= NOW() - INTERVAL '15 minutes'
+        """, (current_price,))
+
+        # 5 candles (25 mins)
+        cursor.execute("""
+            UPDATE signal_history
+            SET price_after_5_candles = %s
+            WHERE price_after_5_candles IS NULL
+            AND created_at <= NOW() - INTERVAL '25 minutes'
+        """, (current_price,))
+
+        # 10 candles (50 mins)
+        cursor.execute("""
+            UPDATE signal_history
+            SET price_after_10_candles = %s
+            WHERE price_after_10_candles IS NULL
+            AND created_at <= NOW() - INTERVAL '50 minutes'
+        """, (current_price,))
+
+    except Exception as e:
+        print("Future update error:", e)
 
 
 # ================================
@@ -144,7 +176,7 @@ def webhook():
         reason = ""
 
         # ================================
-        # DECISION LOGIC (LONG + SHORT DATA)
+        # DECISION LOGIC
         # ================================
         if atr <= MIN_ATR:
             reason = "ATR too low"
@@ -160,12 +192,18 @@ def webhook():
         is_extreme = distance < EXTREME_THRESHOLD
 
         # ================================
-        # SAVE SIGNAL (NOW WITH ATR + DATA)
+        # DB
         # ================================
         conn = get_db_connection()
         conn.autocommit = True
         cursor = conn.cursor()
 
+        # 🔥 UPDATE OLD ROWS FIRST
+        update_future_prices(cursor, price)
+
+        # ================================
+        # SAVE SIGNAL
+        # ================================
         cursor.execute("""
             INSERT INTO signal_history
             (symbol, price, vwap, distance_from_vwap_pct, atr, decision, is_extreme, momentum, vwap_trend)
@@ -194,7 +232,7 @@ def webhook():
         trade_open, direction, entry_price, stop_price, target_price, opened_at, state_symbol, entry_distance = state
 
         # ================================
-        # ENTRY (ONLY LONG FOR NOW)
+        # ENTRY (LONG ONLY)
         # ================================
         if not trade_open and decision == "LONG":
 
@@ -217,14 +255,8 @@ def webhook():
                 WHERE id = 1
             """, ("LONG", entry_price, stop_price, target_price, symbol, entry_distance))
 
-            print("🚀 TRADE OPENED:", symbol)
-
             send_telegram(
-                f"🚀 TRADE OPENED\n"
-                f"{symbol}\n"
-                f"Entry: {entry_price}\n"
-                f"Distance: {round(entry_distance, 3)}%\n"
-                f"{'🔥 EXTREME' if is_extreme else '🟡 NORMAL'}"
+                f"🚀 TRADE OPENED\n{symbol}\nEntry: {entry_price}\nDistance: {round(entry_distance, 3)}%"
             )
 
         # ================================
@@ -266,13 +298,8 @@ def webhook():
                     entry_distance
                 ))
 
-                print("✅ TRADE CLOSED:", result)
-
                 send_telegram(
-                    f"✅ TRADE CLOSED\n"
-                    f"{state_symbol}\n"
-                    f"Result: {result}\n"
-                    f"PnL: {round(pnl_pct, 3)}%"
+                    f"✅ TRADE CLOSED\n{state_symbol}\nResult: {result}\nPnL: {round(pnl_pct, 3)}%"
                 )
 
                 cursor.execute("""
