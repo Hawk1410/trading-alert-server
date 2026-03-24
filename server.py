@@ -207,6 +207,7 @@ def webhook():
             if state:
                 trade_open, direction, entry_price, stop_price, target_price, opened_at, state_symbol = state
 
+                # ===== LONG =====
                 if not trade_open and decision_model == "LONG":
 
                     stop_price = price * (1 - STOP_LOSS / 100)
@@ -226,6 +227,27 @@ def webhook():
 
                     trade_taken = True
                     send_telegram(f"🚀 LONG {symbol} @ {price}")
+
+                # ===== SHORT =====
+                elif not trade_open and decision_model == "SHORT":
+
+                    stop_price = price * (1 + STOP_LOSS / 100)
+                    target_price = price * (1 - TAKE_PROFIT / 100)
+
+                    cursor.execute("""
+                        UPDATE bot_state
+                        SET trade_open = TRUE,
+                            direction = %s,
+                            entry_price = %s,
+                            stop_price = %s,
+                            target_price = %s,
+                            opened_at = NOW(),
+                            symbol = %s
+                        WHERE id = 1
+                    """, ("SHORT", price, stop_price, target_price, symbol))
+
+                    trade_taken = True
+                    send_telegram(f"📉 SHORT {symbol} @ {price}")
 
         # ================================
         # SAVE SIGNAL
@@ -261,4 +283,3 @@ def webhook():
             cursor.close()
         if conn:
             conn.close()
-            
