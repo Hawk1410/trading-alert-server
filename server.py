@@ -141,7 +141,6 @@ def webhook():
         spread_proxy = atr
         vwap_bucket = get_vwap_bucket(distance)
 
-        # Confluence
         confluence_score = 0
         if momentum == "up":
             confluence_score += 1
@@ -176,7 +175,6 @@ def webhook():
         decision_model = "HOLD"
 
         if atr > MIN_ATR:
-
             if distance < -0.5 and momentum == "up" and trend_15m == "up":
                 decision_model = "LONG"
                 confluence_score += 1
@@ -185,22 +183,18 @@ def webhook():
                 decision_model = "SHORT"
                 confluence_score += 1
 
-        # Trend alignment
         trend_alignment = "aligned" if (
             (momentum == "up" and trend_15m == "up") or
             (momentum == "down" and trend_15m == "down")
         ) else "counter"
 
-        # Entry strength
         entry_signal_strength = confluence_score * 25
-
-        # Market regime
         market_regime = "trend" if atr > 0.5 else "range"
 
         trade_taken = False
 
         # ================================
-        # ONLY TRADE ON 5m
+        # TRADE LOGIC (5m ONLY)
         # ================================
         if timeframe == "5":
 
@@ -210,31 +204,31 @@ def webhook():
             """)
             state = cursor.fetchone()
 
-            trade_open, direction, entry_price, stop_price, target_price, opened_at, state_symbol = state
+            if state:
+                trade_open, direction, entry_price, stop_price, target_price, opened_at, state_symbol = state
 
-            if not trade_open and decision_model == "LONG":
+                if not trade_open and decision_model == "LONG":
 
-                stop_price = price * (1 - STOP_LOSS / 100)
-                target_price = price * (1 + TAKE_PROFIT / 100)
+                    stop_price = price * (1 - STOP_LOSS / 100)
+                    target_price = price * (1 + TAKE_PROFIT / 100)
 
-                cursor.execute("""
-                    UPDATE bot_state
-                    SET trade_open = TRUE,
-                        direction = %s,
-                        entry_price = %s,
-                        stop_price = %s,
-                        target_price = %s,
-                        opened_at = NOW(),
-                        symbol = %s
-                    WHERE id = 1
-                """, ("LONG", price, stop_price, target_price, symbol))
+                    cursor.execute("""
+                        UPDATE bot_state
+                        SET trade_open = TRUE,
+                            direction = %s,
+                            entry_price = %s,
+                            stop_price = %s,
+                            target_price = %s,
+                            opened_at = NOW(),
+                            symbol = %s
+                        WHERE id = 1
+                    """, ("LONG", price, stop_price, target_price, symbol))
 
-                trade_taken = True  # 🔥 KEY LINE
-
-                send_telegram(f"🚀 LONG {symbol} @ {price}")
+                    trade_taken = True
+                    send_telegram(f"🚀 LONG {symbol} @ {price}")
 
         # ================================
-        # SAVE SIGNAL (AFTER decision)
+        # SAVE SIGNAL
         # ================================
         cursor.execute("""
             INSERT INTO signal_history (
@@ -267,3 +261,4 @@ def webhook():
             cursor.close()
         if conn:
             conn.close()
+            
