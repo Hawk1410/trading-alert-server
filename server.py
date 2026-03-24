@@ -6,7 +6,7 @@ import requests
 app = Flask(__name__)
 
 # === STRATEGY CONFIG ===
-LONG_THRESHOLD = -1.2
+LONG_THRESHOLD = 999
 EXTREME_THRESHOLD = -1.5
 
 STOP_LOSS = 0.4
