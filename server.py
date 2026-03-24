@@ -7,13 +7,8 @@ import traceback
 app = Flask(__name__)
 
 # === STRATEGY CONFIG ===
-LONG_THRESHOLD = 999
-SHORT_THRESHOLD = 999
-EXTREME_THRESHOLD = -1.5
-
 STOP_LOSS = 0.4
 TAKE_PROFIT = 0.8
-
 MIN_ATR = 0
 
 
@@ -52,7 +47,7 @@ def send_telegram(msg):
 
 
 # ================================
-# 🔥 FUTURE PRICE UPDATER (SAFE)
+# FUTURE PRICE UPDATER
 # ================================
 def update_future_prices(cursor, current_price):
     try:
@@ -104,50 +99,10 @@ def health():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
-# ================================
-# TEST TELEGRAM
-# ================================
 @app.route("/test")
 def test():
     send_telegram("🔥 BOT TEST WORKING")
     return {"status": "ok"}
-
-
-# ================================
-# DAILY REPORT
-# ================================
-@app.route("/daily-report")
-def daily_report():
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
-        cursor.execute("""
-            SELECT COUNT(*),
-                   ROUND(AVG(pnl_pct), 3),
-                   ROUND(AVG(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) * 100, 1)
-            FROM trade_history
-            WHERE opened_at >= NOW() - INTERVAL '24 hours'
-        """)
-
-        trades, avg_pnl, win_rate = cursor.fetchone()
-
-        msg = (
-            f"📊 DAILY REPORT\n"
-            f"Trades: {trades}\n"
-            f"Win rate: {win_rate}%\n"
-            f"Avg PnL: {avg_pnl}%"
-        )
-
-        send_telegram(msg)
-
-        cursor.close()
-        conn.close()
-
-        return jsonify({"status": "sent"})
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
 
 # ================================
@@ -168,22 +123,9 @@ def webhook():
 
         momentum = data.get("momentum")
         vwap_trend = data.get("vwap_trend")
+        timeframe = data.get("timeframe")  # 👈 NEW
 
         distance = ((price - vwap) / vwap) * 100
-
-        decision = "HOLD"
-
-        # ================================
-        # DECISION LOGIC
-        # ================================
-        if atr <= MIN_ATR:
-            pass
-        elif distance < 0:
-            decision = "LONG"
-        elif distance > 0:
-            decision = "SHORT"
-
-        is_extreme = distance < EXTREME_THRESHOLD
 
         # ================================
         # DB
@@ -192,52 +134,93 @@ def webhook():
         conn.autocommit = True
         cursor = conn.cursor()
 
-        # 🔥 SAFE FUTURE UPDATE (won’t crash server)
+        # Update old rows
         try:
             update_future_prices(cursor, price)
-        except Exception as e:
-            print("Skipped future update:", e)
+        except:
+            pass
 
         # ================================
-        # SAVE SIGNAL
+        # SAVE SIGNAL (NOW WITH TIMEFRAME)
         # ================================
         cursor.execute("""
             INSERT INTO signal_history
-            (symbol, price, vwap, distance_from_vwap_pct, atr, decision, is_extreme, momentum, vwap_trend)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (symbol, price, vwap, distance_from_vwap_pct, atr, decision, is_extreme, momentum, vwap_trend, timeframe)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             symbol,
             price,
             vwap,
             distance,
             atr,
-            decision,
-            is_extreme,
+            "SIGNAL",
+            distance < -1.5,
             momentum,
-            vwap_trend
+            vwap_trend,
+            timeframe
         ))
+
+        # ================================
+        # ONLY TRADE ON 5m
+        # ================================
+        if timeframe != "5":
+            return jsonify({"status": "logged_only"}), 200
+
+        # ================================
+        # GET 15m TREND
+        # ================================
+        cursor.execute("""
+            SELECT vwap_trend
+            FROM signal_history
+            WHERE symbol = %s AND timeframe = '15'
+            ORDER BY created_at DESC
+            LIMIT 1
+        """, (symbol,))
+        result = cursor.fetchone()
+
+        trend_15m = result[0] if result else None
+
+        decision = "HOLD"
+
+        # ================================
+        # STRATEGY V1
+        # ================================
+        if atr > MIN_ATR:
+
+            # LONG
+            if (
+                distance < -0.5
+                and momentum == "up"
+                and trend_15m == "up"
+            ):
+                decision = "LONG"
+
+            # SHORT
+            elif (
+                distance > 0.5
+                and momentum == "down"
+                and trend_15m == "down"
+            ):
+                decision = "SHORT"
 
         # ================================
         # LOAD STATE
         # ================================
         cursor.execute("""
-            SELECT trade_open, direction, entry_price, stop_price, target_price, opened_at, symbol, entry_distance
+            SELECT trade_open, direction, entry_price, stop_price, target_price, opened_at, symbol
             FROM bot_state WHERE id = 1
         """)
         state = cursor.fetchone()
 
-        trade_open, direction, entry_price, stop_price, target_price, opened_at, state_symbol, entry_distance = state
+        trade_open, direction, entry_price, stop_price, target_price, opened_at, state_symbol = state
 
         # ================================
         # ENTRY
         # ================================
         if not trade_open and decision == "LONG":
 
-            entry_price = price
-            entry_distance = distance
-
-            stop_price = entry_price * (1 - STOP_LOSS / 100)
-            target_price = entry_price * (1 + TAKE_PROFIT / 100)
+            stop_price = price * (1 - STOP_LOSS / 100)
+            target_price = price * (1 + TAKE_PROFIT / 100)
 
             cursor.execute("""
                 UPDATE bot_state
@@ -247,14 +230,11 @@ def webhook():
                     stop_price = %s,
                     target_price = %s,
                     opened_at = NOW(),
-                    symbol = %s,
-                    entry_distance = %s
+                    symbol = %s
                 WHERE id = 1
-            """, ("LONG", entry_price, stop_price, target_price, symbol, entry_distance))
+            """, ("LONG", price, stop_price, target_price, symbol))
 
-            send_telegram(
-                f"🚀 TRADE OPENED\n{symbol}\nEntry: {entry_price}\nDistance: {round(entry_distance, 3)}%"
-            )
+            send_telegram(f"🚀 LONG {symbol} @ {price}")
 
         # ================================
         # MANAGEMENT
@@ -280,8 +260,8 @@ def webhook():
 
                 cursor.execute("""
                     INSERT INTO trade_history
-                    (symbol, direction, entry_price, stop_price, target_price, exit_price, result, pnl_pct, opened_at, closed_at, entry_distance)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), %s)
+                    (symbol, direction, entry_price, stop_price, target_price, exit_price, result, pnl_pct, opened_at, closed_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                 """, (
                     state_symbol,
                     direction,
@@ -291,13 +271,10 @@ def webhook():
                     price,
                     result,
                     pnl_pct,
-                    opened_at,
-                    entry_distance
+                    opened_at
                 ))
 
-                send_telegram(
-                    f"✅ TRADE CLOSED\n{state_symbol}\nResult: {result}\nPnL: {round(pnl_pct, 3)}%"
-                )
+                send_telegram(f"✅ {result} {state_symbol} ({round(pnl_pct,2)}%)")
 
                 cursor.execute("""
                     UPDATE bot_state
@@ -307,8 +284,7 @@ def webhook():
                         stop_price = NULL,
                         target_price = NULL,
                         opened_at = NULL,
-                        symbol = NULL,
-                        entry_distance = NULL
+                        symbol = NULL
                     WHERE id = 1
                 """)
 
