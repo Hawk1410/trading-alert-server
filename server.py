@@ -3,6 +3,8 @@ import os
 import psycopg2
 import requests
 import traceback
+import uuid
+from datetime import datetime, timezone
 
 app = Flask(__name__)
 
@@ -32,7 +34,6 @@ def send_telegram(msg):
         chat_id = os.getenv("TELEGRAM_CHAT_ID")
 
         if not token or not chat_id:
-            print("⚠️ Telegram not configured")
             return
 
         url = f"https://api.telegram.org/bot{token}/sendMessage"
@@ -44,6 +45,36 @@ def send_telegram(msg):
 
     except Exception as e:
         print("Telegram error:", e)
+
+
+# ================================
+# SESSION DETECTOR
+# ================================
+def get_session():
+    hour = datetime.utcnow().hour
+
+    if 0 <= hour < 8:
+        return "asia"
+    elif 8 <= hour < 16:
+        return "london"
+    else:
+        return "ny"
+
+
+# ================================
+# VWAP BUCKET
+# ================================
+def get_vwap_bucket(distance):
+    d = abs(distance)
+
+    if d < 0.2:
+        return "0-0.2"
+    elif d < 0.5:
+        return "0.2-0.5"
+    elif d < 1:
+        return "0.5-1"
+    else:
+        return "1+"
 
 
 # ================================
@@ -74,35 +105,6 @@ def update_future_prices(cursor, current_price):
 
     except Exception as e:
         print("Future update error:", e)
-        print(traceback.format_exc())
-
-
-# ================================
-# HEALTH
-# ================================
-@app.route("/")
-def home():
-    return "Trading bot running"
-
-
-@app.route("/health")
-def health():
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT 1;")
-        cur.fetchone()
-        cur.close()
-        conn.close()
-        return jsonify({"status": "ok"})
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-
-@app.route("/test")
-def test():
-    send_telegram("🔥 BOT TEST WORKING")
-    return {"status": "ok"}
 
 
 # ================================
@@ -124,11 +126,27 @@ def webhook():
         momentum = data.get("momentum")
         vwap_trend = data.get("vwap_trend")
         timeframe = data.get("timeframe")
+
         volume = float(data.get("volume", 0))
         candle_time = int(float(data.get("candle_time", 0)))
 
         distance = ((price - vwap) / vwap) * 100
-        distance_abs = price - vwap  # 🔥 NEW
+        distance_abs = price - vwap
+
+        # ================================
+        # CONTEXT CALCULATIONS
+        # ================================
+        signal_id = str(uuid.uuid4())
+        session = get_session()
+        spread_proxy = atr
+        vwap_bucket = get_vwap_bucket(distance)
+
+        # Confluence
+        confluence_score = 0
+        if momentum == "up":
+            confluence_score += 1
+        if vwap_trend == "up":
+            confluence_score += 1
 
         # ================================
         # DB
@@ -137,11 +155,7 @@ def webhook():
         conn.autocommit = True
         cursor = conn.cursor()
 
-        # Update old rows
-        try:
-            update_future_prices(cursor, price)
-        except:
-            pass
+        update_future_prices(cursor, price)
 
         # ================================
         # GET 15m TREND
@@ -154,7 +168,6 @@ def webhook():
             LIMIT 1
         """, (symbol,))
         result = cursor.fetchone()
-
         trend_15m = result[0] if result else None
 
         # ================================
@@ -164,42 +177,48 @@ def webhook():
 
         if atr > MIN_ATR:
 
-            if (
-                distance < -0.5
-                and momentum == "up"
-                and trend_15m == "up"
-            ):
+            if distance < -0.5 and momentum == "up" and trend_15m == "up":
                 decision_model = "LONG"
+                confluence_score += 1
 
-            elif (
-                distance > 0.5
-                and momentum == "down"
-                and trend_15m == "down"
-            ):
+            elif distance > 0.5 and momentum == "down" and trend_15m == "down":
                 decision_model = "SHORT"
+                confluence_score += 1
+
+        # Trend alignment
+        trend_alignment = "aligned" if (
+            (momentum == "up" and trend_15m == "up") or
+            (momentum == "down" and trend_15m == "down")
+        ) else "counter"
+
+        # Entry strength (simple version)
+        entry_signal_strength = confluence_score * 25
+
+        # Market regime (basic)
+        market_regime = "trend" if atr > 0.5 else "range"
+
+        trade_taken = False
 
         # ================================
-        # SAVE SIGNAL (FULL DATASET)
+        # SAVE SIGNAL
         # ================================
         cursor.execute("""
-            INSERT INTO signal_history
-            (symbol, price, vwap, distance_from_vwap_pct, distance_abs, atr, volume, decision, decision_model, is_extreme, momentum, vwap_trend, timeframe, candle_time)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO signal_history (
+                symbol, price, vwap, distance_from_vwap_pct, distance_abs,
+                atr, volume, decision, decision_model, is_extreme,
+                momentum, vwap_trend, timeframe, candle_time,
+                signal_id, session, spread_proxy, vwap_distance_bucket,
+                entry_signal_strength, trade_taken, confluence_score,
+                trend_alignment, market_regime
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
-            symbol,
-            price,
-            vwap,
-            distance,
-            distance_abs,
-            atr,
-            volume,
-            "SIGNAL",
-            decision_model,
-            distance < -1.5,
-            momentum,
-            vwap_trend,
-            timeframe,
-            candle_time
+            symbol, price, vwap, distance, distance_abs,
+            atr, volume, "SIGNAL", decision_model, distance < -1.5,
+            momentum, vwap_trend, timeframe, candle_time,
+            signal_id, session, spread_proxy, vwap_bucket,
+            entry_signal_strength, trade_taken, confluence_score,
+            trend_alignment, market_regime
         ))
 
         # ================================
@@ -207,8 +226,6 @@ def webhook():
         # ================================
         if timeframe != "5":
             return jsonify({"status": "logged_only"}), 200
-
-        decision = decision_model
 
         # ================================
         # LOAD STATE
@@ -224,7 +241,7 @@ def webhook():
         # ================================
         # ENTRY
         # ================================
-        if not trade_open and decision == "LONG":
+        if not trade_open and decision_model == "LONG":
 
             stop_price = price * (1 - STOP_LOSS / 100)
             target_price = price * (1 + TAKE_PROFIT / 100)
@@ -242,58 +259,6 @@ def webhook():
             """, ("LONG", price, stop_price, target_price, symbol))
 
             send_telegram(f"🚀 LONG {symbol} @ {price}")
-
-        # ================================
-        # MANAGEMENT
-        # ================================
-        elif trade_open:
-
-            if symbol != state_symbol:
-                return jsonify({"status": "ignored"}), 200
-
-            close_trade = False
-            result = None
-
-            if direction == "LONG":
-                if price <= float(stop_price):
-                    result = "LOSS"
-                    close_trade = True
-                elif price >= float(target_price):
-                    result = "WIN"
-                    close_trade = True
-
-            if close_trade:
-                pnl_pct = ((price - float(entry_price)) / float(entry_price)) * 100
-
-                cursor.execute("""
-                    INSERT INTO trade_history
-                    (symbol, direction, entry_price, stop_price, target_price, exit_price, result, pnl_pct, opened_at, closed_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                """, (
-                    state_symbol,
-                    direction,
-                    float(entry_price),
-                    float(stop_price),
-                    float(target_price),
-                    price,
-                    result,
-                    pnl_pct,
-                    opened_at
-                ))
-
-                send_telegram(f"✅ {result} {state_symbol} ({round(pnl_pct,2)}%)")
-
-                cursor.execute("""
-                    UPDATE bot_state
-                    SET trade_open = FALSE,
-                        direction = NULL,
-                        entry_price = NULL,
-                        stop_price = NULL,
-                        target_price = NULL,
-                        opened_at = NULL,
-                        symbol = NULL
-                    WHERE id = 1
-                """)
 
         return jsonify({"status": "ok"}), 200
 
