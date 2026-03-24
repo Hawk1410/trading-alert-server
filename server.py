@@ -14,33 +14,6 @@ TAKE_PROFIT = 0.8
 MIN_ATR = 80
 
 
-@app.route("/stats")
-def stats():
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
-        cursor.execute("""
-            SELECT COUNT(*),
-                   ROUND(AVG(pnl_pct), 3),
-                   ROUND(AVG(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) * 100, 1)
-            FROM trade_history
-        """)
-        trades, avg_pnl, win_rate = cursor.fetchone()
-
-        cursor.close()
-        conn.close()
-
-        return jsonify({
-            "trades": trades,
-            "avg_pnl": avg_pnl,
-            "win_rate": win_rate
-        })
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
 # ================================
 # 📩 TELEGRAM FUNCTION (SAFE)
 # ================================
@@ -92,6 +65,36 @@ def health():
 
 
 # ================================
+# 📊 STATS
+# ================================
+@app.route("/stats")
+def stats():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT COUNT(*),
+                   COALESCE(ROUND(AVG(pnl_pct), 3), 0),
+                   COALESCE(ROUND(AVG(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) * 100, 1), 0)
+            FROM trade_history
+        """)
+        trades, avg_pnl, win_rate = cursor.fetchone()
+
+        cursor.close()
+        conn.close()
+
+        return jsonify({
+            "trades": trades,
+            "avg_pnl": avg_pnl,
+            "win_rate": win_rate
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ================================
 # 📊 DAILY REPORT
 # ================================
 @app.route("/daily-report")
@@ -102,8 +105,8 @@ def daily_report():
 
         cursor.execute("""
             SELECT COUNT(*),
-                   ROUND(AVG(pnl_pct), 3),
-                   ROUND(AVG(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) * 100, 1)
+                   COALESCE(ROUND(AVG(pnl_pct), 3), 0),
+                   COALESCE(ROUND(AVG(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) * 100, 1), 0)
             FROM trade_history
             WHERE opened_at >= NOW() - INTERVAL '24 hours'
         """)
@@ -156,6 +159,9 @@ def webhook():
             decision = "LONG"
             reason = "Valid VWAP deviation"
 
+        # 👇 DEBUG LINE (watch bot think)
+        print(f"{symbol} | distance: {round(distance,3)} | decision: {decision}")
+
         is_extreme = distance < EXTREME_THRESHOLD
 
         conn = get_db_connection()
@@ -169,7 +175,7 @@ def webhook():
             VALUES (%s, %s, %s, %s, %s, %s)
         """, (symbol, price, vwap, distance, decision, is_extreme))
 
-        # LOAD STATE (WITH entry_distance)
+        # LOAD STATE
         cursor.execute("""
             SELECT trade_open, direction, entry_price, stop_price, target_price, opened_at, symbol, entry_distance
             FROM bot_state WHERE id = 1
@@ -296,9 +302,11 @@ def webhook():
         if conn:
             conn.close()
 
+
+# ================================
+# 🧪 TEST TELEGRAM
+# ================================
 @app.route("/test")
 def test():
     send_telegram("🔥 BOT TEST WORKING")
     return {"status": "ok"}
-
-
