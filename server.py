@@ -6,7 +6,8 @@ import requests
 app = Flask(__name__)
 
 # === STRATEGY CONFIG ===
-LONG_THRESHOLD = 999
+LONG_THRESHOLD = -1.3
+SHORT_THRESHOLD = 1.3
 EXTREME_THRESHOLD = -1.5
 
 STOP_LOSS = 0.4
@@ -15,7 +16,7 @@ MIN_ATR = 80
 
 
 # ================================
-# 📩 TELEGRAM FUNCTION (SAFE)
+# 📩 TELEGRAM FUNCTION
 # ================================
 def send_telegram(msg):
     try:
@@ -65,73 +66,6 @@ def health():
 
 
 # ================================
-# 📊 STATS
-# ================================
-@app.route("/stats")
-def stats():
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
-        cursor.execute("""
-            SELECT COUNT(*),
-                   COALESCE(ROUND(AVG(pnl_pct), 3), 0),
-                   COALESCE(ROUND(AVG(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) * 100, 1), 0)
-            FROM trade_history
-        """)
-        trades, avg_pnl, win_rate = cursor.fetchone()
-
-        cursor.close()
-        conn.close()
-
-        return jsonify({
-            "trades": trades,
-            "avg_pnl": avg_pnl,
-            "win_rate": win_rate
-        })
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-# ================================
-# 📊 DAILY REPORT
-# ================================
-@app.route("/daily-report")
-def daily_report():
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
-        cursor.execute("""
-            SELECT COUNT(*),
-                   COALESCE(ROUND(AVG(pnl_pct), 3), 0),
-                   COALESCE(ROUND(AVG(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) * 100, 1), 0)
-            FROM trade_history
-            WHERE opened_at >= NOW() - INTERVAL '24 hours'
-        """)
-
-        trades, avg_pnl, win_rate = cursor.fetchone()
-
-        msg = (
-            f"📊 DAILY REPORT\n"
-            f"Trades: {trades}\n"
-            f"Win rate: {win_rate}%\n"
-            f"Avg PnL: {avg_pnl}%"
-        )
-
-        send_telegram(msg)
-
-        cursor.close()
-        conn.close()
-
-        return jsonify({"status": "sent"})
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-# ================================
 # 🚀 WEBHOOK
 # ================================
 @app.route("/webhook", methods=["POST"])
@@ -147,20 +81,22 @@ def webhook():
         vwap = float(data["vwap"])
         atr = float(data["atr"])
 
+        # NEW DATA
+        momentum = data.get("momentum", "unknown")
+        vwap_trend = data.get("vwap_trend", "unknown")
+
         distance = ((price - vwap) / vwap) * 100
 
         decision = "HOLD"
 
         if atr <= MIN_ATR:
             reason = "ATR too low"
-        elif distance >= LONG_THRESHOLD:
-            reason = "Not far enough from VWAP"
-        else:
+        elif distance < LONG_THRESHOLD:
             decision = "LONG"
-            reason = "Valid VWAP deviation"
+        elif distance > SHORT_THRESHOLD:
+            decision = "SHORT_SIGNAL"
 
-        # 👇 DEBUG LINE (watch bot think)
-        print(f"{symbol} | distance: {round(distance,3)} | decision: {decision}")
+        print(f"{symbol} | dist: {round(distance,3)} | mom: {momentum} | vwap_trend: {vwap_trend} | decision: {decision}")
 
         is_extreme = distance < EXTREME_THRESHOLD
 
@@ -168,12 +104,12 @@ def webhook():
         conn.autocommit = True
         cursor = conn.cursor()
 
-        # SAVE SIGNAL
+        # SAVE SIGNAL (UPDATED)
         cursor.execute("""
             INSERT INTO signal_history
-            (symbol, price, vwap, distance_from_vwap_pct, decision, is_extreme)
-            VALUES (%s, %s, %s, %s, %s, %s)
-        """, (symbol, price, vwap, distance, decision, is_extreme))
+            (symbol, price, vwap, distance_from_vwap_pct, decision, is_extreme, momentum, vwap_trend)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """, (symbol, price, vwap, distance, decision, is_extreme, momentum, vwap_trend))
 
         # LOAD STATE
         cursor.execute("""
@@ -184,9 +120,7 @@ def webhook():
 
         trade_open, direction, entry_price, stop_price, target_price, opened_at, state_symbol, entry_distance = state
 
-        # ================================
         # ENTRY
-        # ================================
         if not trade_open and decision == "LONG":
 
             entry_price = price
@@ -208,19 +142,16 @@ def webhook():
                 WHERE id = 1
             """, ("LONG", entry_price, stop_price, target_price, symbol, entry_distance))
 
-            print("🚀 TRADE OPENED:", symbol)
-
             send_telegram(
                 f"🚀 TRADE OPENED\n"
                 f"{symbol}\n"
                 f"Entry: {entry_price}\n"
                 f"Distance: {round(entry_distance, 3)}%\n"
-                f"{'🔥 EXTREME' if is_extreme else '🟡 NORMAL'}"
+                f"Momentum: {momentum}\n"
+                f"VWAP Trend: {vwap_trend}"
             )
 
-        # ================================
         # MANAGEMENT
-        # ================================
         elif trade_open:
 
             if symbol != state_symbol:
@@ -257,25 +188,12 @@ def webhook():
                     entry_distance
                 ))
 
-                print("✅ TRADE CLOSED:", result)
-
                 send_telegram(
                     f"✅ TRADE CLOSED\n"
                     f"{state_symbol}\n"
                     f"Result: {result}\n"
                     f"PnL: {round(pnl_pct, 3)}%"
                 )
-
-                # WIN STREAK CHECK
-                cursor.execute("""
-                    SELECT result FROM trade_history
-                    ORDER BY opened_at DESC
-                    LIMIT 3
-                """)
-                last = [r[0] for r in cursor.fetchall()]
-
-                if last.count("WIN") == 3:
-                    send_telegram("🔥 3 WIN STREAK")
 
                 cursor.execute("""
                     UPDATE bot_state
@@ -304,7 +222,7 @@ def webhook():
 
 
 # ================================
-# 🧪 TEST TELEGRAM
+# 🧪 TEST
 # ================================
 @app.route("/test")
 def test():
