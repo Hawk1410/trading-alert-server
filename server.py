@@ -13,10 +13,11 @@ STOP_LOSS = 0.4
 TAKE_PROFIT = 0.8
 MIN_ATR = 0
 
+# 🔥 NEW FILTERS
+MIN_DISTANCE = 0.5
+MIN_CONFLUENCE = 2
 
-# ================================
-# DB CONNECTION
-# ================================
+
 def get_db_connection():
     return psycopg2.connect(
         os.getenv("DATABASE_URL"),
@@ -25,9 +26,6 @@ def get_db_connection():
     )
 
 
-# ================================
-# TELEGRAM
-# ================================
 def send_telegram(msg):
     try:
         token = os.getenv("TELEGRAM_TOKEN")
@@ -47,9 +45,6 @@ def send_telegram(msg):
         print("Telegram error:", e)
 
 
-# ================================
-# SESSION DETECTOR
-# ================================
 def get_session():
     hour = datetime.utcnow().hour
 
@@ -61,9 +56,6 @@ def get_session():
         return "ny"
 
 
-# ================================
-# VWAP BUCKET
-# ================================
 def get_vwap_bucket(distance):
     d = abs(distance)
 
@@ -77,9 +69,6 @@ def get_vwap_bucket(distance):
         return "1+"
 
 
-# ================================
-# FUTURE PRICE UPDATER
-# ================================
 def update_future_prices(cursor, current_price):
     try:
         cursor.execute("""
@@ -107,9 +96,6 @@ def update_future_prices(cursor, current_price):
         print("Future update error:", e)
 
 
-# ================================
-# WEBHOOK
-# ================================
 @app.route("/webhook", methods=["POST"])
 def webhook():
     conn = None
@@ -133,23 +119,21 @@ def webhook():
         distance = ((price - vwap) / vwap) * 100
         distance_abs = price - vwap
 
-        # ================================
-        # CONTEXT
-        # ================================
         signal_id = str(uuid.uuid4())
         session = get_session()
         spread_proxy = atr
         vwap_bucket = get_vwap_bucket(distance)
 
+        # ================================
+        # CONFLUENCE
+        # ================================
         confluence_score = 0
+
         if momentum == "up":
             confluence_score += 1
         if vwap_trend == "up":
             confluence_score += 1
 
-        # ================================
-        # DB
-        # ================================
         conn = get_db_connection()
         conn.autocommit = True
         cursor = conn.cursor()
@@ -157,7 +141,7 @@ def webhook():
         update_future_prices(cursor, price)
 
         # ================================
-        # GET 15m TREND
+        # 15m TREND
         # ================================
         cursor.execute("""
             SELECT vwap_trend
@@ -170,19 +154,33 @@ def webhook():
         trend_15m = result[0] if result else None
 
         # ================================
-        # MODEL DECISION
+        # DECISION
         # ================================
         decision_model = "HOLD"
 
         if atr > MIN_ATR:
-            if distance < -0.5 and momentum == "up" and trend_15m == "up":
+
+            # LONG
+            if (
+                distance < -MIN_DISTANCE and
+                momentum == "up" and
+                trend_15m == "up"
+            ):
                 decision_model = "LONG"
                 confluence_score += 1
 
-            elif distance > 0.5 and momentum == "down" and trend_15m == "down":
+            # SHORT
+            elif (
+                distance > MIN_DISTANCE and
+                momentum == "down" and
+                trend_15m == "down"
+            ):
                 decision_model = "SHORT"
                 confluence_score += 1
 
+        # ================================
+        # ALIGNMENT
+        # ================================
         trend_alignment = "aligned" if (
             (momentum == "up" and trend_15m == "up") or
             (momentum == "down" and trend_15m == "down")
@@ -194,9 +192,18 @@ def webhook():
         trade_taken = False
 
         # ================================
-        # TRADE LOGIC (5m ONLY)
+        # 🔥 FINAL FILTER BEFORE TRADE
         # ================================
-        if timeframe == "5":
+        valid_trade = (
+            abs(distance) >= MIN_DISTANCE and
+            confluence_score >= MIN_CONFLUENCE and
+            trend_alignment == "aligned"
+        )
+
+        # ================================
+        # TRADE LOGIC
+        # ================================
+        if timeframe == "5" and valid_trade:
 
             cursor.execute("""
                 SELECT trade_open, direction, entry_price, stop_price, target_price, opened_at, symbol
@@ -207,47 +214,45 @@ def webhook():
             if state:
                 trade_open, direction, entry_price, stop_price, target_price, opened_at, state_symbol = state
 
-                # ===== LONG =====
-                if not trade_open and decision_model == "LONG":
+                if not trade_open:
 
-                    stop_price = price * (1 - STOP_LOSS / 100)
-                    target_price = price * (1 + TAKE_PROFIT / 100)
+                    if decision_model == "LONG":
+                        stop_price = price * (1 - STOP_LOSS / 100)
+                        target_price = price * (1 + TAKE_PROFIT / 100)
 
-                    cursor.execute("""
-                        UPDATE bot_state
-                        SET trade_open = TRUE,
-                            direction = %s,
-                            entry_price = %s,
-                            stop_price = %s,
-                            target_price = %s,
-                            opened_at = NOW(),
-                            symbol = %s
-                        WHERE id = 1
-                    """, ("LONG", price, stop_price, target_price, symbol))
+                        cursor.execute("""
+                            UPDATE bot_state
+                            SET trade_open = TRUE,
+                                direction = %s,
+                                entry_price = %s,
+                                stop_price = %s,
+                                target_price = %s,
+                                opened_at = NOW(),
+                                symbol = %s
+                            WHERE id = 1
+                        """, ("LONG", price, stop_price, target_price, symbol))
 
-                    trade_taken = True
-                    send_telegram(f"🚀 LONG {symbol} @ {price}")
+                        trade_taken = True
+                        send_telegram(f"🚀 LONG {symbol} @ {price}")
 
-                # ===== SHORT =====
-                elif not trade_open and decision_model == "SHORT":
+                    elif decision_model == "SHORT":
+                        stop_price = price * (1 + STOP_LOSS / 100)
+                        target_price = price * (1 - TAKE_PROFIT / 100)
 
-                    stop_price = price * (1 + STOP_LOSS / 100)
-                    target_price = price * (1 - TAKE_PROFIT / 100)
+                        cursor.execute("""
+                            UPDATE bot_state
+                            SET trade_open = TRUE,
+                                direction = %s,
+                                entry_price = %s,
+                                stop_price = %s,
+                                target_price = %s,
+                                opened_at = NOW(),
+                                symbol = %s
+                            WHERE id = 1
+                        """, ("SHORT", price, stop_price, target_price, symbol))
 
-                    cursor.execute("""
-                        UPDATE bot_state
-                        SET trade_open = TRUE,
-                            direction = %s,
-                            entry_price = %s,
-                            stop_price = %s,
-                            target_price = %s,
-                            opened_at = NOW(),
-                            symbol = %s
-                        WHERE id = 1
-                    """, ("SHORT", price, stop_price, target_price, symbol))
-
-                    trade_taken = True
-                    send_telegram(f"📉 SHORT {symbol} @ {price}")
+                        trade_taken = True
+                        send_telegram(f"📉 SHORT {symbol} @ {price}")
 
         # ================================
         # SAVE SIGNAL
