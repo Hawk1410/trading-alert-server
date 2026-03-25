@@ -13,11 +13,14 @@ STOP_LOSS = 0.4
 TAKE_PROFIT = 0.8
 MIN_ATR = 0
 
-# 🔥 TUNABLE FILTERS
+# 🔥 FILTERS
 MIN_DISTANCE = 0.5
-MIN_CONFLUENCE = 1  # ✅ FIXED
+MIN_CONFLUENCE = 2
 
 
+# ================================
+# DB CONNECTION
+# ================================
 def get_db_connection():
     return psycopg2.connect(
         os.getenv("DATABASE_URL"),
@@ -26,6 +29,9 @@ def get_db_connection():
     )
 
 
+# ================================
+# TELEGRAM
+# ================================
 def send_telegram(msg):
     try:
         token = os.getenv("TELEGRAM_TOKEN")
@@ -45,6 +51,9 @@ def send_telegram(msg):
         print("Telegram error:", e)
 
 
+# ================================
+# SESSION DETECTOR
+# ================================
 def get_session():
     hour = datetime.utcnow().hour
 
@@ -56,6 +65,9 @@ def get_session():
         return "ny"
 
 
+# ================================
+# VWAP BUCKET
+# ================================
 def get_vwap_bucket(distance):
     d = abs(distance)
 
@@ -69,6 +81,9 @@ def get_vwap_bucket(distance):
         return "1+"
 
 
+# ================================
+# FUTURE PRICE UPDATER
+# ================================
 def update_future_prices(cursor, current_price):
     try:
         cursor.execute("""
@@ -96,6 +111,9 @@ def update_future_prices(cursor, current_price):
         print("Future update error:", e)
 
 
+# ================================
+# WEBHOOK
+# ================================
 @app.route("/webhook", methods=["POST"])
 def webhook():
     conn = None
@@ -141,7 +159,7 @@ def webhook():
         update_future_prices(cursor, price)
 
         # ================================
-        # 15m TREND
+        # GET 15m TREND
         # ================================
         cursor.execute("""
             SELECT vwap_trend
@@ -154,53 +172,42 @@ def webhook():
         trend_15m = result[0] if result else None
 
         # ================================
-        # DECISION + HOLD REASONS
+        # DECISION
         # ================================
         decision_model = "HOLD"
-        hold_reason = None
 
-        if atr <= MIN_ATR:
-            hold_reason = "low_atr"
+        if atr > MIN_ATR:
 
-        else:
             # LONG
-            if distance >= -MIN_DISTANCE:
-                hold_reason = f"long_distance_not_met ({distance:.2f})"
-
-            elif momentum != "up":
-                hold_reason = f"momentum_not_up ({momentum})"
-
-            elif trend_15m != "up":
-                hold_reason = f"15m_not_up ({trend_15m})"
-
-            else:
+            if (
+                distance < -MIN_DISTANCE and
+                momentum == "up" and
+                trend_15m == "up"
+            ):
                 decision_model = "LONG"
-                hold_reason = "long_conditions_met"
                 confluence_score += 1
 
             # SHORT
-            if decision_model == "HOLD":
-                if distance <= MIN_DISTANCE:
-                    hold_reason = f"short_distance_not_met ({distance:.2f})"
-
-                elif momentum != "down":
-                    hold_reason = f"momentum_not_down ({momentum})"
-
-                elif trend_15m != "down":
-                    hold_reason = f"15m_not_down ({trend_15m})"
-
-                else:
-                    decision_model = "SHORT"
-                    hold_reason = "short_conditions_met"
-                    confluence_score += 1
+            elif (
+                distance > MIN_DISTANCE and
+                momentum == "down" and
+                trend_15m == "down"
+            ):
+                decision_model = "SHORT"
+                confluence_score += 1
 
         # ================================
-        # ALIGNMENT
+        # ALIGNMENT (FIXED)
         # ================================
-        trend_alignment = "aligned" if (
+        if trend_15m is None:
+            trend_alignment = "unknown"
+        elif (
             (momentum == "up" and trend_15m == "up") or
             (momentum == "down" and trend_15m == "down")
-        ) else "counter"
+        ):
+            trend_alignment = "aligned"
+        else:
+            trend_alignment = "counter"
 
         entry_signal_strength = confluence_score * 25
         market_regime = "trend" if atr > 0.5 else "range"
@@ -213,15 +220,11 @@ def webhook():
         valid_trade = (
             abs(distance) >= MIN_DISTANCE and
             confluence_score >= MIN_CONFLUENCE and
-            trend_alignment == "aligned"
+            trend_alignment in ["aligned", "unknown"]
         )
 
-        if decision_model in ["LONG", "SHORT"] and not valid_trade:
-            hold_reason = f"failed_final_filter (conf={confluence_score}, dist={distance:.2f}, align={trend_alignment})"
-            decision_model = "HOLD"
-
         # ================================
-        # TRADE EXECUTION
+        # TRADE LOGIC
         # ================================
         if timeframe == "5" and valid_trade:
 
@@ -284,16 +287,16 @@ def webhook():
                 momentum, vwap_trend, timeframe, candle_time,
                 signal_id, session, spread_proxy, vwap_distance_bucket,
                 entry_signal_strength, trade_taken, confluence_score,
-                trend_alignment, market_regime, hold_reason
+                trend_alignment, market_regime
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             symbol, price, vwap, distance, distance_abs,
             atr, volume, "SIGNAL", decision_model, distance < -1.5,
             momentum, vwap_trend, timeframe, candle_time,
             signal_id, session, spread_proxy, vwap_bucket,
             entry_signal_strength, trade_taken, confluence_score,
-            trend_alignment, market_regime, hold_reason
+            trend_alignment, market_regime
         ))
 
         return jsonify({"status": "ok"}), 200
