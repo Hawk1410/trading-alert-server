@@ -13,9 +13,9 @@ STOP_LOSS = 0.4
 TAKE_PROFIT = 0.8
 MIN_ATR = 0
 
-# 🔥 NEW FILTERS
+# 🔥 TUNABLE FILTERS
 MIN_DISTANCE = 0.5
-MIN_CONFLUENCE = 2
+MIN_CONFLUENCE = 1  # ✅ FIXED
 
 
 def get_db_connection():
@@ -154,29 +154,45 @@ def webhook():
         trend_15m = result[0] if result else None
 
         # ================================
-        # DECISION
+        # DECISION + HOLD REASONS
         # ================================
         decision_model = "HOLD"
+        hold_reason = None
 
-        if atr > MIN_ATR:
+        if atr <= MIN_ATR:
+            hold_reason = "low_atr"
 
+        else:
             # LONG
-            if (
-                distance < -MIN_DISTANCE and
-                momentum == "up" and
-                trend_15m == "up"
-            ):
+            if distance >= -MIN_DISTANCE:
+                hold_reason = f"long_distance_not_met ({distance:.2f})"
+
+            elif momentum != "up":
+                hold_reason = f"momentum_not_up ({momentum})"
+
+            elif trend_15m != "up":
+                hold_reason = f"15m_not_up ({trend_15m})"
+
+            else:
                 decision_model = "LONG"
+                hold_reason = "long_conditions_met"
                 confluence_score += 1
 
             # SHORT
-            elif (
-                distance > MIN_DISTANCE and
-                momentum == "down" and
-                trend_15m == "down"
-            ):
-                decision_model = "SHORT"
-                confluence_score += 1
+            if decision_model == "HOLD":
+                if distance <= MIN_DISTANCE:
+                    hold_reason = f"short_distance_not_met ({distance:.2f})"
+
+                elif momentum != "down":
+                    hold_reason = f"momentum_not_down ({momentum})"
+
+                elif trend_15m != "down":
+                    hold_reason = f"15m_not_down ({trend_15m})"
+
+                else:
+                    decision_model = "SHORT"
+                    hold_reason = "short_conditions_met"
+                    confluence_score += 1
 
         # ================================
         # ALIGNMENT
@@ -192,7 +208,7 @@ def webhook():
         trade_taken = False
 
         # ================================
-        # 🔥 FINAL FILTER BEFORE TRADE
+        # FINAL FILTER
         # ================================
         valid_trade = (
             abs(distance) >= MIN_DISTANCE and
@@ -200,8 +216,12 @@ def webhook():
             trend_alignment == "aligned"
         )
 
+        if decision_model in ["LONG", "SHORT"] and not valid_trade:
+            hold_reason = f"failed_final_filter (conf={confluence_score}, dist={distance:.2f}, align={trend_alignment})"
+            decision_model = "HOLD"
+
         # ================================
-        # TRADE LOGIC
+        # TRADE EXECUTION
         # ================================
         if timeframe == "5" and valid_trade:
 
@@ -264,16 +284,16 @@ def webhook():
                 momentum, vwap_trend, timeframe, candle_time,
                 signal_id, session, spread_proxy, vwap_distance_bucket,
                 entry_signal_strength, trade_taken, confluence_score,
-                trend_alignment, market_regime
+                trend_alignment, market_regime, hold_reason
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             symbol, price, vwap, distance, distance_abs,
             atr, volume, "SIGNAL", decision_model, distance < -1.5,
             momentum, vwap_trend, timeframe, candle_time,
             signal_id, session, spread_proxy, vwap_bucket,
             entry_signal_strength, trade_taken, confluence_score,
-            trend_alignment, market_regime
+            trend_alignment, market_regime, hold_reason
         ))
 
         return jsonify({"status": "ok"}), 200
@@ -288,4 +308,3 @@ def webhook():
             cursor.close()
         if conn:
             conn.close()
-
