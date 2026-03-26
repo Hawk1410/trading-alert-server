@@ -152,6 +152,9 @@ def webhook():
         if vwap_trend == "up":
             confluence_score += 1
 
+        # ================================
+        # DB
+        # ================================
         conn = get_db_connection()
         conn.autocommit = True
         cursor = conn.cursor()
@@ -178,7 +181,6 @@ def webhook():
 
         if atr > MIN_ATR:
 
-            # LONG
             if (
                 distance < -MIN_DISTANCE and
                 momentum == "up" and
@@ -187,7 +189,6 @@ def webhook():
                 decision_model = "LONG"
                 confluence_score += 1
 
-            # SHORT
             elif (
                 distance > MIN_DISTANCE and
                 momentum == "down" and
@@ -224,9 +225,9 @@ def webhook():
         )
 
         # ================================
-        # TRADE LOGIC
+        # TRADE LOGIC (FIXED)
         # ================================
-        if timeframe == "5" and valid_trade:
+        if timeframe == "5" and valid_trade and decision_model != "HOLD":
 
             cursor.execute("""
                 SELECT trade_open, direction, entry_price, stop_price, target_price, opened_at, symbol
