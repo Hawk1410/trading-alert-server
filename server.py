@@ -8,14 +8,16 @@ from datetime import datetime
 
 app = Flask(__name__)
 
-# === STRATEGY CONFIG ===
+# ================================
+# STRATEGY CONFIG
+# ================================
 STOP_LOSS = 0.4
 TAKE_PROFIT = 0.8
 MIN_ATR = 0
 
-# 🔥 FILTERS
+# 🔥 RELAXED FILTERS (DATA COLLECTION MODE)
 MIN_DISTANCE = 0.5
-MIN_CONFLUENCE = 2
+MIN_CONFLUENCE = 1
 
 
 # ================================
@@ -152,9 +154,6 @@ def webhook():
         if vwap_trend == "up":
             confluence_score += 1
 
-        # ================================
-        # DB
-        # ================================
         conn = get_db_connection()
         conn.autocommit = True
         cursor = conn.cursor()
@@ -162,7 +161,7 @@ def webhook():
         update_future_prices(cursor, price)
 
         # ================================
-        # GET 15m TREND
+        # GET 15m TREND (still tracked, not required)
         # ================================
         cursor.execute("""
             SELECT vwap_trend
@@ -175,30 +174,24 @@ def webhook():
         trend_15m = result[0] if result else None
 
         # ================================
-        # DECISION
+        # DECISION (RELAXED 🚀)
         # ================================
         decision_model = "HOLD"
 
         if atr > MIN_ATR:
 
-            if (
-                distance < -MIN_DISTANCE and
-                momentum == "up" and
-                trend_15m == "up"
-            ):
+            # LONG (no 15m requirement)
+            if distance < -MIN_DISTANCE and momentum == "up":
                 decision_model = "LONG"
                 confluence_score += 1
 
-            elif (
-                distance > MIN_DISTANCE and
-                momentum == "down" and
-                trend_15m == "down"
-            ):
+            # SHORT (no 15m requirement)
+            elif distance > MIN_DISTANCE and momentum == "down":
                 decision_model = "SHORT"
                 confluence_score += 1
 
         # ================================
-        # ALIGNMENT
+        # TREND ALIGNMENT (for analysis only)
         # ================================
         if trend_15m is None:
             trend_alignment = "unknown"
@@ -216,7 +209,7 @@ def webhook():
         trade_taken = False
 
         # ================================
-        # 🔥 FINAL FILTER (UPDATED)
+        # FINAL FILTER (LIGHT)
         # ================================
         valid_trade = (
             abs(distance) >= MIN_DISTANCE and
