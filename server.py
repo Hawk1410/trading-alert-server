@@ -198,7 +198,7 @@ def webhook():
                 confluence_score += 1
 
         # ================================
-        # ALIGNMENT (FIXED)
+        # ALIGNMENT
         # ================================
         if trend_15m is None:
             trend_alignment = "unknown"
@@ -216,16 +216,15 @@ def webhook():
         trade_taken = False
 
         # ================================
-        # FINAL FILTER
+        # 🔥 FINAL FILTER (UPDATED)
         # ================================
         valid_trade = (
             abs(distance) >= MIN_DISTANCE and
-            confluence_score >= MIN_CONFLUENCE and
-            trend_alignment in ["aligned", "unknown"]
+            confluence_score >= MIN_CONFLUENCE
         )
 
         # ================================
-        # TRADE LOGIC (FIXED)
+        # TRADE LOGIC
         # ================================
         if timeframe == "5" and valid_trade and decision_model != "HOLD":
 
