@@ -82,10 +82,11 @@ def get_vwap_bucket(distance):
 
 
 # ================================
-# FUTURE PRICE UPDATER
+# FUTURE PRICE UPDATER (🔥 UPDATED)
 # ================================
 def update_future_prices(cursor, current_price):
     try:
+        # 3 candles
         cursor.execute("""
             UPDATE signal_history
             SET price_after_3_candles = %s
@@ -93,6 +94,7 @@ def update_future_prices(cursor, current_price):
             AND created_at <= NOW() - INTERVAL '15 minutes'
         """, (current_price,))
 
+        # 5 candles
         cursor.execute("""
             UPDATE signal_history
             SET price_after_5_candles = %s
@@ -100,6 +102,20 @@ def update_future_prices(cursor, current_price):
             AND created_at <= NOW() - INTERVAL '25 minutes'
         """, (current_price,))
 
+        # 🔥 CALCULATE WIN/LOSS
+        cursor.execute("""
+            UPDATE signal_history
+            SET is_win = CASE
+                WHEN decision_model = 'LONG' AND price_after_5_candles > price THEN TRUE
+                WHEN decision_model = 'SHORT' AND price_after_5_candles < price THEN TRUE
+                WHEN decision_model IN ('LONG', 'SHORT') THEN FALSE
+                ELSE NULL
+            END
+            WHERE price_after_5_candles IS NOT NULL
+            AND is_win IS NULL
+        """)
+
+        # 10 candles
         cursor.execute("""
             UPDATE signal_history
             SET price_after_10_candles = %s
@@ -258,7 +274,7 @@ def webhook():
                     stop_price = price * (1 - STOP_LOSS / 100)
                     target_price = price * (1 + TAKE_PROFIT / 100)
 
-                else:  # SHORT
+                else:
                     stop_price = price * (1 + STOP_LOSS / 100)
                     target_price = price * (1 - TAKE_PROFIT / 100)
 
@@ -317,4 +333,4 @@ def webhook():
             cursor.close()
         if conn:
             conn.close()
-            
+        
