@@ -103,7 +103,7 @@ def adaptive_model(signal):
 
 
 # ================================
-# 🔥 EXPLORATORY MODEL (EDGE DRIVER)
+# 🔥 EXPLORATORY MODEL
 # ================================
 def exploratory_model(signal):
 
@@ -237,11 +237,7 @@ def webhook():
         spread_proxy = atr
         vwap_bucket = get_vwap_bucket(distance)
 
-        # ================================
-        # BASE LOGIC (still useful for logging)
-        # ================================
         confluence_score = 0
-
         if momentum == "up":
             confluence_score += 1
         if vwap_trend == "up":
@@ -264,26 +260,6 @@ def webhook():
         result = cursor.fetchone()
         trend_15m = result[0] if result else None
 
-        base_decision = "HOLD"
-
-        if atr > MIN_ATR:
-
-            if (
-                distance < -MIN_DISTANCE and
-                momentum == "up" and
-                trend_15m == "up"
-            ):
-                base_decision = "LONG"
-                confluence_score += 1
-
-            elif (
-                distance > MIN_DISTANCE and
-                momentum == "down" and
-                trend_15m == "down"
-            ):
-                base_decision = "SHORT"
-                confluence_score += 1
-
         if trend_15m is None:
             trend_alignment = "unknown"
         elif (
@@ -294,11 +270,8 @@ def webhook():
         else:
             trend_alignment = "counter"
 
-        # ================================
-        # SIGNAL OBJECT
-        # ================================
         signal = {
-            "base_decision": base_decision,
+            "base_decision": "HOLD",
             "trend_alignment": trend_alignment,
             "confluence_score": confluence_score,
             "session": session,
@@ -306,25 +279,18 @@ def webhook():
             "momentum": momentum
         }
 
-        # ================================
-        # MODELS
-        # ================================
         models = {
-            "baseline_v1": base_decision,
-            "no_counter_v1": base_decision if trend_alignment != "counter" else "HOLD",
-            "high_conf_v1": base_decision if confluence_score >= 2 else "HOLD",
             "adaptive_v1": adaptive_model(signal),
             "exploratory_v1": exploratory_model(signal)
         }
 
-        # ================================
-        # 🚀 EXECUTION (EXPLORATORY EDGE)
-        # ================================
+        # 🚀 EXECUTION (exploratory + filter)
         trade_taken = False
         decision_model = models["exploratory_v1"]
 
         valid_trade = (
-            decision_model != "HOLD"
+            decision_model != "HOLD" and
+            0.5 <= abs(distance) <= 1
         )
 
         if timeframe == "5" and valid_trade:
@@ -366,11 +332,8 @@ def webhook():
                 trade_taken = True
                 send_telegram(f"{decision_model} {symbol} @ {price}")
 
-        # ================================
-        # SAVE ALL MODELS
-        # ================================
+        # SAVE
         for model_name, decision in models.items():
-
             cursor.execute("""
                 INSERT INTO signal_history (
                     symbol, price, vwap, distance_from_vwap_pct, distance_abs,
@@ -402,3 +365,4 @@ def webhook():
             cursor.close()
         if conn:
             conn.close()
+            
