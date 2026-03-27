@@ -103,18 +103,16 @@ def adaptive_model(signal):
 
 
 # ================================
-# 🔥 FIXED EXPLORATORY MODEL (INDEPENDENT)
+# 🔥 EXPLORATORY MODEL (EDGE DRIVER)
 # ================================
 def exploratory_model(signal):
 
-    # LONG
     if (
         signal["distance"] < -0.3 and
         signal["momentum"] == "up"
     ):
         return "LONG"
 
-    # SHORT
     if (
         signal["distance"] > 0.3 and
         signal["momentum"] == "down"
@@ -240,7 +238,7 @@ def webhook():
         vwap_bucket = get_vwap_bucket(distance)
 
         # ================================
-        # BASE LOGIC
+        # BASE LOGIC (still useful for logging)
         # ================================
         confluence_score = 0
 
@@ -320,16 +318,13 @@ def webhook():
         }
 
         # ================================
-        # EXECUTION (baseline only)
+        # 🚀 EXECUTION (EXPLORATORY EDGE)
         # ================================
         trade_taken = False
-        decision_model = models["baseline_v1"]
+        decision_model = models["exploratory_v1"]
 
         valid_trade = (
-            decision_model != "HOLD" and
-            abs(distance) >= MIN_DISTANCE and
-            confluence_score >= MIN_CONFLUENCE and
-            trend_alignment in ["aligned", "unknown"]
+            decision_model != "HOLD"
         )
 
         if timeframe == "5" and valid_trade:
@@ -391,7 +386,7 @@ def webhook():
                 atr, volume, "SIGNAL", decision, distance < -1.5,
                 momentum, vwap_trend, timeframe, candle_time,
                 signal_id, session, spread_proxy, vwap_bucket,
-                confluence_score * 25, trade_taken if model_name == "baseline_v1" else False,
+                confluence_score * 25, trade_taken if model_name == "exploratory_v1" else False,
                 confluence_score, trend_alignment, "trend" if atr > 0.5 else "range",
                 model_name
             ))
