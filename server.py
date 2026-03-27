@@ -103,6 +103,22 @@ def adaptive_model(signal):
 
 
 # ================================
+# EXPLORATORY MODEL
+# ================================
+def exploratory_model(signal):
+    if signal["base_decision"] == "HOLD":
+        return "HOLD"
+
+    if abs(signal["distance"]) < 0.3:
+        return "HOLD"
+
+    if signal["confluence_score"] < 1:
+        return "HOLD"
+
+    return signal["base_decision"]
+
+
+# ================================
 # CLOSE TRADES
 # ================================
 def close_open_trades(cursor, symbol, price):
@@ -217,9 +233,6 @@ def webhook():
         spread_proxy = atr
         vwap_bucket = get_vwap_bucket(distance)
 
-        # ================================
-        # BASE LOGIC
-        # ================================
         confluence_score = 0
 
         if momentum == "up":
@@ -234,7 +247,6 @@ def webhook():
         close_open_trades(cursor, symbol, price)
         update_future_prices(cursor, price)
 
-        # 15m trend
         cursor.execute("""
             SELECT vwap_trend
             FROM signal_history
@@ -275,26 +287,22 @@ def webhook():
         else:
             trend_alignment = "counter"
 
-        # ================================
-        # MULTI MODEL DECISIONS
-        # ================================
         signal = {
             "base_decision": base_decision,
             "trend_alignment": trend_alignment,
             "confluence_score": confluence_score,
-            "session": session
+            "session": session,
+            "distance": distance
         }
 
         models = {
             "baseline_v1": base_decision,
             "no_counter_v1": base_decision if trend_alignment != "counter" else "HOLD",
             "high_conf_v1": base_decision if confluence_score >= 2 else "HOLD",
-            "adaptive_v1": adaptive_model(signal)
+            "adaptive_v1": adaptive_model(signal),
+            "exploratory_v1": exploratory_model(signal)
         }
 
-        # ================================
-        # EXECUTION (baseline only)
-        # ================================
         trade_taken = False
         decision_model = models["baseline_v1"]
 
@@ -344,9 +352,6 @@ def webhook():
                 trade_taken = True
                 send_telegram(f"{decision_model} {symbol} @ {price}")
 
-        # ================================
-        # SAVE ALL MODELS
-        # ================================
         for model_name, decision in models.items():
 
             cursor.execute("""
