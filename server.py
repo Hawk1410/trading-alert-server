@@ -13,14 +13,10 @@ STOP_LOSS = 0.4
 TAKE_PROFIT = 0.8
 MIN_ATR = 0
 
-# 🔥 FILTERS
 MIN_DISTANCE = 0.5
 MIN_CONFLUENCE = 2
 
 
-# ================================
-# DB CONNECTION
-# ================================
 def get_db_connection():
     return psycopg2.connect(
         os.getenv("DATABASE_URL"),
@@ -29,9 +25,6 @@ def get_db_connection():
     )
 
 
-# ================================
-# TELEGRAM
-# ================================
 def send_telegram(msg):
     try:
         token = os.getenv("TELEGRAM_TOKEN")
@@ -40,37 +33,27 @@ def send_telegram(msg):
         if not token or not chat_id:
             return
 
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
-
-        requests.post(url, json={
-            "chat_id": chat_id,
-            "text": msg
-        }, timeout=5)
-
+        requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": msg},
+            timeout=5
+        )
     except Exception as e:
         print("Telegram error:", e)
 
 
-# ================================
-# SESSION DETECTOR
-# ================================
 def get_session():
     hour = datetime.utcnow().hour
-
-    if 0 <= hour < 8:
+    if hour < 8:
         return "asia"
-    elif 8 <= hour < 16:
+    elif hour < 16:
         return "london"
     else:
         return "ny"
 
 
-# ================================
-# VWAP BUCKET
-# ================================
 def get_vwap_bucket(distance):
     d = abs(distance)
-
     if d < 0.2:
         return "0-0.2"
     elif d < 0.5:
@@ -82,11 +65,52 @@ def get_vwap_bucket(distance):
 
 
 # ================================
-# FUTURE PRICE UPDATER (🔥 UPDATED)
+# 🔥 CLOSE TRADES
+# ================================
+def close_open_trades(cursor, symbol, price):
+
+    cursor.execute("""
+        SELECT id, direction, stop_price, target_price
+        FROM bot_trades
+        WHERE symbol = %s AND status = 'OPEN'
+    """, (symbol,))
+
+    trades = cursor.fetchall()
+
+    for trade_id, direction, stop, target in trades:
+
+        close_reason = None
+
+        if direction == "LONG":
+            if price <= stop:
+                close_reason = "STOP_LOSS"
+            elif price >= target:
+                close_reason = "TAKE_PROFIT"
+
+        elif direction == "SHORT":
+            if price >= stop:
+                close_reason = "STOP_LOSS"
+            elif price <= target:
+                close_reason = "TAKE_PROFIT"
+
+        if close_reason:
+            cursor.execute("""
+                UPDATE bot_trades
+                SET status = 'CLOSED',
+                    closed_at = NOW(),
+                    close_price = %s,
+                    close_reason = %s
+                WHERE id = %s
+            """, (price, close_reason, trade_id))
+
+            send_telegram(f"{symbol} {direction} CLOSED ({close_reason}) @ {price}")
+
+
+# ================================
+# FUTURE PRICE UPDATER
 # ================================
 def update_future_prices(cursor, current_price):
     try:
-        # 3 candles
         cursor.execute("""
             UPDATE signal_history
             SET price_after_3_candles = %s
@@ -94,7 +118,6 @@ def update_future_prices(cursor, current_price):
             AND created_at <= NOW() - INTERVAL '15 minutes'
         """, (current_price,))
 
-        # 5 candles
         cursor.execute("""
             UPDATE signal_history
             SET price_after_5_candles = %s
@@ -102,20 +125,18 @@ def update_future_prices(cursor, current_price):
             AND created_at <= NOW() - INTERVAL '25 minutes'
         """, (current_price,))
 
-        # 🔥 CALCULATE WIN/LOSS
         cursor.execute("""
             UPDATE signal_history
             SET is_win = CASE
                 WHEN decision_model = 'LONG' AND price_after_5_candles > price THEN TRUE
                 WHEN decision_model = 'SHORT' AND price_after_5_candles < price THEN TRUE
-                WHEN decision_model IN ('LONG', 'SHORT') THEN FALSE
+                WHEN decision_model IN ('LONG','SHORT') THEN FALSE
                 ELSE NULL
             END
             WHERE price_after_5_candles IS NOT NULL
             AND is_win IS NULL
         """)
 
-        # 10 candles
         cursor.execute("""
             UPDATE signal_history
             SET price_after_10_candles = %s
@@ -125,17 +146,6 @@ def update_future_prices(cursor, current_price):
 
     except Exception as e:
         print("Future update error:", e)
-
-
-# ================================
-# ENSURE SYMBOL ROW EXISTS
-# ================================
-def ensure_symbol_row(cursor, symbol):
-    cursor.execute("""
-        INSERT INTO bot_state (symbol, trade_open)
-        VALUES (%s, FALSE)
-        ON CONFLICT (symbol) DO NOTHING
-    """, (symbol,))
 
 
 # ================================
@@ -169,9 +179,6 @@ def webhook():
         spread_proxy = atr
         vwap_bucket = get_vwap_bucket(distance)
 
-        # ================================
-        # CONFLUENCE
-        # ================================
         confluence_score = 0
 
         if momentum == "up":
@@ -183,12 +190,10 @@ def webhook():
         conn.autocommit = True
         cursor = conn.cursor()
 
-        update_future_prices(cursor, price)
+        # 🔥 CLOSE TRADES FIRST
+        close_open_trades(cursor, symbol, price)
 
-        # ================================
-        # ENSURE SYMBOL EXISTS
-        # ================================
-        ensure_symbol_row(cursor, symbol)
+        update_future_prices(cursor, price)
 
         # ================================
         # GET 15m TREND
@@ -203,9 +208,6 @@ def webhook():
         result = cursor.fetchone()
         trend_15m = result[0] if result else None
 
-        # ================================
-        # DECISION
-        # ================================
         decision_model = "HOLD"
 
         if atr > MIN_ATR:
@@ -226,9 +228,6 @@ def webhook():
                 decision_model = "SHORT"
                 confluence_score += 1
 
-        # ================================
-        # ALIGNMENT
-        # ================================
         if trend_15m is None:
             trend_alignment = "unknown"
         elif (
@@ -244,9 +243,6 @@ def webhook():
 
         trade_taken = False
 
-        # ================================
-        # FINAL FILTER
-        # ================================
         valid_trade = (
             decision_model != "HOLD" and
             abs(distance) >= MIN_DISTANCE and
@@ -255,52 +251,49 @@ def webhook():
         )
 
         # ================================
-        # TRADE LOGIC (PER SYMBOL)
+        # 🔥 NEW TRADE SYSTEM
         # ================================
         if timeframe == "5" and valid_trade:
 
             cursor.execute("""
-                SELECT trade_open
-                FROM bot_state
+                SELECT COUNT(*)
+                FROM bot_trades
                 WHERE symbol = %s
-            """, (symbol,))
-            state = cursor.fetchone()
+                AND direction = %s
+                AND status = 'OPEN'
+            """, (symbol, decision_model))
 
-            trade_open = state[0] if state else False
+            exists = cursor.fetchone()[0]
 
-            if not trade_open:
+            if exists == 0:
 
                 if decision_model == "LONG":
                     stop_price = price * (1 - STOP_LOSS / 100)
                     target_price = price * (1 + TAKE_PROFIT / 100)
-
                 else:
                     stop_price = price * (1 + STOP_LOSS / 100)
                     target_price = price * (1 - TAKE_PROFIT / 100)
 
                 cursor.execute("""
-                    UPDATE bot_state
-                    SET trade_open = TRUE,
-                        direction = %s,
-                        entry_price = %s,
-                        stop_price = %s,
-                        target_price = %s,
-                        opened_at = NOW()
-                    WHERE symbol = %s
+                    INSERT INTO bot_trades (
+                        id, symbol, direction, entry_price,
+                        stop_price, target_price, status, opened_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, 'OPEN', NOW())
                 """, (
+                    str(uuid.uuid4()),
+                    symbol,
                     decision_model,
                     price,
                     stop_price,
-                    target_price,
-                    symbol
+                    target_price
                 ))
 
                 trade_taken = True
-
                 send_telegram(f"{decision_model} {symbol} @ {price}")
 
         # ================================
-        # SAVE SIGNAL
+        # SAVE SIGNAL (UNCHANGED)
         # ================================
         cursor.execute("""
             INSERT INTO signal_history (
@@ -324,7 +317,6 @@ def webhook():
         return jsonify({"status": "ok"}), 200
 
     except Exception as e:
-        print("ERROR:", str(e))
         print(traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
@@ -333,4 +325,3 @@ def webhook():
             cursor.close()
         if conn:
             conn.close()
-        
