@@ -4,6 +4,7 @@ import psycopg2
 import requests
 import traceback
 import uuid
+import json
 from datetime import datetime
 
 app = Flask(__name__)
@@ -17,6 +18,9 @@ MIN_DISTANCE = 0.5
 MIN_CONFLUENCE = 2
 
 
+# ================================
+# DB CONNECTION
+# ================================
 def get_db_connection():
     return psycopg2.connect(
         os.getenv("DATABASE_URL"),
@@ -25,6 +29,9 @@ def get_db_connection():
     )
 
 
+# ================================
+# TELEGRAM
+# ================================
 def send_telegram(msg):
     try:
         token = os.getenv("TELEGRAM_TOKEN")
@@ -42,6 +49,9 @@ def send_telegram(msg):
         print("Telegram error:", e)
 
 
+# ================================
+# HELPERS
+# ================================
 def get_session():
     hour = datetime.utcnow().hour
     if hour < 8:
@@ -65,7 +75,35 @@ def get_vwap_bucket(distance):
 
 
 # ================================
-# 🔥 CLOSE TRADES
+# ADAPTIVE RULES
+# ================================
+def get_adaptive_rules():
+    try:
+        return json.loads(os.getenv("ADAPTIVE_RULES", "{}"))
+    except:
+        return {}
+
+
+def adaptive_model(signal):
+    rules = get_adaptive_rules()
+
+    if "allowed_sessions" in rules:
+        if signal.get("session") not in rules["allowed_sessions"]:
+            return "HOLD"
+
+    if "allowed_directions" in rules:
+        if signal["base_decision"] not in rules["allowed_directions"]:
+            return "HOLD"
+
+    if "min_confluence" in rules:
+        if signal["confluence_score"] < rules["min_confluence"]:
+            return "HOLD"
+
+    return signal["base_decision"]
+
+
+# ================================
+# CLOSE TRADES
 # ================================
 def close_open_trades(cursor, symbol, price):
 
@@ -179,6 +217,9 @@ def webhook():
         spread_proxy = atr
         vwap_bucket = get_vwap_bucket(distance)
 
+        # ================================
+        # BASE LOGIC
+        # ================================
         confluence_score = 0
 
         if momentum == "up":
@@ -190,14 +231,10 @@ def webhook():
         conn.autocommit = True
         cursor = conn.cursor()
 
-        # 🔥 CLOSE TRADES FIRST
         close_open_trades(cursor, symbol, price)
-
         update_future_prices(cursor, price)
 
-        # ================================
-        # GET 15m TREND
-        # ================================
+        # 15m trend
         cursor.execute("""
             SELECT vwap_trend
             FROM signal_history
@@ -208,7 +245,7 @@ def webhook():
         result = cursor.fetchone()
         trend_15m = result[0] if result else None
 
-        decision_model = "HOLD"
+        base_decision = "HOLD"
 
         if atr > MIN_ATR:
 
@@ -217,7 +254,7 @@ def webhook():
                 momentum == "up" and
                 trend_15m == "up"
             ):
-                decision_model = "LONG"
+                base_decision = "LONG"
                 confluence_score += 1
 
             elif (
@@ -225,7 +262,7 @@ def webhook():
                 momentum == "down" and
                 trend_15m == "down"
             ):
-                decision_model = "SHORT"
+                base_decision = "SHORT"
                 confluence_score += 1
 
         if trend_15m is None:
@@ -238,10 +275,28 @@ def webhook():
         else:
             trend_alignment = "counter"
 
-        entry_signal_strength = confluence_score * 25
-        market_regime = "trend" if atr > 0.5 else "range"
+        # ================================
+        # MULTI MODEL DECISIONS
+        # ================================
+        signal = {
+            "base_decision": base_decision,
+            "trend_alignment": trend_alignment,
+            "confluence_score": confluence_score,
+            "session": session
+        }
 
+        models = {
+            "baseline_v1": base_decision,
+            "no_counter_v1": base_decision if trend_alignment != "counter" else "HOLD",
+            "high_conf_v1": base_decision if confluence_score >= 2 else "HOLD",
+            "adaptive_v1": adaptive_model(signal)
+        }
+
+        # ================================
+        # EXECUTION (baseline only)
+        # ================================
         trade_taken = False
+        decision_model = models["baseline_v1"]
 
         valid_trade = (
             decision_model != "HOLD" and
@@ -250,9 +305,6 @@ def webhook():
             trend_alignment in ["aligned", "unknown"]
         )
 
-        # ================================
-        # 🔥 NEW TRADE SYSTEM
-        # ================================
         if timeframe == "5" and valid_trade:
 
             cursor.execute("""
@@ -293,26 +345,29 @@ def webhook():
                 send_telegram(f"{decision_model} {symbol} @ {price}")
 
         # ================================
-        # SAVE SIGNAL (UNCHANGED)
+        # SAVE ALL MODELS
         # ================================
-        cursor.execute("""
-            INSERT INTO signal_history (
-                symbol, price, vwap, distance_from_vwap_pct, distance_abs,
-                atr, volume, decision, decision_model, is_extreme,
+        for model_name, decision in models.items():
+
+            cursor.execute("""
+                INSERT INTO signal_history (
+                    symbol, price, vwap, distance_from_vwap_pct, distance_abs,
+                    atr, volume, decision, decision_model, is_extreme,
+                    momentum, vwap_trend, timeframe, candle_time,
+                    signal_id, session, spread_proxy, vwap_distance_bucket,
+                    entry_signal_strength, trade_taken, confluence_score,
+                    trend_alignment, market_regime, model_version
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (
+                symbol, price, vwap, distance, distance_abs,
+                atr, volume, "SIGNAL", decision, distance < -1.5,
                 momentum, vwap_trend, timeframe, candle_time,
-                signal_id, session, spread_proxy, vwap_distance_bucket,
-                entry_signal_strength, trade_taken, confluence_score,
-                trend_alignment, market_regime
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """, (
-            symbol, price, vwap, distance, distance_abs,
-            atr, volume, "SIGNAL", decision_model, distance < -1.5,
-            momentum, vwap_trend, timeframe, candle_time,
-            signal_id, session, spread_proxy, vwap_bucket,
-            entry_signal_strength, trade_taken, confluence_score,
-            trend_alignment, market_regime
-        ))
+                signal_id, session, spread_proxy, vwap_bucket,
+                confluence_score * 25, trade_taken if model_name == "baseline_v1" else False,
+                confluence_score, trend_alignment, "trend" if atr > 0.5 else "range",
+                model_name
+            ))
 
         return jsonify({"status": "ok"}), 200
 
