@@ -12,7 +12,6 @@ app = Flask(__name__)
 # === STRATEGY CONFIG ===
 STOP_LOSS = 0.4
 TAKE_PROFIT = 0.8
-MIN_ATR = 0
 
 
 # ================================
@@ -72,77 +71,33 @@ def get_vwap_bucket(distance):
 
 
 # ================================
-# ADAPTIVE RULES
+# MODELS
 # ================================
-def get_adaptive_rules():
-    try:
-        return json.loads(os.getenv("ADAPTIVE_RULES", "{}"))
-    except:
-        return {}
 
-
-def adaptive_model(signal):
-    rules = get_adaptive_rules()
-
-    if "allowed_sessions" in rules:
-        if signal.get("session") not in rules["allowed_sessions"]:
-            return "HOLD"
-
-    if "allowed_directions" in rules:
-        if signal["base_decision"] not in rules["allowed_directions"]:
-            return "HOLD"
-
-    if "min_confluence" in rules:
-        if signal["confluence_score"] < rules["min_confluence"]:
-            return "HOLD"
-
-    return signal["base_decision"]
-
-
-# ================================
-# 🔥 EXPLORATORY MODELS
-# ================================
 def exploratory_model_v1(signal):
-
-    if (
-        signal["distance"] < -0.3 and
-        signal["momentum"] == "up"
-    ):
+    if signal["distance"] < -0.3 and signal["momentum"] == "up":
         return "LONG"
-
-    if (
-        signal["distance"] > 0.3 and
-        signal["momentum"] == "down"
-    ):
+    if signal["distance"] > 0.3 and signal["momentum"] == "down":
         return "SHORT"
-
     return "HOLD"
 
 
 def exploratory_model_v2_safe(signal):
-
     d = abs(signal["distance"])
 
     if not (0.2 <= d <= 1):
         return "HOLD"
 
-    if (
-        signal["distance"] < 0 and
-        signal["momentum"] == "up"
-    ):
+    if signal["distance"] < 0 and signal["momentum"] == "up":
         return "LONG"
 
-    if (
-        signal["distance"] > 0 and
-        signal["momentum"] == "down"
-    ):
+    if signal["distance"] > 0 and signal["momentum"] == "down":
         return "SHORT"
 
     return "HOLD"
 
 
 def exploratory_model_v3_aggressive(signal):
-
     d = abs(signal["distance"])
 
     if not (0.2 <= d <= 1):
@@ -151,16 +106,25 @@ def exploratory_model_v3_aggressive(signal):
     if signal["trend_alignment"] != "counter":
         return "HOLD"
 
-    if (
-        signal["distance"] < 0 and
-        signal["momentum"] == "up"
-    ):
+    if signal["distance"] < 0 and signal["momentum"] == "up":
         return "LONG"
 
-    if (
-        signal["distance"] > 0 and
-        signal["momentum"] == "down"
-    ):
+    if signal["distance"] > 0 and signal["momentum"] == "down":
+        return "SHORT"
+
+    return "HOLD"
+
+
+# 🆕 TREND MODEL
+def trend_model_v1(signal):
+
+    if signal["trend_alignment"] != "aligned":
+        return "HOLD"
+
+    if signal["distance"] > 0 and signal["momentum"] == "up":
+        return "LONG"
+
+    if signal["distance"] < 0 and signal["momentum"] == "down":
         return "SHORT"
 
     return "HOLD"
@@ -223,9 +187,9 @@ def update_future_prices(cursor, current_price):
         cursor.execute("""
             UPDATE signal_history
             SET is_win = CASE
-                WHEN decision = 'LONG' AND price_after_5_candles > price THEN TRUE
-                WHEN decision = 'SHORT' AND price_after_5_candles < price THEN TRUE
-                WHEN decision IN ('LONG','SHORT') THEN FALSE
+                WHEN decision_model = 'LONG' AND price_after_5_candles > price THEN TRUE
+                WHEN decision_model = 'SHORT' AND price_after_5_candles < price THEN TRUE
+                WHEN decision_model IN ('LONG','SHORT') THEN FALSE
                 ELSE NULL
             END
             WHERE price_after_5_candles IS NOT NULL
@@ -266,13 +230,6 @@ def webhook():
         session = get_session()
         vwap_bucket = get_vwap_bucket(distance)
 
-        # ✅ confluence
-        confluence_score = 0
-        if momentum == "up":
-            confluence_score += 1
-        if vwap_trend == "up":
-            confluence_score += 1
-
         conn = get_db_connection()
         conn.autocommit = True
         cursor = conn.cursor()
@@ -280,6 +237,7 @@ def webhook():
         close_open_trades(cursor, symbol, price)
         update_future_prices(cursor, price)
 
+        # TREND ALIGNMENT
         cursor.execute("""
             SELECT vwap_trend
             FROM signal_history
@@ -300,25 +258,31 @@ def webhook():
         else:
             trend_alignment = "counter"
 
+        # 🧠 REGIME DETECTION
+        regime = "trend" if trend_alignment == "aligned" else "range"
+
         signal = {
-            "base_decision": "HOLD",
             "trend_alignment": trend_alignment,
-            "confluence_score": confluence_score,
-            "session": session,
             "distance": distance,
             "momentum": momentum
         }
 
         models = {
-            "adaptive_v1": adaptive_model(signal),
             "exploratory_v1": exploratory_model_v1(signal),
             "exploratory_v2_safe": exploratory_model_v2_safe(signal),
-            "exploratory_v3_aggressive": exploratory_model_v3_aggressive(signal)
+            "exploratory_v3_aggressive": exploratory_model_v3_aggressive(signal),
+            "trend_model_v1": trend_model_v1(signal)
         }
 
-        # 🚀 EXECUTION = v2 SAFE
+        # 🚀 EXECUTION SWITCH
         trade_taken = False
-        decision_model = models["exploratory_v2_safe"]
+
+        if regime == "range":
+            decision_model = models["exploratory_v2_safe"]
+            execution_model = "exploratory_v2_safe"
+        else:
+            decision_model = models["trend_model_v1"]
+            execution_model = "trend_model_v1"
 
         if timeframe == "5" and decision_model != "HOLD":
 
@@ -357,7 +321,7 @@ def webhook():
                 ))
 
                 trade_taken = True
-                send_telegram(f"{decision_model} {symbol} @ {price}")
+                send_telegram(f"{execution_model} → {decision_model} {symbol} @ {price}")
 
         # SAVE ALL MODELS
         for model_name, decision in models.items():
@@ -375,7 +339,7 @@ def webhook():
                 atr, volume, "SIGNAL", decision,
                 momentum, vwap_trend, timeframe, candle_time,
                 signal_id, session, vwap_bucket,
-                trade_taken if model_name == "exploratory_v2_safe" else False,
+                trade_taken if model_name == execution_model else False,
                 trend_alignment, model_name
             ))
 
