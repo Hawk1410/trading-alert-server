@@ -223,9 +223,9 @@ def update_future_prices(cursor, current_price):
         cursor.execute("""
             UPDATE signal_history
             SET is_win = CASE
-                WHEN decision_model = 'LONG' AND price_after_5_candles > price THEN TRUE
-                WHEN decision_model = 'SHORT' AND price_after_5_candles < price THEN TRUE
-                WHEN decision_model IN ('LONG','SHORT') THEN FALSE
+                WHEN decision = 'LONG' AND price_after_5_candles > price THEN TRUE
+                WHEN decision = 'SHORT' AND price_after_5_candles < price THEN TRUE
+                WHEN decision IN ('LONG','SHORT') THEN FALSE
                 ELSE NULL
             END
             WHERE price_after_5_candles IS NOT NULL
@@ -266,6 +266,13 @@ def webhook():
         session = get_session()
         vwap_bucket = get_vwap_bucket(distance)
 
+        # ✅ confluence
+        confluence_score = 0
+        if momentum == "up":
+            confluence_score += 1
+        if vwap_trend == "up":
+            confluence_score += 1
+
         conn = get_db_connection()
         conn.autocommit = True
         cursor = conn.cursor()
@@ -296,7 +303,7 @@ def webhook():
         signal = {
             "base_decision": "HOLD",
             "trend_alignment": trend_alignment,
-            "confluence_score": 0,
+            "confluence_score": confluence_score,
             "session": session,
             "distance": distance,
             "momentum": momentum
@@ -382,3 +389,4 @@ def webhook():
         if cursor:
             cursor.close()
         if conn:
+            conn.close()
