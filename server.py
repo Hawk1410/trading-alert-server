@@ -10,11 +10,16 @@ app = Flask(__name__)
 STOP_LOSS = 0.4
 TAKE_PROFIT = 0.8
 
-# === EXECUTION FILTERS (NEW 🔥) ===
-ALLOWED_MODELS = ["trend_model_v1"]  # ONLY trade best model
+# === V2 EXECUTION FILTERS ===
+ALLOWED_MODELS = ["trend_model_v1"]
 
-ALLOWED_VWAP_BUCKETS = ["0.2-0.5", "0.5-1"]  # sweet spot
+ALLOWED_VWAP_BUCKETS = ["0.2-0.5", "0.5-1"]
 REQUIRE_TREND_ALIGNMENT = True
+
+# NEW 🔥
+MIN_MOMENTUM = 0.5
+MIN_ATR = 0.2
+MIN_TREND_STRENGTH = 0.5
 
 # === DATABASE ===
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -22,11 +27,15 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
-# === CORE DECISION ENGINE ===
+# === CORE DECISION ENGINE V2 ===
 def should_take_trade(data):
     model = data.get("model_version")
     vwap_bucket = data.get("vwap_distance_bucket")
     trend_alignment = data.get("trend_alignment")
+
+    momentum = float(data.get("momentum_strength", 0))
+    atr = float(data.get("atr", 0))
+    trend_strength = float(data.get("trend_strength", 0))
 
     # 1. Model filter
     if model not in ALLOWED_MODELS:
@@ -36,13 +45,25 @@ def should_take_trade(data):
     if vwap_bucket not in ALLOWED_VWAP_BUCKETS:
         return False, "bad_vwap_distance"
 
-    # 3. Trend alignment filter
+    # 3. Trend alignment
     if REQUIRE_TREND_ALIGNMENT and trend_alignment != "aligned":
         return False, "not_trend_aligned"
 
-    return True, "passed_all_filters"
+    # 4. Momentum filter 🔥
+    if momentum < MIN_MOMENTUM:
+        return False, "low_momentum"
 
-# === MAIN WEBHOOK ===
+    # 5. Volatility filter 🔥
+    if atr < MIN_ATR:
+        return False, "low_volatility"
+
+    # 6. Chop filter 🔥
+    if trend_strength < MIN_TREND_STRENGTH:
+        return False, "weak_trend"
+
+    return True, "v2_pass"
+
+# === WEBHOOK ===
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
@@ -53,10 +74,8 @@ def webhook():
         symbol = data.get("symbol")
         price = float(data.get("price", 0))
 
-        # === FILTER DECISION ===
         trade_taken, hold_reason = should_take_trade(data)
 
-        # === DB INSERT ===
         conn = get_db_connection()
         cur = conn.cursor()
 
@@ -71,13 +90,17 @@ def webhook():
                 trade_taken,
                 hold_reason,
                 vwap_distance_bucket,
-                trend_alignment
+                trend_alignment,
+                momentum_strength,
+                atr,
+                trend_strength
             )
             VALUES (
                 gen_random_uuid(),
                 NOW(),
                 %s, %s, %s, %s,
-                %s, %s, %s, %s
+                %s, %s, %s, %s,
+                %s, %s, %s
             )
         """, (
             model_version,
@@ -87,14 +110,16 @@ def webhook():
             trade_taken,
             hold_reason,
             data.get("vwap_distance_bucket"),
-            data.get("trend_alignment")
+            data.get("trend_alignment"),
+            data.get("momentum_strength"),
+            data.get("atr"),
+            data.get("trend_strength")
         ))
 
         conn.commit()
         cur.close()
         conn.close()
 
-        # === EXECUTION RESPONSE ===
         if trade_taken and decision_model in ["LONG", "SHORT"]:
             return jsonify({
                 "action": decision_model,
@@ -114,8 +139,6 @@ def webhook():
         return jsonify({"error": str(e)}), 500
 
 
-# === HEALTH CHECK ===
 @app.route("/")
 def home():
-    return "Bot is running 🚀"
-    
+    return "Trend V2 running 🚀"
