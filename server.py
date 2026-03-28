@@ -1,404 +1,121 @@
 from flask import Flask, request, jsonify
 import os
 import psycopg2
-import requests
 import traceback
-import uuid
-import json
 from datetime import datetime
 
 app = Flask(__name__)
 
 # === STRATEGY CONFIG ===
-STOP_LOSS = 0.5
-TAKE_PROFIT = 1.2
+STOP_LOSS = 0.4
+TAKE_PROFIT = 0.8
 
+# === EXECUTION FILTERS (NEW 🔥) ===
+ALLOWED_MODELS = ["trend_model_v1"]  # ONLY trade best model
 
-# ================================
-# DB CONNECTION
-# ================================
+ALLOWED_VWAP_BUCKETS = ["0.2-0.5", "0.5-1"]  # sweet spot
+REQUIRE_TREND_ALIGNMENT = True
+
+# === DATABASE ===
+DATABASE_URL = os.environ.get("DATABASE_URL")
+
 def get_db_connection():
-    return psycopg2.connect(
-        os.getenv("DATABASE_URL"),
-        sslmode="require",
-        connect_timeout=10,
-    )
+    return psycopg2.connect(DATABASE_URL)
 
+# === CORE DECISION ENGINE ===
+def should_take_trade(data):
+    model = data.get("model_version")
+    vwap_bucket = data.get("vwap_distance_bucket")
+    trend_alignment = data.get("trend_alignment")
 
-# ================================
-# TELEGRAM
-# ================================
-def send_telegram(msg):
-    try:
-        token = os.getenv("TELEGRAM_TOKEN")
-        chat_id = os.getenv("TELEGRAM_CHAT_ID")
+    # 1. Model filter
+    if model not in ALLOWED_MODELS:
+        return False, "model_not_allowed"
 
-        if not token or not chat_id:
-            return
+    # 2. VWAP filter
+    if vwap_bucket not in ALLOWED_VWAP_BUCKETS:
+        return False, "bad_vwap_distance"
 
-        requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": msg},
-            timeout=5
-        )
-    except Exception as e:
-        print("Telegram error:", e)
+    # 3. Trend alignment filter
+    if REQUIRE_TREND_ALIGNMENT and trend_alignment != "aligned":
+        return False, "not_trend_aligned"
 
+    return True, "passed_all_filters"
 
-# ================================
-# HELPERS
-# ================================
-def get_session():
-    hour = datetime.utcnow().hour
-    if hour < 8:
-        return "asia"
-    elif hour < 16:
-        return "london"
-    else:
-        return "ny"
-
-
-def get_vwap_bucket(distance):
-    d = abs(distance)
-    if d < 0.2:
-        return "0-0.2"
-    elif d < 0.5:
-        return "0.2-0.5"
-    elif d < 1:
-        return "0.5-1"
-    else:
-        return "1+"
-
-
-# ================================
-# ADAPTIVE MODEL
-# ================================
-def get_adaptive_rules():
-    try:
-        return json.loads(os.getenv("ADAPTIVE_RULES", "{}"))
-    except:
-        return {}
-
-
-def adaptive_model(signal):
-    rules = get_adaptive_rules()
-
-    if "allowed_sessions" in rules:
-        if signal.get("session") not in rules["allowed_sessions"]:
-            return "HOLD"
-
-    if "allowed_directions" in rules:
-        if signal["base_decision"] not in rules["allowed_directions"]:
-            return "HOLD"
-
-    if "min_confluence" in rules:
-        if signal["confluence_score"] < rules["min_confluence"]:
-            return "HOLD"
-
-    return signal["base_decision"]
-
-
-# ================================
-# EXPLORATORY MODELS
-# ================================
-def exploratory_model_v1(signal):
-    if signal["distance"] < -0.3 and signal["momentum"] == "up":
-        return "LONG"
-
-    if signal["distance"] > 0.3 and signal["momentum"] == "down":
-        return "SHORT"
-
-    return "HOLD"
-
-
-def exploratory_model_v2_safe(signal):
-    d = abs(signal["distance"])
-
-    if not (0.2 <= d <= 1):
-        return "HOLD"
-
-    if signal["distance"] < 0 and signal["momentum"] == "up":
-        return "LONG"
-
-    if signal["distance"] > 0 and signal["momentum"] == "down":
-        return "SHORT"
-
-    return "HOLD"
-
-
-def exploratory_model_v3_aggressive(signal):
-    d = abs(signal["distance"])
-
-    if not (0.2 <= d <= 1):
-        return "HOLD"
-
-    if signal["trend_alignment"] != "counter":
-        return "HOLD"
-
-    if signal["distance"] < 0 and signal["momentum"] == "up":
-        return "LONG"
-
-    if signal["distance"] > 0 and signal["momentum"] == "down":
-        return "SHORT"
-
-    return "HOLD"
-
-
-# ================================
-# 🚀 TREND MODEL V2
-# ================================
-def trend_model_v2(signal):
-
-    d = signal["distance"]
-
-    if signal["trend_alignment"] != "aligned":
-        return "HOLD"
-
-    if d < 0.5:
-        return "HOLD"
-
-    if signal["momentum"] != "up":
-        return "HOLD"
-
-    return "LONG"
-
-
-# ================================
-# CLOSE TRADES
-# ================================
-def close_open_trades(cursor, symbol, price):
-
-    cursor.execute("""
-        SELECT id, direction, stop_price, target_price
-        FROM bot_trades
-        WHERE symbol = %s AND status = 'OPEN'
-    """, (symbol,))
-
-    trades = cursor.fetchall()
-
-    for trade_id, direction, stop, target in trades:
-
-        close_reason = None
-
-        if direction == "LONG":
-            if price <= stop:
-                close_reason = "STOP_LOSS"
-            elif price >= target:
-                close_reason = "TAKE_PROFIT"
-
-        elif direction == "SHORT":
-            if price >= stop:
-                close_reason = "STOP_LOSS"
-            elif price <= target:
-                close_reason = "TAKE_PROFIT"
-
-        if close_reason:
-            cursor.execute("""
-                UPDATE bot_trades
-                SET status = 'CLOSED',
-                    closed_at = NOW(),
-                    close_price = %s,
-                    close_reason = %s
-                WHERE id = %s
-            """, (price, close_reason, trade_id))
-
-            send_telegram(f"{symbol} {direction} CLOSED ({close_reason}) @ {price}")
-
-
-# ================================
-# FUTURE PRICE UPDATER
-# ================================
-def update_future_prices(cursor, current_price):
-    try:
-        cursor.execute("""
-            UPDATE signal_history
-            SET price_after_5_candles = %s
-            WHERE price_after_5_candles IS NULL
-            AND created_at <= NOW() - INTERVAL '25 minutes'
-        """, (current_price,))
-
-        cursor.execute("""
-            UPDATE signal_history
-            SET is_win = CASE
-                WHEN decision_model = 'LONG' AND price_after_5_candles > price THEN TRUE
-                WHEN decision_model = 'SHORT' AND price_after_5_candles < price THEN TRUE
-                WHEN decision_model IN ('LONG','SHORT') THEN FALSE
-                ELSE NULL
-            END
-            WHERE price_after_5_candles IS NOT NULL
-            AND is_win IS NULL
-        """)
-
-    except Exception as e:
-        print("Future update error:", e)
-
-
-# ================================
-# WEBHOOK
-# ================================
+# === MAIN WEBHOOK ===
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    conn = None
-    cursor = None
-
     try:
-        data = request.get_json(force=True)
+        data = request.json
 
-        symbol = data["symbol"]
-        price = float(data["price"])
-        vwap = float(data["vwap"])
-        atr = float(data["atr"])
+        model_version = data.get("model_version")
+        decision_model = data.get("decision_model")
+        symbol = data.get("symbol")
+        price = float(data.get("price", 0))
 
-        momentum = data.get("momentum")
-        vwap_trend = data.get("vwap_trend")
-        timeframe = data.get("timeframe")
+        # === FILTER DECISION ===
+        trade_taken, hold_reason = should_take_trade(data)
 
-        volume = float(data.get("volume", 0))
-        candle_time = int(float(data.get("candle_time", 0)))
-
-        distance = ((price - vwap) / vwap) * 100
-        distance_abs = price - vwap
-
-        signal_id = str(uuid.uuid4())
-        session = get_session()
-        vwap_bucket = get_vwap_bucket(distance)
-
+        # === DB INSERT ===
         conn = get_db_connection()
-        conn.autocommit = True
-        cursor = conn.cursor()
+        cur = conn.cursor()
 
-        close_open_trades(cursor, symbol, price)
-        update_future_prices(cursor, price)
+        cur.execute("""
+            INSERT INTO signal_history (
+                id,
+                created_at,
+                model_version,
+                decision_model,
+                symbol,
+                entry_price,
+                trade_taken,
+                hold_reason,
+                vwap_distance_bucket,
+                trend_alignment
+            )
+            VALUES (
+                gen_random_uuid(),
+                NOW(),
+                %s, %s, %s, %s,
+                %s, %s, %s, %s
+            )
+        """, (
+            model_version,
+            decision_model,
+            symbol,
+            price,
+            trade_taken,
+            hold_reason,
+            data.get("vwap_distance_bucket"),
+            data.get("trend_alignment")
+        ))
 
-        # === TREND ALIGNMENT ===
-        cursor.execute("""
-            SELECT vwap_trend
-            FROM signal_history
-            WHERE symbol = %s AND timeframe = '15'
-            ORDER BY created_at DESC
-            LIMIT 1
-        """, (symbol,))
-        result = cursor.fetchone()
-        trend_15m = result[0] if result else None
+        conn.commit()
+        cur.close()
+        conn.close()
 
-        if trend_15m is None:
-            trend_alignment = "unknown"
-        elif (
-            (momentum == "up" and trend_15m == "up") or
-            (momentum == "down" and trend_15m == "down")
-        ):
-            trend_alignment = "aligned"
-        else:
-            trend_alignment = "counter"
+        # === EXECUTION RESPONSE ===
+        if trade_taken and decision_model in ["LONG", "SHORT"]:
+            return jsonify({
+                "action": decision_model,
+                "symbol": symbol,
+                "entry_price": price,
+                "stop_loss": STOP_LOSS,
+                "take_profit": TAKE_PROFIT
+            })
 
-        signal = {
-            "base_decision": "HOLD",
-            "trend_alignment": trend_alignment,
-            "confluence_score": 0,
-            "session": session,
-            "distance": distance,
-            "momentum": momentum
-        }
-
-        # === MODELS ===
-        models = {
-            "adaptive_v1": adaptive_model(signal),
-            "exploratory_v1": exploratory_model_v1(signal),
-            "exploratory_v2_safe": exploratory_model_v2_safe(signal),
-            "exploratory_v3_aggressive": exploratory_model_v3_aggressive(signal),
-            "trend_model_v2": trend_model_v2(signal)
-        }
-
-        # ================================
-        # 🚀 EXECUTION PRIORITY
-        # ================================
-        trade_taken = False
-
-        if models["trend_model_v2"] != "HOLD":
-            decision_model = models["trend_model_v2"]
-            active_model = "trend_model_v2"
-
-        elif models["exploratory_v2_safe"] != "HOLD":
-            decision_model = models["exploratory_v2_safe"]
-            active_model = "exploratory_v2_safe"
-
-        else:
-            decision_model = "HOLD"
-            active_model = None
-
-        # ================================
-        # EXECUTE TRADE
-        # ================================
-        if timeframe == "5" and decision_model != "HOLD":
-
-            cursor.execute("""
-                SELECT COUNT(*)
-                FROM bot_trades
-                WHERE symbol = %s
-                AND direction = %s
-                AND status = 'OPEN'
-            """, (symbol, decision_model))
-
-            exists = cursor.fetchone()[0]
-
-            if exists == 0:
-
-                if decision_model == "LONG":
-                    stop_price = price * (1 - STOP_LOSS / 100)
-                    target_price = price * (1 + TAKE_PROFIT / 100)
-                else:
-                    stop_price = price * (1 + STOP_LOSS / 100)
-                    target_price = price * (1 - TAKE_PROFIT / 100)
-
-                cursor.execute("""
-                    INSERT INTO bot_trades (
-                        id, symbol, direction, entry_price,
-                        stop_price, target_price, status, opened_at
-                    )
-                    VALUES (%s, %s, %s, %s, %s, %s, 'OPEN', NOW())
-                """, (
-                    str(uuid.uuid4()),
-                    symbol,
-                    decision_model,
-                    price,
-                    stop_price,
-                    target_price
-                ))
-
-                trade_taken = True
-                send_telegram(f"{decision_model} {symbol} ({active_model}) @ {price}")
-
-        # ================================
-        # SAVE ALL MODELS
-        # ================================
-        for model_name, decision in models.items():
-            cursor.execute("""
-                INSERT INTO signal_history (
-                    symbol, price, vwap, distance_from_vwap_pct, distance_abs,
-                    atr, volume, decision, decision_model,
-                    momentum, vwap_trend, timeframe, candle_time,
-                    signal_id, session, vwap_distance_bucket,
-                    trade_taken, trend_alignment, model_version
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (
-                symbol, price, vwap, distance, distance_abs,
-                atr, volume, "SIGNAL", decision,
-                momentum, vwap_trend, timeframe, candle_time,
-                signal_id, session, vwap_bucket,
-                trade_taken if model_name == active_model else False,
-                trend_alignment, model_name
-            ))
-
-        return jsonify({"status": "ok"}), 200
+        return jsonify({
+            "action": "HOLD",
+            "reason": hold_reason
+        })
 
     except Exception as e:
         print(traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
-            
+
+# === HEALTH CHECK ===
+@app.route("/")
+def home():
+    return "Bot is running 🚀"
+    
