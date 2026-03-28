@@ -73,16 +73,19 @@ def get_vwap_bucket(distance):
 # ================================
 # MODELS
 # ================================
-
 def exploratory_model_v1(signal):
+
     if signal["distance"] < -0.3 and signal["momentum"] == "up":
         return "LONG"
+
     if signal["distance"] > 0.3 and signal["momentum"] == "down":
         return "SHORT"
+
     return "HOLD"
 
 
 def exploratory_model_v2_safe(signal):
+
     d = abs(signal["distance"])
 
     if not (0.2 <= d <= 1):
@@ -98,6 +101,7 @@ def exploratory_model_v2_safe(signal):
 
 
 def exploratory_model_v3_aggressive(signal):
+
     d = abs(signal["distance"])
 
     if not (0.2 <= d <= 1):
@@ -110,21 +114,6 @@ def exploratory_model_v3_aggressive(signal):
         return "LONG"
 
     if signal["distance"] > 0 and signal["momentum"] == "down":
-        return "SHORT"
-
-    return "HOLD"
-
-
-# 🆕 TREND MODEL
-def trend_model_v1(signal):
-
-    if signal["trend_alignment"] != "aligned":
-        return "HOLD"
-
-    if signal["distance"] > 0 and signal["momentum"] == "up":
-        return "LONG"
-
-    if signal["distance"] < 0 and signal["momentum"] == "down":
         return "SHORT"
 
     return "HOLD"
@@ -237,7 +226,7 @@ def webhook():
         close_open_trades(cursor, symbol, price)
         update_future_prices(cursor, price)
 
-        # TREND ALIGNMENT
+        # === 15m TREND ALIGNMENT ===
         cursor.execute("""
             SELECT vwap_trend
             FROM signal_history
@@ -258,33 +247,31 @@ def webhook():
         else:
             trend_alignment = "counter"
 
-        # 🧠 REGIME DETECTION
-        regime = "trend" if trend_alignment == "aligned" else "range"
-
         signal = {
-            "trend_alignment": trend_alignment,
             "distance": distance,
-            "momentum": momentum
+            "momentum": momentum,
+            "trend_alignment": trend_alignment
         }
 
         models = {
             "exploratory_v1": exploratory_model_v1(signal),
             "exploratory_v2_safe": exploratory_model_v2_safe(signal),
-            "exploratory_v3_aggressive": exploratory_model_v3_aggressive(signal),
-            "trend_model_v1": trend_model_v1(signal)
+            "exploratory_v3_aggressive": exploratory_model_v3_aggressive(signal)
         }
 
-        # 🚀 EXECUTION SWITCH
+        # ================================
+        # 🚀 EXECUTION (NEW EDGE)
+        # ================================
         trade_taken = False
+        decision_model = models["exploratory_v1"]
 
-        if regime == "range":
-            decision_model = models["exploratory_v2_safe"]
-            execution_model = "exploratory_v2_safe"
-        else:
-            decision_model = models["trend_model_v1"]
-            execution_model = "trend_model_v1"
+        valid_trade = (
+            decision_model == "LONG" and
+            trend_alignment == "counter" and
+            0.2 <= abs(distance) <= 0.5
+        )
 
-        if timeframe == "5" and decision_model != "HOLD":
+        if timeframe == "5" and valid_trade:
 
             cursor.execute("""
                 SELECT COUNT(*)
@@ -298,12 +285,8 @@ def webhook():
 
             if exists == 0:
 
-                if decision_model == "LONG":
-                    stop_price = price * (1 - STOP_LOSS / 100)
-                    target_price = price * (1 + TAKE_PROFIT / 100)
-                else:
-                    stop_price = price * (1 + STOP_LOSS / 100)
-                    target_price = price * (1 - TAKE_PROFIT / 100)
+                stop_price = price * (1 - STOP_LOSS / 100)
+                target_price = price * (1 + TAKE_PROFIT / 100)
 
                 cursor.execute("""
                     INSERT INTO bot_trades (
@@ -321,9 +304,11 @@ def webhook():
                 ))
 
                 trade_taken = True
-                send_telegram(f"{execution_model} → {decision_model} {symbol} @ {price}")
+                send_telegram(f"EDGE LONG {symbol} @ {price}")
 
+        # ================================
         # SAVE ALL MODELS
+        # ================================
         for model_name, decision in models.items():
             cursor.execute("""
                 INSERT INTO signal_history (
@@ -339,7 +324,7 @@ def webhook():
                 atr, volume, "SIGNAL", decision,
                 momentum, vwap_trend, timeframe, candle_time,
                 signal_id, session, vwap_bucket,
-                trade_taken if model_name == execution_model else False,
+                trade_taken if model_name == "exploratory_v1" else False,
                 trend_alignment, model_name
             ))
 
@@ -354,3 +339,4 @@ def webhook():
             cursor.close()
         if conn:
             conn.close()
+            
