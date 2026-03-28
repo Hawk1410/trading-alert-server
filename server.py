@@ -10,8 +10,8 @@ from datetime import datetime
 app = Flask(__name__)
 
 # === STRATEGY CONFIG ===
-STOP_LOSS = 0.4
-TAKE_PROFIT = 0.8
+STOP_LOSS = 0.5
+TAKE_PROFIT = 1.2
 
 
 # ================================
@@ -71,10 +71,37 @@ def get_vwap_bucket(distance):
 
 
 # ================================
-# MODELS
+# ADAPTIVE MODEL
+# ================================
+def get_adaptive_rules():
+    try:
+        return json.loads(os.getenv("ADAPTIVE_RULES", "{}"))
+    except:
+        return {}
+
+
+def adaptive_model(signal):
+    rules = get_adaptive_rules()
+
+    if "allowed_sessions" in rules:
+        if signal.get("session") not in rules["allowed_sessions"]:
+            return "HOLD"
+
+    if "allowed_directions" in rules:
+        if signal["base_decision"] not in rules["allowed_directions"]:
+            return "HOLD"
+
+    if "min_confluence" in rules:
+        if signal["confluence_score"] < rules["min_confluence"]:
+            return "HOLD"
+
+    return signal["base_decision"]
+
+
+# ================================
+# EXPLORATORY MODELS
 # ================================
 def exploratory_model_v1(signal):
-
     if signal["distance"] < -0.3 and signal["momentum"] == "up":
         return "LONG"
 
@@ -85,7 +112,6 @@ def exploratory_model_v1(signal):
 
 
 def exploratory_model_v2_safe(signal):
-
     d = abs(signal["distance"])
 
     if not (0.2 <= d <= 1):
@@ -101,7 +127,6 @@ def exploratory_model_v2_safe(signal):
 
 
 def exploratory_model_v3_aggressive(signal):
-
     d = abs(signal["distance"])
 
     if not (0.2 <= d <= 1):
@@ -117,6 +142,25 @@ def exploratory_model_v3_aggressive(signal):
         return "SHORT"
 
     return "HOLD"
+
+
+# ================================
+# 🚀 TREND MODEL V2
+# ================================
+def trend_model_v2(signal):
+
+    d = signal["distance"]
+
+    if signal["trend_alignment"] != "aligned":
+        return "HOLD"
+
+    if d < 0.5:
+        return "HOLD"
+
+    if signal["momentum"] != "up":
+        return "HOLD"
+
+    return "LONG"
 
 
 # ================================
@@ -226,7 +270,7 @@ def webhook():
         close_open_trades(cursor, symbol, price)
         update_future_prices(cursor, price)
 
-        # === 15m TREND ALIGNMENT ===
+        # === TREND ALIGNMENT ===
         cursor.execute("""
             SELECT vwap_trend
             FROM signal_history
@@ -248,30 +292,44 @@ def webhook():
             trend_alignment = "counter"
 
         signal = {
+            "base_decision": "HOLD",
+            "trend_alignment": trend_alignment,
+            "confluence_score": 0,
+            "session": session,
             "distance": distance,
-            "momentum": momentum,
-            "trend_alignment": trend_alignment
+            "momentum": momentum
         }
 
+        # === MODELS ===
         models = {
+            "adaptive_v1": adaptive_model(signal),
             "exploratory_v1": exploratory_model_v1(signal),
             "exploratory_v2_safe": exploratory_model_v2_safe(signal),
-            "exploratory_v3_aggressive": exploratory_model_v3_aggressive(signal)
+            "exploratory_v3_aggressive": exploratory_model_v3_aggressive(signal),
+            "trend_model_v2": trend_model_v2(signal)
         }
 
         # ================================
-        # 🚀 EXECUTION (NEW EDGE)
+        # 🚀 EXECUTION PRIORITY
         # ================================
         trade_taken = False
-        decision_model = models["exploratory_v1"]
 
-        valid_trade = (
-            decision_model == "LONG" and
-            trend_alignment == "counter" and
-            0.2 <= abs(distance) <= 0.5
-        )
+        if models["trend_model_v2"] != "HOLD":
+            decision_model = models["trend_model_v2"]
+            active_model = "trend_model_v2"
 
-        if timeframe == "5" and valid_trade:
+        elif models["exploratory_v2_safe"] != "HOLD":
+            decision_model = models["exploratory_v2_safe"]
+            active_model = "exploratory_v2_safe"
+
+        else:
+            decision_model = "HOLD"
+            active_model = None
+
+        # ================================
+        # EXECUTE TRADE
+        # ================================
+        if timeframe == "5" and decision_model != "HOLD":
 
             cursor.execute("""
                 SELECT COUNT(*)
@@ -285,8 +343,12 @@ def webhook():
 
             if exists == 0:
 
-                stop_price = price * (1 - STOP_LOSS / 100)
-                target_price = price * (1 + TAKE_PROFIT / 100)
+                if decision_model == "LONG":
+                    stop_price = price * (1 - STOP_LOSS / 100)
+                    target_price = price * (1 + TAKE_PROFIT / 100)
+                else:
+                    stop_price = price * (1 + STOP_LOSS / 100)
+                    target_price = price * (1 - TAKE_PROFIT / 100)
 
                 cursor.execute("""
                     INSERT INTO bot_trades (
@@ -304,7 +366,7 @@ def webhook():
                 ))
 
                 trade_taken = True
-                send_telegram(f"EDGE LONG {symbol} @ {price}")
+                send_telegram(f"{decision_model} {symbol} ({active_model}) @ {price}")
 
         # ================================
         # SAVE ALL MODELS
@@ -324,7 +386,7 @@ def webhook():
                 atr, volume, "SIGNAL", decision,
                 momentum, vwap_trend, timeframe, candle_time,
                 signal_id, session, vwap_bucket,
-                trade_taken if model_name == "exploratory_v1" else False,
+                trade_taken if model_name == active_model else False,
                 trend_alignment, model_name
             ))
 
