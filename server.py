@@ -14,9 +14,6 @@ STOP_LOSS = 0.4
 TAKE_PROFIT = 0.8
 MIN_ATR = 0
 
-MIN_DISTANCE = 0.5
-MIN_CONFLUENCE = 2
-
 
 # ================================
 # DB CONNECTION
@@ -103,9 +100,9 @@ def adaptive_model(signal):
 
 
 # ================================
-# 🔥 EXPLORATORY MODEL
+# 🔥 EXPLORATORY MODELS
 # ================================
-def exploratory_model(signal):
+def exploratory_model_v1(signal):
 
     if (
         signal["distance"] < -0.3 and
@@ -115,6 +112,53 @@ def exploratory_model(signal):
 
     if (
         signal["distance"] > 0.3 and
+        signal["momentum"] == "down"
+    ):
+        return "SHORT"
+
+    return "HOLD"
+
+
+def exploratory_model_v2_safe(signal):
+
+    d = abs(signal["distance"])
+
+    if not (0.2 <= d <= 1):
+        return "HOLD"
+
+    if (
+        signal["distance"] < 0 and
+        signal["momentum"] == "up"
+    ):
+        return "LONG"
+
+    if (
+        signal["distance"] > 0 and
+        signal["momentum"] == "down"
+    ):
+        return "SHORT"
+
+    return "HOLD"
+
+
+def exploratory_model_v3_aggressive(signal):
+
+    d = abs(signal["distance"])
+
+    if not (0.2 <= d <= 1):
+        return "HOLD"
+
+    if signal["trend_alignment"] != "counter":
+        return "HOLD"
+
+    if (
+        signal["distance"] < 0 and
+        signal["momentum"] == "up"
+    ):
+        return "LONG"
+
+    if (
+        signal["distance"] > 0 and
         signal["momentum"] == "down"
     ):
         return "SHORT"
@@ -171,13 +215,6 @@ def update_future_prices(cursor, current_price):
     try:
         cursor.execute("""
             UPDATE signal_history
-            SET price_after_3_candles = %s
-            WHERE price_after_3_candles IS NULL
-            AND created_at <= NOW() - INTERVAL '15 minutes'
-        """, (current_price,))
-
-        cursor.execute("""
-            UPDATE signal_history
             SET price_after_5_candles = %s
             WHERE price_after_5_candles IS NULL
             AND created_at <= NOW() - INTERVAL '25 minutes'
@@ -194,13 +231,6 @@ def update_future_prices(cursor, current_price):
             WHERE price_after_5_candles IS NOT NULL
             AND is_win IS NULL
         """)
-
-        cursor.execute("""
-            UPDATE signal_history
-            SET price_after_10_candles = %s
-            WHERE price_after_10_candles IS NULL
-            AND created_at <= NOW() - INTERVAL '50 minutes'
-        """, (current_price,))
 
     except Exception as e:
         print("Future update error:", e)
@@ -234,14 +264,7 @@ def webhook():
 
         signal_id = str(uuid.uuid4())
         session = get_session()
-        spread_proxy = atr
         vwap_bucket = get_vwap_bucket(distance)
-
-        confluence_score = 0
-        if momentum == "up":
-            confluence_score += 1
-        if vwap_trend == "up":
-            confluence_score += 1
 
         conn = get_db_connection()
         conn.autocommit = True
@@ -273,7 +296,7 @@ def webhook():
         signal = {
             "base_decision": "HOLD",
             "trend_alignment": trend_alignment,
-            "confluence_score": confluence_score,
+            "confluence_score": 0,
             "session": session,
             "distance": distance,
             "momentum": momentum
@@ -281,19 +304,16 @@ def webhook():
 
         models = {
             "adaptive_v1": adaptive_model(signal),
-            "exploratory_v1": exploratory_model(signal)
+            "exploratory_v1": exploratory_model_v1(signal),
+            "exploratory_v2_safe": exploratory_model_v2_safe(signal),
+            "exploratory_v3_aggressive": exploratory_model_v3_aggressive(signal)
         }
 
-        # 🚀 EXECUTION (exploratory + filter)
+        # 🚀 EXECUTION = v2 SAFE
         trade_taken = False
-        decision_model = models["exploratory_v1"]
+        decision_model = models["exploratory_v2_safe"]
 
-        valid_trade = (
-            decision_model != "HOLD" and
-            0.5 <= abs(distance) <= 1
-        )
-
-        if timeframe == "5" and valid_trade:
+        if timeframe == "5" and decision_model != "HOLD":
 
             cursor.execute("""
                 SELECT COUNT(*)
@@ -332,26 +352,24 @@ def webhook():
                 trade_taken = True
                 send_telegram(f"{decision_model} {symbol} @ {price}")
 
-        # SAVE
+        # SAVE ALL MODELS
         for model_name, decision in models.items():
             cursor.execute("""
                 INSERT INTO signal_history (
                     symbol, price, vwap, distance_from_vwap_pct, distance_abs,
-                    atr, volume, decision, decision_model, is_extreme,
+                    atr, volume, decision, decision_model,
                     momentum, vwap_trend, timeframe, candle_time,
-                    signal_id, session, spread_proxy, vwap_distance_bucket,
-                    entry_signal_strength, trade_taken, confluence_score,
-                    trend_alignment, market_regime, model_version
+                    signal_id, session, vwap_distance_bucket,
+                    trade_taken, trend_alignment, model_version
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (
                 symbol, price, vwap, distance, distance_abs,
-                atr, volume, "SIGNAL", decision, distance < -1.5,
+                atr, volume, "SIGNAL", decision,
                 momentum, vwap_trend, timeframe, candle_time,
-                signal_id, session, spread_proxy, vwap_bucket,
-                confluence_score * 25, trade_taken if model_name == "exploratory_v1" else False,
-                confluence_score, trend_alignment, "trend" if atr > 0.5 else "range",
-                model_name
+                signal_id, session, vwap_bucket,
+                trade_taken if model_name == "exploratory_v2_safe" else False,
+                trend_alignment, model_name
             ))
 
         return jsonify({"status": "ok"}), 200
@@ -364,5 +382,3 @@ def webhook():
         if cursor:
             cursor.close()
         if conn:
-            conn.close()
-            
