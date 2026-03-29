@@ -13,6 +13,8 @@ TAKE_PROFIT = 0.8
 MIN_MOMENTUM = 0.001
 MIN_TREND_STRENGTH = 0.0001
 
+DATA_VERSION = "v2_clean"
+
 def log(msg):
     print(msg, flush=True)
 
@@ -79,8 +81,9 @@ def webhook():
                 trend_alignment,
                 momentum_strength,
                 trend_strength,
-                vwap_bucket
-            ) VALUES (%s, %s, %s, 'OPEN', %s, %s, %s, %s, %s, %s, %s)
+                vwap_bucket,
+                data_version
+            ) VALUES (%s, %s, %s, 'OPEN', %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             symbol,
             decision,
@@ -91,20 +94,21 @@ def webhook():
             trend_alignment,
             momentum_strength,
             trend_strength,
-            vwap_bucket
+            vwap_bucket,
+            DATA_VERSION
         ))
 
         conn.commit()
         cur.close()
         conn.close()
 
-        log(f"TRADE OPENED: {symbol} {decision} ({strategy_type})")
+        log(f"TRADE OPENED: {symbol} {decision} ({strategy_type}) | v2_clean")
 
         return jsonify({"status": "opened"})
 
     except Exception as e:
         log(f"ERROR: {str(e)}")
-        return jsonify({"error": str(e)}), 200  # <- IMPORTANT (prevents webhook death)
+        return jsonify({"error": str(e)}), 200
 
 
 @app.route("/check-trades", methods=["GET"])
@@ -124,7 +128,7 @@ def check_trades():
         for trade in trades:
             trade_id, symbol, direction, entry_price = trade
 
-            current_price = entry_price  # placeholder
+            current_price = entry_price  # placeholder (we'll upgrade this soon)
 
             pnl = ((current_price - entry_price) / entry_price) * 100
             if direction == "SHORT":
