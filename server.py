@@ -2,99 +2,121 @@ from flask import Flask, request, jsonify
 import os
 import psycopg2
 import traceback
+from datetime import datetime
 
 app = Flask(__name__)
 
-# === DATABASE CONNECTION ===
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
+# === STRATEGY CONFIG ===
+STOP_LOSS = 0.4
+TAKE_PROFIT = 0.8
+
+# === DB CONNECTION ===
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
-# === SAFE FLOAT HELPER ===
-def safe_float(value):
-    try:
-        return float(value)
-    except:
-        return None
-
-# === WEBHOOK ENDPOINT ===
+# === WEBHOOK ===
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
-        data = request.get_json()
+        data = request.json
 
-        print("Incoming data:", data)
+        print("📩 Incoming signal:", data)
+
+        symbol = data.get("symbol")
+        price = float(data.get("price", 0))
+        decision_model = data.get("decision_model")
+        model_version = data.get("model_version")
+
+        trend_alignment = data.get("trend_alignment")
+        momentum = float(data.get("momentum", 0))
+
+        # 🔥 FIXED SAFE TREND STRENGTH
+        trend_strength_raw = data.get("trend_strength")
+
+        try:
+            trend_strength = float(trend_strength_raw)
+        except:
+            trend_strength = None
 
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # === EXTRACT VALUES ===
-        model_version = data.get("model_version")
-        decision_model = data.get("decision_model")
-        symbol = data.get("symbol")
+        # === FILTER LOGIC ===
+        take_trade = False
 
-        price = safe_float(data.get("price"))
-        entry_price = price  # same as price for now
+        if decision_model in ["LONG", "SHORT"]:
+            
+            # ✅ alignment must be good
+            if trend_alignment == "aligned":
 
-        vwap_distance_bucket = data.get("vwap_distance_bucket")
-        trend_alignment = data.get("trend_alignment")
+                # ✅ momentum must confirm
+                if momentum > 0:
 
-        momentum = data.get("momentum")
-        momentum_strength = safe_float(data.get("momentum_strength"))
+                    # ✅ FIXED trend strength logic
+                    if trend_strength is None or trend_strength > 0:
+                        take_trade = True
 
-        atr = safe_float(data.get("atr"))
-        trend_strength = safe_float(data.get("trend_strength"))
-
-        # === INSERT INTO DATABASE ===
+        # === INSERT SIGNAL ===
         cur.execute("""
             INSERT INTO signal_history (
-                model_version,
-                decision_model,
                 symbol,
                 price,
-                entry_price,
-                vwap_distance_bucket,
+                decision_model,
+                model_version,
                 trend_alignment,
                 momentum,
-                momentum_strength,
-                atr,
-                trend_strength
+                trend_strength,
+                created_at
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
         """, (
-            model_version,
-            decision_model,
             symbol,
             price,
-            entry_price,
-            vwap_distance_bucket,
+            decision_model,
+            model_version,
             trend_alignment,
             momentum,
-            momentum_strength,
-            atr,
-            trend_strength
+            trend_strength,
+            datetime.utcnow()
         ))
+
+        # === CREATE TRADE ===
+        if take_trade:
+            cur.execute("""
+                INSERT INTO bot_trades (
+                    symbol,
+                    direction,
+                    entry_price,
+                    status,
+                    opened_at
+                )
+                VALUES (%s,%s,%s,'OPEN',%s)
+            """, (
+                symbol,
+                decision_model,
+                price,
+                datetime.utcnow()
+            ))
+
+            print("✅ TRADE OPENED")
+
+        else:
+            print("⛔ FILTERED OUT")
 
         conn.commit()
         cur.close()
         conn.close()
 
-        return jsonify({"status": "success"}), 200
+        return jsonify({"status": "ok"})
 
     except Exception as e:
-        print("ERROR:", str(e))
-        print(traceback.format_exc())
-        return jsonify({"status": "error", "message": str(e)}), 500
+        print("❌ ERROR:", str(e))
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
 
 
-# === HEALTH CHECK ===
 @app.route("/")
 def home():
-    return "Trading bot is running 🚀", 200
-
-
-# === RUN APP ===
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    return "🚀 Trading bot is live!"
