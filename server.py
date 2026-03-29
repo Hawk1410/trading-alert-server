@@ -25,7 +25,6 @@ def get_connection():
     return psycopg2.connect(DATABASE_URL)
 
 
-# 🔥 NEW: FETCH REAL PRICE FROM BINANCE
 def get_live_price(symbol):
     try:
         url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
@@ -51,12 +50,14 @@ def webhook():
         momentum_strength = float(data.get("momentum_strength", 0))
         trend_strength = float(data.get("trend_strength", 0))
         model_version = data.get("model_version", "unknown")
-        vwap_bucket = data.get("vwap_distance_bucket")
+
+        # ✅ CLEAN STANDARDISED NAME
+        distance_abs = data.get("vwap_distance_bucket")
 
         conn = get_connection()
         cur = conn.cursor()
 
-        # === STEP 1: CLOSE EXISTING TRADES USING REAL PRICE ===
+        # === CLOSE TRADES ===
         cur.execute("""
             SELECT id, symbol, direction, entry_price
             FROM bot_trades
@@ -64,15 +65,10 @@ def webhook():
             AND data_version = %s
         """, (DATA_VERSION,))
 
-        open_trades = cur.fetchall()
-
-        for trade in open_trades:
-            trade_id, trade_symbol, direction, entry_price = trade
-
+        for trade_id, trade_symbol, direction, entry_price in cur.fetchall():
             live_price = get_live_price(trade_symbol)
-
             if live_price is None:
-                continue  # skip safely if API fails
+                continue
 
             pnl = ((live_price - entry_price) / entry_price) * 100
             if direction == "SHORT":
@@ -87,47 +83,35 @@ def webhook():
                     WHERE id = %s
                 """, (datetime.utcnow(), pnl, trade_id))
 
-                log(f"CLOSED TRADE {trade_id} | {pnl:.2f}% (LIVE PRICE)")
+                log(f"CLOSED TRADE {trade_id} | {pnl:.2f}%")
 
         conn.commit()
 
-        # === STEP 2: FILTERS ===
+        # === FILTERS ===
         if decision == "NONE":
-            log("FILTERED - no decision")
-            cur.close()
-            conn.close()
             return jsonify({"status": "filtered"})
 
         if abs(momentum_strength) < MIN_MOMENTUM:
-            log(f"FILTERED - weak momentum {momentum_strength}")
-            cur.close()
-            conn.close()
             return jsonify({"status": "filtered"})
 
         if abs(trend_strength) < MIN_TREND_STRENGTH:
-            log(f"FILTERED - weak trend {trend_strength}")
-            cur.close()
-            conn.close()
             return jsonify({"status": "filtered"})
 
         strategy_type = "trend" if trend_alignment == "aligned" else "counter"
 
-        # === STEP 3: CHECK EXISTING TRADE ===
+        # === CHECK OPEN TRADE ===
         cur.execute("""
             SELECT id FROM bot_trades
             WHERE symbol = %s AND status = 'OPEN'
             AND data_version = %s
         """, (symbol, DATA_VERSION))
 
-        existing = cur.fetchone()
-
-        if existing:
-            log("Trade already open")
+        if cur.fetchone():
             cur.close()
             conn.close()
             return jsonify({"status": "exists"})
 
-        # === STEP 4: INSERT NEW TRADE ===
+        # === INSERT TRADE ===
         cur.execute("""
             INSERT INTO bot_trades (
                 symbol,
@@ -140,7 +124,7 @@ def webhook():
                 trend_alignment,
                 momentum_strength,
                 trend_strength,
-                vwap_bucket,
+                distance_abs,
                 data_version
             ) VALUES (%s, %s, %s, 'OPEN', %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
@@ -153,7 +137,7 @@ def webhook():
             trend_alignment,
             momentum_strength,
             trend_strength,
-            vwap_bucket,
+            distance_abs,
             DATA_VERSION
         ))
 
