@@ -9,32 +9,46 @@ app = Flask(__name__)
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
 # === STRATEGY CONFIG ===
-STOP_LOSS = 0.4
-TAKE_PROFIT = 0.8
+STOP_LOSS = 0.4     # %
+TAKE_PROFIT = 0.8   # %
 
 # === DB CONNECTION ===
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
-# === WEBHOOK ===
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
         data = request.json
+        print("📩 Incoming:", data)
 
-        print("📩 Incoming signal:", data)
+        # =========================
+        # 🧹 SAFE PARSING
+        # =========================
 
         symbol = data.get("symbol")
-        price = float(data.get("price", 0))
-        decision_model = data.get("decision_model")
+
+        try:
+            price = float(data.get("price", 0))
+        except:
+            price = 0
+
+        if price <= 0:
+            print("❌ Invalid price, skipping")
+            return jsonify({"status": "invalid price"})
+
+        decision_model = str(data.get("decision_model", "")).strip().upper()
         model_version = data.get("model_version")
 
         trend_alignment = data.get("trend_alignment")
-        momentum = float(data.get("momentum", 0))
 
-        # 🔥 FIXED SAFE TREND STRENGTH
+        try:
+            momentum = float(data.get("momentum", 0))
+        except:
+            momentum = 0
+
         trend_strength_raw = data.get("trend_strength")
-
         try:
             trend_strength = float(trend_strength_raw)
         except:
@@ -43,22 +57,41 @@ def webhook():
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # === FILTER LOGIC ===
-        take_trade = False
+        # =========================
+        # 🔥 CLOSE EXISTING TRADES
+        # =========================
 
-        if decision_model in ["LONG", "SHORT"]:
-            
-            # ✅ alignment must be good
-            if trend_alignment == "aligned":
+        cur.execute("""
+            SELECT id, entry_price, direction
+            FROM bot_trades
+            WHERE status = 'OPEN'
+            AND symbol = %s
+        """, (symbol,))
 
-                # ✅ momentum must confirm
-                if momentum > 0:
+        open_trades = cur.fetchall()
 
-                    # ✅ FIXED trend strength logic
-                    if trend_strength is None or trend_strength > 0:
-                        take_trade = True
+        for trade_id, entry_price, direction in open_trades:
 
-        # === INSERT SIGNAL ===
+            if direction == "LONG":
+                pnl = ((price - entry_price) / entry_price) * 100
+            else:
+                pnl = ((entry_price - price) / entry_price) * 100
+
+            if pnl >= TAKE_PROFIT or pnl <= -STOP_LOSS:
+                cur.execute("""
+                    UPDATE bot_trades
+                    SET status = 'CLOSED',
+                        closed_at = %s,
+                        pnl_percent = %s
+                    WHERE id = %s
+                """, (datetime.utcnow(), pnl, trade_id))
+
+                print(f"✅ CLOSED TRADE {trade_id} | PnL: {pnl:.2f}%")
+
+        # =========================
+        # 📊 SAVE SIGNAL
+        # =========================
+
         cur.execute("""
             INSERT INTO signal_history (
                 symbol,
@@ -82,28 +115,56 @@ def webhook():
             datetime.utcnow()
         ))
 
-        # === CREATE TRADE ===
+        # =========================
+        # 🎯 ENTRY LOGIC
+        # =========================
+
+        take_trade = False
+
+        if decision_model in ["LONG", "SHORT"]:
+            if trend_alignment == "aligned":
+                if momentum > 0:
+                    if trend_strength is None or trend_strength > 0:
+                        take_trade = True
+
+        print(f"DEBUG → align={trend_alignment} momentum={momentum} strength={trend_strength} take={take_trade}")
+
+        # =========================
+        # 🚫 PREVENT DUPLICATES
+        # =========================
+
         if take_trade:
             cur.execute("""
-                INSERT INTO bot_trades (
-                    symbol,
-                    direction,
-                    entry_price,
-                    status,
-                    opened_at
-                )
-                VALUES (%s,%s,%s,'OPEN',%s)
-            """, (
-                symbol,
-                decision_model,
-                price,
-                datetime.utcnow()
-            ))
+                SELECT COUNT(*) FROM bot_trades
+                WHERE symbol = %s AND status = 'OPEN'
+            """, (symbol,))
 
-            print("✅ TRADE OPENED")
+            existing = cur.fetchone()[0]
+
+            if existing == 0:
+                cur.execute("""
+                    INSERT INTO bot_trades (
+                        symbol,
+                        direction,
+                        entry_price,
+                        status,
+                        opened_at
+                    )
+                    VALUES (%s,%s,%s,'OPEN',%s)
+                """, (
+                    symbol,
+                    decision_model,
+                    price,
+                    datetime.utcnow()
+                ))
+
+                print("🚀 NEW TRADE OPENED")
+
+            else:
+                print("⚠️ Trade already open — skipping")
 
         else:
-            print("⛔ FILTERED OUT")
+            print("⛔ FILTERED")
 
         conn.commit()
         cur.close()
