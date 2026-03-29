@@ -1,18 +1,15 @@
 from flask import Flask, request, jsonify
 import os
 import psycopg2
-import uuid
 from datetime import datetime
 
 app = Flask(__name__)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-# === RISK SETTINGS ===
 STOP_LOSS = 0.4
 TAKE_PROFIT = 0.8
 
-# === QUALITY FILTERS (DATA-DRIVEN) ===
 MIN_MOMENTUM = 0.001
 MIN_TREND_STRENGTH = 0.0001
 
@@ -38,30 +35,27 @@ def webhook():
         model_version = data.get("model_version", "unknown")
         vwap_bucket = data.get("vwap_distance_bucket")
 
-        # === FILTER 1: VALID SIGNAL ===
+        # === FILTERS ===
         if decision == "NONE":
-            log("FILTERED OUT - no decision")
+            log("FILTERED - no decision")
             return jsonify({"status": "filtered"})
 
-        # === FILTER 2: MOMENTUM ===
         if abs(momentum_strength) < MIN_MOMENTUM:
-            log(f"FILTERED OUT - weak momentum ({momentum_strength})")
+            log(f"FILTERED - weak momentum {momentum_strength}")
             return jsonify({"status": "filtered"})
 
-        # === FILTER 3: TREND STRENGTH ===
         if abs(trend_strength) < MIN_TREND_STRENGTH:
-            log(f"FILTERED OUT - weak trend ({trend_strength})")
+            log(f"FILTERED - weak trend {trend_strength}")
             return jsonify({"status": "filtered"})
 
-        # === STRATEGY TAGGING ===
         strategy_type = "trend" if trend_alignment == "aligned" else "counter"
 
         conn = get_connection()
         cur = conn.cursor()
 
-        # === CHECK EXISTING TRADE ===
+        # === CHECK EXISTING OPEN TRADE ===
         cur.execute("""
-            SELECT trade_id FROM bot_trades
+            SELECT id FROM bot_trades
             WHERE symbol = %s AND status = 'OPEN'
         """, (symbol,))
         existing = cur.fetchone()
@@ -72,12 +66,9 @@ def webhook():
             conn.close()
             return jsonify({"status": "exists"})
 
-        # === CREATE TRADE ===
-        trade_id = str(uuid.uuid4())
-
+        # === INSERT TRADE ===
         cur.execute("""
             INSERT INTO bot_trades (
-                trade_id,
                 symbol,
                 direction,
                 entry_price,
@@ -89,9 +80,8 @@ def webhook():
                 momentum_strength,
                 trend_strength,
                 vwap_bucket
-            ) VALUES (%s, %s, %s, %s, 'OPEN', %s, %s, %s, %s, %s, %s, %s)
+            ) VALUES (%s, %s, %s, 'OPEN', %s, %s, %s, %s, %s, %s, %s)
         """, (
-            trade_id,
             symbol,
             decision,
             price,
@@ -108,13 +98,13 @@ def webhook():
         cur.close()
         conn.close()
 
-        log(f"TRADE OPENED: {symbol} {decision} | {strategy_type}")
+        log(f"TRADE OPENED: {symbol} {decision} ({strategy_type})")
 
         return jsonify({"status": "opened"})
 
     except Exception as e:
         log(f"ERROR: {str(e)}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": str(e)}), 200  # <- IMPORTANT (prevents webhook death)
 
 
 @app.route("/check-trades", methods=["GET"])
@@ -124,7 +114,7 @@ def check_trades():
         cur = conn.cursor()
 
         cur.execute("""
-            SELECT trade_id, symbol, direction, entry_price
+            SELECT id, symbol, direction, entry_price
             FROM bot_trades
             WHERE status = 'OPEN'
         """)
@@ -134,8 +124,7 @@ def check_trades():
         for trade in trades:
             trade_id, symbol, direction, entry_price = trade
 
-            # Placeholder price (later we plug real API)
-            current_price = entry_price
+            current_price = entry_price  # placeholder
 
             pnl = ((current_price - entry_price) / entry_price) * 100
             if direction == "SHORT":
@@ -147,10 +136,10 @@ def check_trades():
                     SET status = 'CLOSED',
                         closed_at = %s,
                         pnl_percent = %s
-                    WHERE trade_id = %s
+                    WHERE id = %s
                 """, (datetime.utcnow(), pnl, trade_id))
 
-                log(f"CLOSED TRADE {trade_id} | PnL: {pnl:.2f}%")
+                log(f"CLOSED TRADE {trade_id} | {pnl:.2f}%")
 
         conn.commit()
         cur.close()
@@ -160,7 +149,7 @@ def check_trades():
 
     except Exception as e:
         log(f"ERROR: {str(e)}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": str(e)}), 200
 
 
 @app.route("/")
