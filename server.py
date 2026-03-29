@@ -51,13 +51,41 @@ def webhook():
         trend_strength = float(data.get("trend_strength", 0))
         model_version = data.get("model_version", "unknown")
 
-        # ✅ CLEAN STANDARDISED NAME
-        distance_abs = data.get("vwap_distance_bucket")
+        distance_abs = data.get("vwap_distance_bucket")  # rename here
 
         conn = get_connection()
         cur = conn.cursor()
 
-        # === CLOSE TRADES ===
+        # =========================
+        # 🔥 STEP 0: LOG SIGNAL (CRITICAL FIX)
+        # =========================
+        cur.execute("""
+            INSERT INTO signal_history (
+                symbol,
+                price,
+                decision_model,
+                trend_alignment,
+                momentum_strength,
+                trend_strength,
+                distance_abs,
+                created_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            symbol,
+            signal_price,
+            decision,
+            trend_alignment,
+            momentum_strength,
+            trend_strength,
+            distance_abs,
+            datetime.utcnow()
+        ))
+
+        conn.commit()
+
+        # =========================
+        # STEP 1: CLOSE TRADES
+        # =========================
         cur.execute("""
             SELECT id, symbol, direction, entry_price
             FROM bot_trades
@@ -65,7 +93,11 @@ def webhook():
             AND data_version = %s
         """, (DATA_VERSION,))
 
-        for trade_id, trade_symbol, direction, entry_price in cur.fetchall():
+        open_trades = cur.fetchall()
+
+        for trade in open_trades:
+            trade_id, trade_symbol, direction, entry_price = trade
+
             live_price = get_live_price(trade_symbol)
             if live_price is None:
                 continue
@@ -87,7 +119,9 @@ def webhook():
 
         conn.commit()
 
-        # === FILTERS ===
+        # =========================
+        # STEP 2: FILTERS
+        # =========================
         if decision == "NONE":
             return jsonify({"status": "filtered"})
 
@@ -99,19 +133,25 @@ def webhook():
 
         strategy_type = "trend" if trend_alignment == "aligned" else "counter"
 
-        # === CHECK OPEN TRADE ===
+        # =========================
+        # STEP 3: CHECK OPEN TRADE
+        # =========================
         cur.execute("""
             SELECT id FROM bot_trades
             WHERE symbol = %s AND status = 'OPEN'
             AND data_version = %s
         """, (symbol, DATA_VERSION))
 
-        if cur.fetchone():
+        existing = cur.fetchone()
+
+        if existing:
             cur.close()
             conn.close()
             return jsonify({"status": "exists"})
 
-        # === INSERT TRADE ===
+        # =========================
+        # STEP 4: INSERT TRADE
+        # =========================
         cur.execute("""
             INSERT INTO bot_trades (
                 symbol,
@@ -145,7 +185,7 @@ def webhook():
         cur.close()
         conn.close()
 
-        log(f"TRADE OPENED: {symbol} {decision} ({strategy_type}) | {DATA_VERSION}")
+        log(f"TRADE OPENED: {symbol} {decision} | {DATA_VERSION}")
 
         return jsonify({"status": "opened"})
 
@@ -157,3 +197,4 @@ def webhook():
 @app.route("/")
 def home():
     return "Bot is running"
+    
