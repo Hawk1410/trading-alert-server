@@ -15,11 +15,14 @@ MIN_TREND_STRENGTH = 0.0001
 
 DATA_VERSION = "v2_clean"
 
+
 def log(msg):
     print(msg, flush=True)
 
+
 def get_connection():
     return psycopg2.connect(DATABASE_URL)
+
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -37,29 +40,67 @@ def webhook():
         model_version = data.get("model_version", "unknown")
         vwap_bucket = data.get("vwap_distance_bucket")
 
-        # === FILTERS ===
+        # === STEP 1: CLOSE EXISTING TRADES ===
+        conn = get_connection()
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT id, direction, entry_price
+            FROM bot_trades
+            WHERE status = 'OPEN'
+            AND data_version = %s
+        """, (DATA_VERSION,))
+
+        open_trades = cur.fetchall()
+
+        for trade in open_trades:
+            trade_id, direction, entry_price = trade
+
+            pnl = ((price - entry_price) / entry_price) * 100
+            if direction == "SHORT":
+                pnl = -pnl
+
+            if pnl <= -STOP_LOSS or pnl >= TAKE_PROFIT:
+                cur.execute("""
+                    UPDATE bot_trades
+                    SET status = 'CLOSED',
+                        closed_at = %s,
+                        pnl_percent = %s
+                    WHERE id = %s
+                """, (datetime.utcnow(), pnl, trade_id))
+
+                log(f"CLOSED TRADE {trade_id} | {pnl:.2f}%")
+
+        conn.commit()
+
+        # === STEP 2: FILTERS ===
         if decision == "NONE":
             log("FILTERED - no decision")
+            cur.close()
+            conn.close()
             return jsonify({"status": "filtered"})
 
         if abs(momentum_strength) < MIN_MOMENTUM:
             log(f"FILTERED - weak momentum {momentum_strength}")
+            cur.close()
+            conn.close()
             return jsonify({"status": "filtered"})
 
         if abs(trend_strength) < MIN_TREND_STRENGTH:
             log(f"FILTERED - weak trend {trend_strength}")
+            cur.close()
+            conn.close()
             return jsonify({"status": "filtered"})
 
         strategy_type = "trend" if trend_alignment == "aligned" else "counter"
 
-        conn = get_connection()
-        cur = conn.cursor()
-
-        # === CHECK EXISTING OPEN TRADE ===
+        # === STEP 3: CHECK EXISTING TRADE ===
         cur.execute("""
             SELECT id FROM bot_trades
             WHERE symbol = %s AND status = 'OPEN'
-        """, (symbol,))
+            AND data_version = %s
+        """, (symbol, DATA_VERSION))
+
         existing = cur.fetchone()
 
         if existing:
@@ -68,7 +109,7 @@ def webhook():
             conn.close()
             return jsonify({"status": "exists"})
 
-        # === INSERT TRADE ===
+        # === STEP 4: INSERT NEW TRADE ===
         cur.execute("""
             INSERT INTO bot_trades (
                 symbol,
@@ -102,54 +143,9 @@ def webhook():
         cur.close()
         conn.close()
 
-        log(f"TRADE OPENED: {symbol} {decision} ({strategy_type}) | v2_clean")
+        log(f"TRADE OPENED: {symbol} {decision} ({strategy_type}) | {DATA_VERSION}")
 
         return jsonify({"status": "opened"})
-
-    except Exception as e:
-        log(f"ERROR: {str(e)}")
-        return jsonify({"error": str(e)}), 200
-
-
-@app.route("/check-trades", methods=["GET"])
-def check_trades():
-    try:
-        conn = get_connection()
-        cur = conn.cursor()
-
-        cur.execute("""
-            SELECT id, symbol, direction, entry_price
-            FROM bot_trades
-            WHERE status = 'OPEN'
-        """)
-
-        trades = cur.fetchall()
-
-        for trade in trades:
-            trade_id, symbol, direction, entry_price = trade
-
-            current_price = entry_price  # placeholder (we'll upgrade this soon)
-
-            pnl = ((current_price - entry_price) / entry_price) * 100
-            if direction == "SHORT":
-                pnl = -pnl
-
-            if pnl <= -STOP_LOSS or pnl >= TAKE_PROFIT:
-                cur.execute("""
-                    UPDATE bot_trades
-                    SET status = 'CLOSED',
-                        closed_at = %s,
-                        pnl_percent = %s
-                    WHERE id = %s
-                """, (datetime.utcnow(), pnl, trade_id))
-
-                log(f"CLOSED TRADE {trade_id} | {pnl:.2f}%")
-
-        conn.commit()
-        cur.close()
-        conn.close()
-
-        return jsonify({"status": "checked"})
 
     except Exception as e:
         log(f"ERROR: {str(e)}")
