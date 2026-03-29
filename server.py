@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify
 import os
 import psycopg2
 from datetime import datetime
+import requests
 
 app = Flask(__name__)
 
@@ -24,6 +25,18 @@ def get_connection():
     return psycopg2.connect(DATABASE_URL)
 
 
+# 🔥 NEW: FETCH REAL PRICE FROM BINANCE
+def get_live_price(symbol):
+    try:
+        url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
+        response = requests.get(url, timeout=2)
+        data = response.json()
+        return float(data["price"])
+    except Exception as e:
+        log(f"PRICE FETCH ERROR for {symbol}: {e}")
+        return None
+
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.json
@@ -32,7 +45,7 @@ def webhook():
     try:
         symbol = data.get("symbol")
         decision = data.get("decision_model")
-        price = float(data.get("price", 0))
+        signal_price = float(data.get("price", 0))
 
         trend_alignment = data.get("trend_alignment")
         momentum_strength = float(data.get("momentum_strength", 0))
@@ -40,12 +53,12 @@ def webhook():
         model_version = data.get("model_version", "unknown")
         vwap_bucket = data.get("vwap_distance_bucket")
 
-        # === STEP 1: CLOSE EXISTING TRADES ===
         conn = get_connection()
         cur = conn.cursor()
 
+        # === STEP 1: CLOSE EXISTING TRADES USING REAL PRICE ===
         cur.execute("""
-            SELECT id, direction, entry_price
+            SELECT id, symbol, direction, entry_price
             FROM bot_trades
             WHERE status = 'OPEN'
             AND data_version = %s
@@ -54,9 +67,14 @@ def webhook():
         open_trades = cur.fetchall()
 
         for trade in open_trades:
-            trade_id, direction, entry_price = trade
+            trade_id, trade_symbol, direction, entry_price = trade
 
-            pnl = ((price - entry_price) / entry_price) * 100
+            live_price = get_live_price(trade_symbol)
+
+            if live_price is None:
+                continue  # skip safely if API fails
+
+            pnl = ((live_price - entry_price) / entry_price) * 100
             if direction == "SHORT":
                 pnl = -pnl
 
@@ -69,7 +87,7 @@ def webhook():
                     WHERE id = %s
                 """, (datetime.utcnow(), pnl, trade_id))
 
-                log(f"CLOSED TRADE {trade_id} | {pnl:.2f}%")
+                log(f"CLOSED TRADE {trade_id} | {pnl:.2f}% (LIVE PRICE)")
 
         conn.commit()
 
@@ -128,7 +146,7 @@ def webhook():
         """, (
             symbol,
             decision,
-            price,
+            signal_price,
             datetime.utcnow(),
             strategy_type,
             model_version,
