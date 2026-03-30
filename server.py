@@ -56,28 +56,22 @@ def webhook():
         conn = get_connection()
         cur = conn.cursor()
 
-        # === STEP 0: LOG SIGNAL INTO signal_history ===
+        # ✅ STEP 0: CLEAN SIGNAL LOG (FIXED)
         try:
             cur.execute("""
                 INSERT INTO signal_history (
                     symbol,
                     created_at,
                     price,
-                    decision_model,
-                    trend_alignment,
-                    momentum_strength,
-                    trend_strength,
-                    distance_abs
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    decision,
+                    distance_from
+                ) VALUES (%s, %s, %s, %s, %s)
             """, (
                 symbol,
                 datetime.utcnow(),
                 signal_price,
                 decision,
-                trend_alignment,
-                momentum_strength,
-                trend_strength,
-                vwap_bucket  # storing bucket as distance for now
+                vwap_bucket
             ))
             conn.commit()
 
