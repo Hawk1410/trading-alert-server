@@ -8,8 +8,8 @@ app = Flask(__name__)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-STOP_LOSS = 0.4
-TAKE_PROFIT = 0.8
+STOP_LOSS = 0.4   # %
+TAKE_PROFIT = 0.8 # %
 
 DATA_VERSION = "v2_final"
 
@@ -36,6 +36,9 @@ def webhook():
     log(f"📩 DATA_V2 PAYLOAD: {data}")
 
     try:
+        # ================================
+        # INPUTS
+        # ================================
         symbol = data.get("symbol")
         price = float(data.get("price", 0))
         decision = data.get("decision_model", "NONE")
@@ -52,7 +55,7 @@ def webhook():
         cur = conn.cursor()
 
         # ================================
-        # 🔥 LOAD CONFIG (NEW)
+        # LOAD CONFIG
         # ================================
         cur.execute("""
             SELECT min_momentum, min_trend_strength, trade_timeframe
@@ -80,7 +83,7 @@ def webhook():
         elif trend_alignment != "aligned":
             hold_reason = "counter_trend"
 
-        # 🚨 TIMEFRAME CONTROL (NOW CONFIG-DRIVEN)
+        # 🚨 TIMEFRAME FILTER
         if timeframe != TRADE_TIMEFRAME:
             hold_reason = "not_" + str(TRADE_TIMEFRAME)
 
@@ -105,15 +108,30 @@ def webhook():
                 pnl = -pnl
 
             if pnl <= -STOP_LOSS or pnl >= TAKE_PROFIT:
+
+                # 🔥 DETERMINE CLOSE REASON
+                if pnl >= TAKE_PROFIT:
+                    close_reason = "take_profit"
+                else:
+                    close_reason = "stop_loss"
+
                 cur.execute("""
                     UPDATE bot_trades
                     SET status = 'CLOSED',
                         closed_at = %s,
+                        close_price = %s,
+                        close_reason = %s,
                         pnl_percent = %s
                     WHERE id = %s
-                """, (datetime.utcnow(), pnl, trade_id))
+                """, (
+                    datetime.utcnow(),
+                    live_price,
+                    close_reason,
+                    pnl,
+                    trade_id
+                ))
 
-                log(f"💥 CLOSED {sym} {pnl:.2f}%")
+                log(f"💥 CLOSED {sym} {close_reason} {pnl:.2f}%")
 
         conn.commit()
 
@@ -176,19 +194,34 @@ def webhook():
             return jsonify({"status": "exists"})
 
         # ================================
+        # CALCULATE SL / TP
+        # ================================
+        if decision == "LONG":
+            stop_price = price * (1 - STOP_LOSS / 100)
+            target_price = price * (1 + TAKE_PROFIT / 100)
+
+        elif decision == "SHORT":
+            stop_price = price * (1 + STOP_LOSS / 100)
+            target_price = price * (1 - TAKE_PROFIT / 100)
+
+        # ================================
         # OPEN TRADE
         # ================================
         cur.execute("""
             INSERT INTO bot_trades (
-                symbol, direction, entry_price, status, opened_at,
+                symbol, direction, entry_price, stop_price, target_price,
+                status, opened_at,
                 strategy_type, model_version, trend_alignment,
                 momentum_strength, trend_strength,
                 vwap_bucket, data_version
-            ) VALUES (%s, %s, %s, 'OPEN', %s, %s, %s, %s, %s, %s, %s, %s)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             symbol,
             decision,
             price,
+            stop_price,
+            target_price,
+            'OPEN',
             datetime.utcnow(),
             "trend" if trend_alignment == "aligned" else "counter",
             model_version,
@@ -199,6 +232,11 @@ def webhook():
             DATA_VERSION
         ))
 
+        trade_taken = True
+
+        # ================================
+        # LOG SIGNAL
+        # ================================
         cur.execute("""
             INSERT INTO signal_history_v2 (
                 symbol, price, decision_model, trade_taken,
@@ -228,4 +266,4 @@ def webhook():
 
 @app.route("/")
 def home():
-    return "V2 CONFIG-DRIVEN SYSTEM RUNNING"
+    return "V2 FINAL COMPLETE SYSTEM RUNNING"
