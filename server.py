@@ -11,8 +11,9 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 STOP_LOSS = 0.4
 TAKE_PROFIT = 0.8
 
-MIN_MOMENTUM = 0.001
-MIN_TREND_STRENGTH = 0.0001
+# 🔥 UPDATED FOR NORMALIZED DATA
+MIN_MOMENTUM = 0.2
+MIN_TREND_STRENGTH = 0.1
 
 DATA_VERSION = "v2_final"
 
@@ -28,8 +29,7 @@ def get_connection():
 def get_live_price(symbol):
     try:
         url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
-        response = requests.get(url, timeout=2)
-        return float(response.json()["price"])
+        return float(requests.get(url, timeout=2).json()["price"])
     except:
         return None
 
@@ -40,9 +40,6 @@ def webhook():
     log(f"📩 DATA_V2 PAYLOAD: {data}")
 
     try:
-        # ================================
-        # INPUTS (FROM PINE alert())
-        # ================================
         symbol = data.get("symbol")
         price = float(data.get("price", 0))
         decision = data.get("decision_model", "NONE")
@@ -53,13 +50,13 @@ def webhook():
         vwap_bucket = data.get("vwap_distance_bucket", "unknown")
 
         timeframe = data.get("timeframe", "unknown")
-        model_version = data.get("model_version", "v2_final")
+        model_version = data.get("model_version", "v2_final_atr")
 
         conn = get_connection()
         cur = conn.cursor()
 
         # ================================
-        # HOLD REASON ENGINE
+        # HOLD REASON
         # ================================
         hold_reason = None
 
@@ -76,7 +73,7 @@ def webhook():
             hold_reason = "counter_trend"
 
         # ================================
-        # CLOSE OPEN TRADES
+        # CLOSE TRADES
         # ================================
         cur.execute("""
             SELECT id, symbol, direction, entry_price
@@ -104,14 +101,12 @@ def webhook():
                     WHERE id = %s
                 """, (datetime.utcnow(), pnl, trade_id))
 
-                log(f"💥 CLOSED {sym} {pnl:.2f}%")
-
         conn.commit()
 
         trade_taken = False
 
         # ================================
-        # FILTER (NO TRADE)
+        # FILTER
         # ================================
         if hold_reason:
             cur.execute("""
@@ -131,11 +126,10 @@ def webhook():
             conn.commit()
             cur.close()
             conn.close()
-
             return jsonify({"status": "filtered"})
 
         # ================================
-        # CHECK EXISTING TRADE
+        # CHECK EXISTING
         # ================================
         cur.execute("""
             SELECT id FROM bot_trades
@@ -161,7 +155,6 @@ def webhook():
             conn.commit()
             cur.close()
             conn.close()
-
             return jsonify({"status": "exists"})
 
         # ================================
@@ -182,8 +175,6 @@ def webhook():
             vwap_bucket, DATA_VERSION
         ))
 
-        trade_taken = True
-
         cur.execute("""
             INSERT INTO signal_history_v2 (
                 symbol, price, decision_model, trade_taken,
@@ -202,8 +193,6 @@ def webhook():
         cur.close()
         conn.close()
 
-        log(f"🚀 TRADE OPENED: {symbol} {decision}")
-
         return jsonify({"status": "opened"})
 
     except Exception as e:
@@ -213,4 +202,4 @@ def webhook():
 
 @app.route("/")
 def home():
-    return "Data V2 FINAL running"
+    return "V2 FINAL ATR SYSTEM RUNNING"
