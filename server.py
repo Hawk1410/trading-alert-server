@@ -11,7 +11,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 STOP_LOSS = 0.4
 TAKE_PROFIT = 0.8
 
-# 🔥 UPDATED FOR NORMALIZED DATA
+# ✅ NORMALIZED THRESHOLDS (ATR-based)
 MIN_MOMENTUM = 0.2
 MIN_TREND_STRENGTH = 0.1
 
@@ -40,6 +40,9 @@ def webhook():
     log(f"📩 DATA_V2 PAYLOAD: {data}")
 
     try:
+        # ================================
+        # INPUTS (FROM PINE)
+        # ================================
         symbol = data.get("symbol")
         price = float(data.get("price", 0))
         decision = data.get("decision_model", "NONE")
@@ -56,7 +59,7 @@ def webhook():
         cur = conn.cursor()
 
         # ================================
-        # HOLD REASON
+        # HOLD REASON ENGINE
         # ================================
         hold_reason = None
 
@@ -72,8 +75,12 @@ def webhook():
         elif trend_alignment != "aligned":
             hold_reason = "counter_trend"
 
+        # 🚨 FORCE 5m TRADING ONLY
+        if timeframe != "5":
+            hold_reason = "not_5m"
+
         # ================================
-        # CLOSE TRADES
+        # CLOSE EXISTING TRADES
         # ================================
         cur.execute("""
             SELECT id, symbol, direction, entry_price
@@ -101,12 +108,14 @@ def webhook():
                     WHERE id = %s
                 """, (datetime.utcnow(), pnl, trade_id))
 
+                log(f"💥 CLOSED {sym} {pnl:.2f}%")
+
         conn.commit()
 
         trade_taken = False
 
         # ================================
-        # FILTER
+        # FILTER (NO TRADE)
         # ================================
         if hold_reason:
             cur.execute("""
@@ -126,10 +135,13 @@ def webhook():
             conn.commit()
             cur.close()
             conn.close()
-            return jsonify({"status": "filtered"})
+
+            log(f"🛑 FILTERED: {hold_reason}")
+
+            return jsonify({"status": "filtered", "reason": hold_reason})
 
         # ================================
-        # CHECK EXISTING
+        # CHECK EXISTING TRADE
         # ================================
         cur.execute("""
             SELECT id FROM bot_trades
@@ -155,6 +167,7 @@ def webhook():
             conn.commit()
             cur.close()
             conn.close()
+
             return jsonify({"status": "exists"})
 
         # ================================
@@ -168,12 +181,20 @@ def webhook():
                 vwap_bucket, data_version
             ) VALUES (%s, %s, %s, 'OPEN', %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
-            symbol, decision, price, datetime.utcnow(),
+            symbol,
+            decision,
+            price,
+            datetime.utcnow(),
             "trend" if trend_alignment == "aligned" else "counter",
-            model_version, trend_alignment,
-            momentum_strength, trend_strength,
-            vwap_bucket, DATA_VERSION
+            model_version,
+            trend_alignment,
+            momentum_strength,
+            trend_strength,
+            vwap_bucket,
+            DATA_VERSION
         ))
+
+        trade_taken = True
 
         cur.execute("""
             INSERT INTO signal_history_v2 (
@@ -192,6 +213,8 @@ def webhook():
         conn.commit()
         cur.close()
         conn.close()
+
+        log(f"🚀 TRADE OPENED: {symbol} {decision}")
 
         return jsonify({"status": "opened"})
 
