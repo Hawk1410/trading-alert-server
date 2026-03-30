@@ -11,10 +11,6 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 STOP_LOSS = 0.4
 TAKE_PROFIT = 0.8
 
-# ✅ NORMALIZED THRESHOLDS (ATR-based)
-MIN_MOMENTUM = 0.2
-MIN_TREND_STRENGTH = 0.1
-
 DATA_VERSION = "v2_final"
 
 
@@ -40,9 +36,6 @@ def webhook():
     log(f"📩 DATA_V2 PAYLOAD: {data}")
 
     try:
-        # ================================
-        # INPUTS (FROM PINE)
-        # ================================
         symbol = data.get("symbol")
         price = float(data.get("price", 0))
         decision = data.get("decision_model", "NONE")
@@ -57,6 +50,18 @@ def webhook():
 
         conn = get_connection()
         cur = conn.cursor()
+
+        # ================================
+        # 🔥 LOAD CONFIG (NEW)
+        # ================================
+        cur.execute("""
+            SELECT min_momentum, min_trend_strength, trade_timeframe
+            FROM bot_config
+            WHERE id = 1
+        """)
+        config = cur.fetchone()
+
+        MIN_MOMENTUM, MIN_TREND_STRENGTH, TRADE_TIMEFRAME = config
 
         # ================================
         # HOLD REASON ENGINE
@@ -75,9 +80,9 @@ def webhook():
         elif trend_alignment != "aligned":
             hold_reason = "counter_trend"
 
-        # 🚨 FORCE 5m TRADING ONLY
-        if timeframe != "5":
-            hold_reason = "not_5m"
+        # 🚨 TIMEFRAME CONTROL (NOW CONFIG-DRIVEN)
+        if timeframe != TRADE_TIMEFRAME:
+            hold_reason = "not_" + str(TRADE_TIMEFRAME)
 
         # ================================
         # CLOSE EXISTING TRADES
@@ -194,8 +199,6 @@ def webhook():
             DATA_VERSION
         ))
 
-        trade_taken = True
-
         cur.execute("""
             INSERT INTO signal_history_v2 (
                 symbol, price, decision_model, trade_taken,
@@ -225,4 +228,4 @@ def webhook():
 
 @app.route("/")
 def home():
-    return "V2 FINAL ATR SYSTEM RUNNING"
+    return "V2 CONFIG-DRIVEN SYSTEM RUNNING"
