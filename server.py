@@ -67,7 +67,7 @@ def webhook():
         MIN_MOMENTUM, MIN_TREND_STRENGTH, TRADE_TIMEFRAME = config
 
         # ================================
-        # HOLD REASON ENGINE
+        # HOLD REASON ENGINE (V2.1)
         # ================================
         hold_reason = None
 
@@ -76,6 +76,9 @@ def webhook():
 
         elif abs(momentum_strength) < MIN_MOMENTUM:
             hold_reason = "weak_momentum"
+
+        elif momentum_strength > 0.5:
+            hold_reason = "too_strong_momentum"
 
         elif abs(trend_strength) < MIN_TREND_STRENGTH:
             hold_reason = "weak_trend"
@@ -109,7 +112,6 @@ def webhook():
 
             if pnl <= -STOP_LOSS or pnl >= TAKE_PROFIT:
 
-                # 🔥 DETERMINE CLOSE REASON
                 if pnl >= TAKE_PROFIT:
                     close_reason = "take_profit"
                 else:
@@ -266,4 +268,4 @@ def webhook():
 
 @app.route("/")
 def home():
-    return "V2 FINAL COMPLETE SYSTEM RUNNING"
+    return "V2.1 MOMENTUM FILTER ACTIVE 🚀"
