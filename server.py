@@ -67,7 +67,7 @@ def webhook():
         MIN_MOMENTUM, MIN_TREND_STRENGTH, TRADE_TIMEFRAME = config
 
         # ================================
-        # HOLD REASON ENGINE (V2.1)
+        # HOLD REASON ENGINE (V2.2)
         # ================================
         hold_reason = None
 
@@ -77,7 +77,9 @@ def webhook():
         elif abs(momentum_strength) < MIN_MOMENTUM:
             hold_reason = "weak_momentum"
 
-        elif momentum_strength > 0.5:
+        # ✅ FIXED: only block TRUE extremes (both directions)
+        elif abs(momentum_strength) > 1.0:
+            log(f"🚨 EXTREME MOMENTUM BLOCKED: {momentum_strength}")
             hold_reason = "too_strong_momentum"
 
         elif abs(trend_strength) < MIN_TREND_STRENGTH:
@@ -268,4 +270,4 @@ def webhook():
 
 @app.route("/")
 def home():
-    return "V2.1 MOMENTUM FILTER ACTIVE 🚀"
+    return "V2.2 SMART MOMENTUM FILTER LIVE 🚀"
