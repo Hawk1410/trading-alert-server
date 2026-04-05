@@ -6,119 +6,30 @@ app = Flask(__name__)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-# =========================
-# DB CONNECTION
-# =========================
 def get_db():
     return psycopg2.connect(DATABASE_URL)
 
 # =========================
-# WEBHOOK (UNCHANGED)
+# WEBHOOK
 # =========================
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.json
     print("📩 PAYLOAD:", data)
-
     return jsonify({"status": "received"}), 200
 
 
 # =========================
-# 🔥 MASTER DASH
-# =========================
-@app.route("/master_dashboard", methods=["GET"])
-def master_dashboard():
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        WITH closed AS (
-            SELECT *
-            FROM bot_trades
-            WHERE status = 'CLOSED'
-        ),
-        open AS (
-            SELECT symbol, COUNT(*) AS open_trades
-            FROM bot_trades
-            WHERE status = 'OPEN'
-            GROUP BY symbol
-        ),
-        stats AS (
-            SELECT
-                symbol,
-                COUNT(*) AS trades,
-                ROUND(AVG(pnl_percent), 3) AS avg_pnl,
-                ROUND(SUM(pnl_percent), 3) AS total_pnl,
-                ROUND(AVG(CASE WHEN pnl_percent > 0 THEN 1 ELSE 0 END)::numeric, 3) AS winrate
-            FROM closed
-            GROUP BY symbol
-        )
-        SELECT
-            s.symbol,
-            s.trades,
-            s.winrate,
-            s.avg_pnl,
-            s.total_pnl,
-            COALESCE(o.open_trades, 0) AS open_trades,
-            CASE
-                WHEN s.trades >= 40 AND s.avg_pnl < 0 AND s.winrate < 0.45 THEN 'DROP'
-                WHEN s.trades >= 40 AND s.avg_pnl > 0 AND s.winrate >= 0.5 THEN 'KEEP'
-                ELSE 'TEST'
-            END AS verdict
-        FROM stats s
-        LEFT JOIN open o ON s.symbol = o.symbol
-        ORDER BY s.total_pnl DESC;
-    """)
-
-    rows = cur.fetchall()
-    cols = [d[0] for d in cur.description]
-    result = [dict(zip(cols, row)) for row in rows]
-
-    cur.close()
-    conn.close()
-
-    return jsonify(result)
-
-
-# =========================
-# 🔥 TRIAL DASH
-# =========================
-@app.route("/trial_dashboard", methods=["GET"])
-def trial_dashboard():
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT
-            symbol,
-            COUNT(*) AS trades,
-            ROUND(AVG(pnl_percent),3) AS avg_pnl
-        FROM bot_trades
-        WHERE data_version = 'expansion_v1'
-        AND status = 'CLOSED'
-        GROUP BY symbol
-        ORDER BY avg_pnl DESC;
-    """)
-
-    rows = cur.fetchall()
-    cols = [d[0] for d in cur.description]
-    result = [dict(zip(cols, row)) for row in rows]
-
-    cur.close()
-    conn.close()
-
-    return jsonify(result)
-
-
-# =========================
-# 🔥 FULL SYSTEM SNAPSHOT (UPGRADED)
+# 🔥 SYSTEM SNAPSHOT (FINAL)
 # =========================
 @app.route("/system_snapshot", methods=["GET"])
 def system_snapshot():
     conn = get_db()
     cur = conn.cursor()
 
-    # ===== MASTER =====
+    # =========================
+    # MASTER (bot_trades)
+    # =========================
     cur.execute("""
         SELECT
             symbol,
@@ -133,7 +44,9 @@ def system_snapshot():
     """)
     master = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
 
-    # ===== OPEN TRADES =====
+    # =========================
+    # OPEN TRADES
+    # =========================
     cur.execute("""
         SELECT symbol, direction, entry_price, opened_at
         FROM bot_trades
@@ -142,7 +55,9 @@ def system_snapshot():
     """)
     open_trades = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
 
-    # ===== RECENT TRADES =====
+    # =========================
+    # RECENT TRADES
+    # =========================
     cur.execute("""
         SELECT symbol, pnl_percent, opened_at, closed_at
         FROM bot_trades
@@ -152,7 +67,9 @@ def system_snapshot():
     """)
     recent = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
 
-    # ===== TRIAL =====
+    # =========================
+    # TRIAL COINS
+    # =========================
     cur.execute("""
         SELECT
             symbol,
@@ -167,13 +84,13 @@ def system_snapshot():
     trial = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
 
     # =========================
-    # 🧠 FILTER SUMMARY (NEW)
+    # 🧠 FILTER SUMMARY (signal_history_v2)
     # =========================
     cur.execute("""
         SELECT
             hold_reason,
             COUNT(*) AS count
-        FROM bot_trades
+        FROM signal_history_v2
         WHERE trade_taken = false
         GROUP BY hold_reason
         ORDER BY count DESC;
@@ -181,23 +98,34 @@ def system_snapshot():
     filter_summary = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
 
     # =========================
-    # 🧠 CONDITION PERFORMANCE (NEW)
+    # 🧠 CONDITION PERFORMANCE (signal_history_v2)
     # =========================
     cur.execute("""
         SELECT
             vwap_distance_bucket,
             COUNT(*) FILTER (WHERE trade_taken = true) AS taken,
-            COUNT(*) FILTER (WHERE trade_taken = false) AS missed,
-            ROUND(AVG(pnl_percent) FILTER (WHERE trade_taken = true), 3) AS avg_pnl
-        FROM bot_trades
-        WHERE status = 'CLOSED'
+            COUNT(*) FILTER (WHERE trade_taken = false) AS missed
+        FROM signal_history_v2
         GROUP BY vwap_distance_bucket
-        ORDER BY avg_pnl DESC NULLS LAST;
+        ORDER BY taken DESC;
     """)
     condition_perf = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
 
     # =========================
-    # 🧠 EXPOSURE (NEW)
+    # 🧠 DECISION DISTRIBUTION
+    # =========================
+    cur.execute("""
+        SELECT
+            decision_model,
+            COUNT(*) AS count
+        FROM signal_history_v2
+        GROUP BY decision_model
+        ORDER BY count DESC;
+    """)
+    decisions = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
+
+    # =========================
+    # 🧠 EXPOSURE
     # =========================
     cur.execute("""
         SELECT
@@ -219,6 +147,7 @@ def system_snapshot():
         "trial_coins": trial,
         "filter_summary": filter_summary,
         "condition_performance": condition_perf,
+        "decision_distribution": decisions,
         "exposure": exposure
     })
 
