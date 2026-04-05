@@ -20,8 +20,6 @@ def webhook():
     data = request.json
     print("📩 PAYLOAD:", data)
 
-    # your existing trade logic continues here...
-
     return jsonify({"status": "received"}), 200
 
 
@@ -74,7 +72,6 @@ def master_dashboard():
 
     rows = cur.fetchall()
     cols = [d[0] for d in cur.description]
-
     result = [dict(zip(cols, row)) for row in rows]
 
     cur.close()
@@ -105,7 +102,6 @@ def trial_dashboard():
 
     rows = cur.fetchall()
     cols = [d[0] for d in cur.description]
-
     result = [dict(zip(cols, row)) for row in rows]
 
     cur.close()
@@ -115,7 +111,7 @@ def trial_dashboard():
 
 
 # =========================
-# 🔥 FULL SYSTEM SNAPSHOT (THE BIG ONE)
+# 🔥 FULL SYSTEM SNAPSHOT (UPGRADED)
 # =========================
 @app.route("/system_snapshot", methods=["GET"])
 def system_snapshot():
@@ -170,6 +166,49 @@ def system_snapshot():
     """)
     trial = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
 
+    # =========================
+    # 🧠 FILTER SUMMARY (NEW)
+    # =========================
+    cur.execute("""
+        SELECT
+            hold_reason,
+            COUNT(*) AS count
+        FROM bot_trades
+        WHERE trade_taken = false
+        GROUP BY hold_reason
+        ORDER BY count DESC;
+    """)
+    filter_summary = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
+
+    # =========================
+    # 🧠 CONDITION PERFORMANCE (NEW)
+    # =========================
+    cur.execute("""
+        SELECT
+            vwap_distance_bucket,
+            COUNT(*) FILTER (WHERE trade_taken = true) AS taken,
+            COUNT(*) FILTER (WHERE trade_taken = false) AS missed,
+            ROUND(AVG(pnl_percent) FILTER (WHERE trade_taken = true), 3) AS avg_pnl
+        FROM bot_trades
+        WHERE status = 'CLOSED'
+        GROUP BY vwap_distance_bucket
+        ORDER BY avg_pnl DESC NULLS LAST;
+    """)
+    condition_perf = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
+
+    # =========================
+    # 🧠 EXPOSURE (NEW)
+    # =========================
+    cur.execute("""
+        SELECT
+            symbol,
+            COUNT(*) AS open_trades
+        FROM bot_trades
+        WHERE status = 'OPEN'
+        GROUP BY symbol;
+    """)
+    exposure = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
+
     cur.close()
     conn.close()
 
@@ -177,7 +216,10 @@ def system_snapshot():
         "master": master,
         "open_trades": open_trades,
         "recent_trades": recent,
-        "trial_coins": trial
+        "trial_coins": trial,
+        "filter_summary": filter_summary,
+        "condition_performance": condition_perf,
+        "exposure": exposure
     })
 
 
@@ -187,4 +229,3 @@ def system_snapshot():
 @app.route("/", methods=["GET"])
 def home():
     return "Bot is running 🚀"
-    
