@@ -11,7 +11,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 STOP_LOSS = 0.4   # %
 TAKE_PROFIT = 0.8 # %
 
-DATA_VERSION = "v2_final"
+DATA_VERSION = "v2_3_momentum_unlocked"
 
 
 def log(msg):
@@ -26,14 +26,15 @@ def get_live_price(symbol):
     try:
         url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
         return float(requests.get(url, timeout=2).json()["price"])
-    except:
+    except Exception as e:
+        log(f"⚠️ Price fetch failed for {symbol}: {e}")
         return None
 
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.json
-    log(f"📩 DATA_V2 PAYLOAD: {data}")
+    log(f"📩 DATA_V3 PAYLOAD: {data}")
 
     try:
         # ================================
@@ -67,7 +68,7 @@ def webhook():
         MIN_MOMENTUM, MIN_TREND_STRENGTH, TRADE_TIMEFRAME = config
 
         # ================================
-        # HOLD REASON ENGINE (V2.2)
+        # HOLD REASON ENGINE (V2.3)
         # ================================
         hold_reason = None
 
@@ -77,7 +78,7 @@ def webhook():
         elif abs(momentum_strength) < MIN_MOMENTUM:
             hold_reason = "weak_momentum"
 
-        # ✅ FIXED: only block TRUE extremes (both directions)
+        # ✅ Only block TRUE extremes (rare spikes)
         elif abs(momentum_strength) > 1.0:
             log(f"🚨 EXTREME MOMENTUM BLOCKED: {momentum_strength}")
             hold_reason = "too_strong_momentum"
@@ -88,7 +89,7 @@ def webhook():
         elif trend_alignment != "aligned":
             hold_reason = "counter_trend"
 
-        # 🚨 TIMEFRAME FILTER
+        # 🚨 TIMEFRAME FILTER (always last override)
         if timeframe != TRADE_TIMEFRAME:
             hold_reason = "not_" + str(TRADE_TIMEFRAME)
 
@@ -102,7 +103,9 @@ def webhook():
             AND data_version = %s
         """, (DATA_VERSION,))
 
-        for trade_id, sym, direction, entry_price in cur.fetchall():
+        open_trades = cur.fetchall()
+
+        for trade_id, sym, direction, entry_price in open_trades:
 
             live_price = get_live_price(sym)
             if not live_price:
@@ -114,10 +117,7 @@ def webhook():
 
             if pnl <= -STOP_LOSS or pnl >= TAKE_PROFIT:
 
-                if pnl >= TAKE_PROFIT:
-                    close_reason = "take_profit"
-                else:
-                    close_reason = "stop_loss"
+                close_reason = "take_profit" if pnl >= TAKE_PROFIT else "stop_loss"
 
                 cur.execute("""
                     UPDATE bot_trades
@@ -138,8 +138,6 @@ def webhook():
                 log(f"💥 CLOSED {sym} {close_reason} {pnl:.2f}%")
 
         conn.commit()
-
-        trade_taken = False
 
         # ================================
         # FILTER (NO TRADE)
@@ -164,7 +162,6 @@ def webhook():
             conn.close()
 
             log(f"🛑 FILTERED: {hold_reason}")
-
             return jsonify({"status": "filtered", "reason": hold_reason})
 
         # ================================
@@ -195,6 +192,7 @@ def webhook():
             cur.close()
             conn.close()
 
+            log("⚠️ TRADE EXISTS - SKIPPING")
             return jsonify({"status": "exists"})
 
         # ================================
@@ -207,6 +205,10 @@ def webhook():
         elif decision == "SHORT":
             stop_price = price * (1 + STOP_LOSS / 100)
             target_price = price * (1 - TAKE_PROFIT / 100)
+
+        else:
+            log("❌ INVALID DECISION TYPE")
+            return jsonify({"status": "invalid_decision"})
 
         # ================================
         # OPEN TRADE
@@ -236,8 +238,6 @@ def webhook():
             DATA_VERSION
         ))
 
-        trade_taken = True
-
         # ================================
         # LOG SIGNAL
         # ================================
@@ -260,7 +260,6 @@ def webhook():
         conn.close()
 
         log(f"🚀 TRADE OPENED: {symbol} {decision}")
-
         return jsonify({"status": "opened"})
 
     except Exception as e:
@@ -270,4 +269,4 @@ def webhook():
 
 @app.route("/")
 def home():
-    return "V2.2 SMART MOMENTUM FILTER LIVE 🚀"
+    return "V2.3 MOMENTUM UNLOCKED 🚀🔥"
