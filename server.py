@@ -11,7 +11,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 STOP_LOSS = 0.4   # %
 TAKE_PROFIT = 0.8 # %
 
-DATA_VERSION = "v2_3_momentum_unlocked"
+DATA_VERSION = "v2_3_time_exit"
 
 
 def log(msg):
@@ -26,15 +26,14 @@ def get_live_price(symbol):
     try:
         url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
         return float(requests.get(url, timeout=2).json()["price"])
-    except Exception as e:
-        log(f"⚠️ Price fetch failed for {symbol}: {e}")
+    except:
         return None
 
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.json
-    log(f"📩 DATA_V3 PAYLOAD: {data}")
+    log(f"📩 DATA_V2.3 PAYLOAD: {data}")
 
     try:
         # ================================
@@ -68,7 +67,7 @@ def webhook():
         MIN_MOMENTUM, MIN_TREND_STRENGTH, TRADE_TIMEFRAME = config
 
         # ================================
-        # HOLD REASON ENGINE (V2.3)
+        # HOLD REASON ENGINE (V2.2 logic)
         # ================================
         hold_reason = None
 
@@ -78,7 +77,6 @@ def webhook():
         elif abs(momentum_strength) < MIN_MOMENTUM:
             hold_reason = "weak_momentum"
 
-        # ✅ Only block TRUE extremes (rare spikes)
         elif abs(momentum_strength) > 1.0:
             log(f"🚨 EXTREME MOMENTUM BLOCKED: {momentum_strength}")
             hold_reason = "too_strong_momentum"
@@ -89,23 +87,20 @@ def webhook():
         elif trend_alignment != "aligned":
             hold_reason = "counter_trend"
 
-        # 🚨 TIMEFRAME FILTER (always last override)
         if timeframe != TRADE_TIMEFRAME:
             hold_reason = "not_" + str(TRADE_TIMEFRAME)
 
         # ================================
-        # CLOSE EXISTING TRADES
+        # CLOSE EXISTING TRADES (V2.3)
         # ================================
         cur.execute("""
-            SELECT id, symbol, direction, entry_price
+            SELECT id, symbol, direction, entry_price, opened_at
             FROM bot_trades
             WHERE status = 'OPEN'
             AND data_version = %s
         """, (DATA_VERSION,))
 
-        open_trades = cur.fetchall()
-
-        for trade_id, sym, direction, entry_price in open_trades:
+        for trade_id, sym, direction, entry_price, opened_at in cur.fetchall():
 
             live_price = get_live_price(sym)
             if not live_price:
@@ -115,10 +110,36 @@ def webhook():
             if direction == "SHORT":
                 pnl = -pnl
 
-            if pnl <= -STOP_LOSS or pnl >= TAKE_PROFIT:
+            # ⏱ TIME IN TRADE
+            minutes_open = (datetime.utcnow() - opened_at).total_seconds() / 60
 
-                close_reason = "take_profit" if pnl >= TAKE_PROFIT else "stop_loss"
+            close_reason = None
 
+            # ================================
+            # STANDARD TP / SL
+            # ================================
+            if pnl >= TAKE_PROFIT:
+                close_reason = "take_profit"
+
+            elif pnl <= -STOP_LOSS:
+                close_reason = "stop_loss"
+
+            # ================================
+            # TIME-BASED EXITS (NEW)
+            # ================================
+            elif minutes_open > 240:
+                close_reason = "time_force_close"
+
+            elif minutes_open > 180 and pnl >= 0:
+                close_reason = "time_small_win"
+
+            elif minutes_open > 120 and pnl >= 0.2:
+                close_reason = "time_reduced_tp"
+
+            # ================================
+            # EXECUTE CLOSE
+            # ================================
+            if close_reason:
                 cur.execute("""
                     UPDATE bot_trades
                     SET status = 'CLOSED',
@@ -135,9 +156,11 @@ def webhook():
                     trade_id
                 ))
 
-                log(f"💥 CLOSED {sym} {close_reason} {pnl:.2f}%")
+                log(f"⏱ CLOSED {sym} {close_reason} {pnl:.2f}% ({minutes_open:.1f}m)")
 
         conn.commit()
+
+        trade_taken = False
 
         # ================================
         # FILTER (NO TRADE)
@@ -162,6 +185,7 @@ def webhook():
             conn.close()
 
             log(f"🛑 FILTERED: {hold_reason}")
+
             return jsonify({"status": "filtered", "reason": hold_reason})
 
         # ================================
@@ -192,7 +216,6 @@ def webhook():
             cur.close()
             conn.close()
 
-            log("⚠️ TRADE EXISTS - SKIPPING")
             return jsonify({"status": "exists"})
 
         # ================================
@@ -205,10 +228,6 @@ def webhook():
         elif decision == "SHORT":
             stop_price = price * (1 + STOP_LOSS / 100)
             target_price = price * (1 - TAKE_PROFIT / 100)
-
-        else:
-            log("❌ INVALID DECISION TYPE")
-            return jsonify({"status": "invalid_decision"})
 
         # ================================
         # OPEN TRADE
@@ -238,6 +257,8 @@ def webhook():
             DATA_VERSION
         ))
 
+        trade_taken = True
+
         # ================================
         # LOG SIGNAL
         # ================================
@@ -260,6 +281,7 @@ def webhook():
         conn.close()
 
         log(f"🚀 TRADE OPENED: {symbol} {decision}")
+
         return jsonify({"status": "opened"})
 
     except Exception as e:
@@ -269,4 +291,4 @@ def webhook():
 
 @app.route("/")
 def home():
-    return "V2.3 MOMENTUM UNLOCKED 🚀🔥"
+    return "V2.3 TIME-AWARE EXITS ACTIVE ⏱🔥"
