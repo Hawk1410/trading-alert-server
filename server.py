@@ -20,7 +20,7 @@ def webhook():
 
 
 # =========================
-# 🔥 SYSTEM SNAPSHOT (FINAL)
+# 🔥 SYSTEM SNAPSHOT (FINAL FIXED)
 # =========================
 @app.route("/system_snapshot", methods=["GET"])
 def system_snapshot():
@@ -84,27 +84,27 @@ def system_snapshot():
     trial = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
 
     # =========================
-    # 🧠 FILTER SUMMARY (signal_history_v2)
+    # 🧠 FILTER SUMMARY (FIXED)
     # =========================
     cur.execute("""
         SELECT
             hold_reason,
             COUNT(*) AS count
         FROM signal_history_v2
-        WHERE trade_taken = false
+        WHERE decision_model = 'NONE'
         GROUP BY hold_reason
         ORDER BY count DESC;
     """)
     filter_summary = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
 
     # =========================
-    # 🧠 CONDITION PERFORMANCE (signal_history_v2)
+    # 🧠 CONDITION PERFORMANCE (FIXED)
     # =========================
     cur.execute("""
         SELECT
             vwap_distance_bucket,
-            COUNT(*) FILTER (WHERE trade_taken = true) AS taken,
-            COUNT(*) FILTER (WHERE trade_taken = false) AS missed
+            COUNT(*) FILTER (WHERE decision_model != 'NONE') AS taken,
+            COUNT(*) FILTER (WHERE decision_model = 'NONE') AS missed
         FROM signal_history_v2
         GROUP BY vwap_distance_bucket
         ORDER BY taken DESC;
