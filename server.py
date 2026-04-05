@@ -8,19 +8,19 @@ app = Flask(__name__)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
+# ================================
+# CONFIG
+# ================================
 STOP_LOSS = 0.4   # %
 TAKE_PROFIT = 0.8 # %
 
-DATA_VERSION = "v2_3_time_exit"
-
+TIME_EXIT_MINUTES = 240  # 🔥 only exit rule added
 
 def log(msg):
     print(msg, flush=True)
 
-
 def get_connection():
     return psycopg2.connect(DATABASE_URL)
-
 
 def get_live_price(symbol):
     try:
@@ -33,7 +33,10 @@ def get_live_price(symbol):
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.json
-    log(f"📩 DATA_V2.3 PAYLOAD: {data}")
+    log(f"📩 PAYLOAD: {data}")
+
+    # 🔥 dynamic data version
+    DATA_VERSION = data.get("data_version", "v2_final")
 
     try:
         # ================================
@@ -67,7 +70,7 @@ def webhook():
         MIN_MOMENTUM, MIN_TREND_STRENGTH, TRADE_TIMEFRAME = config
 
         # ================================
-        # HOLD REASON ENGINE (V2.2 logic)
+        # HOLD REASON ENGINE
         # ================================
         hold_reason = None
 
@@ -78,7 +81,6 @@ def webhook():
             hold_reason = "weak_momentum"
 
         elif abs(momentum_strength) > 1.0:
-            log(f"🚨 EXTREME MOMENTUM BLOCKED: {momentum_strength}")
             hold_reason = "too_strong_momentum"
 
         elif abs(trend_strength) < MIN_TREND_STRENGTH:
@@ -91,7 +93,7 @@ def webhook():
             hold_reason = "not_" + str(TRADE_TIMEFRAME)
 
         # ================================
-        # CLOSE EXISTING TRADES (V2.3)
+        # CLOSE EXISTING TRADES
         # ================================
         cur.execute("""
             SELECT id, symbol, direction, entry_price, opened_at
@@ -110,13 +112,12 @@ def webhook():
             if direction == "SHORT":
                 pnl = -pnl
 
-            # ⏱ TIME IN TRADE
             minutes_open = (datetime.utcnow() - opened_at).total_seconds() / 60
 
             close_reason = None
 
             # ================================
-            # STANDARD TP / SL
+            # NORMAL TP / SL
             # ================================
             if pnl >= TAKE_PROFIT:
                 close_reason = "take_profit"
@@ -125,19 +126,13 @@ def webhook():
                 close_reason = "stop_loss"
 
             # ================================
-            # TIME-BASED EXITS (NEW)
+            # TIME EXIT ONLY
             # ================================
-            elif minutes_open > 240:
-                close_reason = "time_force_close"
-
-            elif minutes_open > 180 and pnl >= 0:
-                close_reason = "time_small_win"
-
-            elif minutes_open > 120 and pnl >= 0.2:
-                close_reason = "time_reduced_tp"
+            elif minutes_open >= TIME_EXIT_MINUTES:
+                close_reason = "time_exit"
 
             # ================================
-            # EXECUTE CLOSE
+            # CLOSE TRADE
             # ================================
             if close_reason:
                 cur.execute("""
@@ -156,14 +151,14 @@ def webhook():
                     trade_id
                 ))
 
-                log(f"⏱ CLOSED {sym} {close_reason} {pnl:.2f}% ({minutes_open:.1f}m)")
+                log(f"💥 CLOSED {sym} | {close_reason} | {pnl:.2f}% | {minutes_open:.1f}m")
 
         conn.commit()
 
         trade_taken = False
 
         # ================================
-        # FILTER (NO TRADE)
+        # FILTER
         # ================================
         if hold_reason:
             cur.execute("""
@@ -183,8 +178,6 @@ def webhook():
             conn.commit()
             cur.close()
             conn.close()
-
-            log(f"🛑 FILTERED: {hold_reason}")
 
             return jsonify({"status": "filtered", "reason": hold_reason})
 
@@ -219,7 +212,7 @@ def webhook():
             return jsonify({"status": "exists"})
 
         # ================================
-        # CALCULATE SL / TP
+        # OPEN TRADE
         # ================================
         if decision == "LONG":
             stop_price = price * (1 - STOP_LOSS / 100)
@@ -229,9 +222,6 @@ def webhook():
             stop_price = price * (1 + STOP_LOSS / 100)
             target_price = price * (1 - TAKE_PROFIT / 100)
 
-        # ================================
-        # OPEN TRADE
-        # ================================
         cur.execute("""
             INSERT INTO bot_trades (
                 symbol, direction, entry_price, stop_price, target_price,
@@ -257,8 +247,6 @@ def webhook():
             DATA_VERSION
         ))
 
-        trade_taken = True
-
         # ================================
         # LOG SIGNAL
         # ================================
@@ -280,7 +268,7 @@ def webhook():
         cur.close()
         conn.close()
 
-        log(f"🚀 TRADE OPENED: {symbol} {decision}")
+        log(f"🚀 TRADE OPENED: {symbol} {decision} [{DATA_VERSION}]")
 
         return jsonify({"status": "opened"})
 
@@ -291,4 +279,4 @@ def webhook():
 
 @app.route("/")
 def home():
-    return "V2.3 TIME-AWARE EXITS ACTIVE ⏱🔥"
+    return "V2.3 CLEAN TIME EXIT BOT LIVE 🚀"
