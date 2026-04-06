@@ -10,26 +10,115 @@ def get_db():
     return psycopg2.connect(DATABASE_URL)
 
 # =========================
-# WEBHOOK
+# 🚀 WEBHOOK (EXECUTION RESTORED)
 # =========================
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.json
     print("📩 PAYLOAD:", data)
-    return jsonify({"status": "received"}), 200
+
+    symbol = data.get("symbol")
+    decision = data.get("decision_model")
+    price = data.get("price")
+    momentum = data.get("momentum_strength")
+    trend = data.get("trend_strength")
+    alignment = data.get("trend_alignment")
+    data_version = data.get("data_version")
+
+    conn = get_db()
+    cur = conn.cursor()
+
+    # =========================
+    # 🚫 FILTER LOGIC
+    # =========================
+    hold_reason = None
+
+    if decision not in ["LONG", "SHORT"]:
+        hold_reason = "no_decision"
+
+    elif alignment != "aligned":
+        hold_reason = "counter_trend"
+
+    # =========================
+    # 🚫 PREVENT STACKING
+    # =========================
+    if hold_reason is None:
+        cur.execute("""
+            SELECT COUNT(*) FROM bot_trades
+            WHERE symbol = %s AND status = 'OPEN'
+        """, (symbol,))
+        open_count = cur.fetchone()[0]
+
+        if open_count > 0:
+            hold_reason = "trade_exists"
+
+    # =========================
+    # 🧠 SAVE SIGNAL ALWAYS
+    # =========================
+    cur.execute("""
+        INSERT INTO signal_history_v2 (
+            symbol,
+            decision_model,
+            momentum_strength,
+            trend_strength,
+            trend_alignment,
+            price,
+            data_version,
+            hold_reason
+        )
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+    """, (
+        symbol,
+        decision,
+        momentum,
+        trend,
+        alignment,
+        price,
+        data_version,
+        hold_reason
+    ))
+
+    # =========================
+    # ✅ EXECUTE TRADE
+    # =========================
+    if hold_reason is None:
+        cur.execute("""
+            INSERT INTO bot_trades (
+                symbol,
+                direction,
+                entry_price,
+                status,
+                data_version
+            )
+            VALUES (%s,%s,%s,'OPEN',%s)
+        """, (
+            symbol,
+            decision,
+            price,
+            data_version
+        ))
+
+        print(f"🚀 TRADE OPENED: {symbol} {decision} @ {price}")
+
+    else:
+        print(f"⛔ BLOCKED: {symbol} | {hold_reason}")
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    return jsonify({"status": "processed"}), 200
 
 
 # =========================
-# 🔥 SYSTEM SNAPSHOT (FINAL FIXED)
+# 🔥 SYSTEM SNAPSHOT
 # =========================
 @app.route("/system_snapshot", methods=["GET"])
 def system_snapshot():
     conn = get_db()
     cur = conn.cursor()
 
-    # =========================
-    # MASTER (bot_trades)
-    # =========================
+    # ===== MASTER =====
     cur.execute("""
         SELECT
             symbol,
@@ -44,9 +133,7 @@ def system_snapshot():
     """)
     master = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
 
-    # =========================
-    # OPEN TRADES
-    # =========================
+    # ===== OPEN =====
     cur.execute("""
         SELECT symbol, direction, entry_price, opened_at
         FROM bot_trades
@@ -55,9 +142,7 @@ def system_snapshot():
     """)
     open_trades = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
 
-    # =========================
-    # RECENT TRADES
-    # =========================
+    # ===== RECENT =====
     cur.execute("""
         SELECT symbol, pnl_percent, opened_at, closed_at
         FROM bot_trades
@@ -67,29 +152,23 @@ def system_snapshot():
     """)
     recent = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
 
-    # =========================
-    # TRIAL COINS
-    # =========================
+    # ===== TRIAL =====
     cur.execute("""
         SELECT
             symbol,
             COUNT(*) AS trades,
             ROUND(AVG(pnl_percent),3) AS avg_pnl
         FROM bot_trades
-        WHERE data_version = 'expansion_v1'
+        WHERE data_version LIKE 'expansion%'
         AND status = 'CLOSED'
         GROUP BY symbol
         ORDER BY avg_pnl DESC;
     """)
     trial = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
 
-    # =========================
-    # 🧠 FILTER SUMMARY (FIXED)
-    # =========================
+    # ===== FILTER SUMMARY =====
     cur.execute("""
-        SELECT
-            hold_reason,
-            COUNT(*) AS count
+        SELECT hold_reason, COUNT(*) AS count
         FROM signal_history_v2
         WHERE decision_model = 'NONE'
         GROUP BY hold_reason
@@ -97,9 +176,7 @@ def system_snapshot():
     """)
     filter_summary = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
 
-    # =========================
-    # 🧠 CONDITION PERFORMANCE (FIXED)
-    # =========================
+    # ===== CONDITION PERFORMANCE =====
     cur.execute("""
         SELECT
             vwap_distance_bucket,
@@ -111,26 +188,18 @@ def system_snapshot():
     """)
     condition_perf = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
 
-    # =========================
-    # 🧠 DECISION DISTRIBUTION
-    # =========================
+    # ===== DECISION SPLIT =====
     cur.execute("""
-        SELECT
-            decision_model,
-            COUNT(*) AS count
+        SELECT decision_model, COUNT(*) AS count
         FROM signal_history_v2
         GROUP BY decision_model
         ORDER BY count DESC;
     """)
     decisions = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
 
-    # =========================
-    # 🧠 EXPOSURE
-    # =========================
+    # ===== EXPOSURE =====
     cur.execute("""
-        SELECT
-            symbol,
-            COUNT(*) AS open_trades
+        SELECT symbol, COUNT(*) AS open_trades
         FROM bot_trades
         WHERE status = 'OPEN'
         GROUP BY symbol;
