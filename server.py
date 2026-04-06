@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 import os
 import psycopg2
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
@@ -10,7 +11,7 @@ def get_db():
     return psycopg2.connect(DATABASE_URL)
 
 # =========================
-# 🚀 WEBHOOK (EXECUTION RESTORED)
+# 🚀 WEBHOOK (EXECUTION ENGINE)
 # =========================
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -28,11 +29,11 @@ def webhook():
     conn = get_db()
     cur = conn.cursor()
 
+    hold_reason = None
+
     # =========================
     # 🚫 FILTER LOGIC
     # =========================
-    hold_reason = None
-
     if decision not in ["LONG", "SHORT"]:
         hold_reason = "no_decision"
 
@@ -53,7 +54,7 @@ def webhook():
             hold_reason = "trade_exists"
 
     # =========================
-    # 🧠 SAVE SIGNAL ALWAYS
+    # 🧠 SAVE SIGNAL
     # =========================
     cur.execute("""
         INSERT INTO signal_history_v2 (
@@ -111,7 +112,7 @@ def webhook():
 
 
 # =========================
-# 🔥 SYSTEM SNAPSHOT
+# 🔥 SYSTEM SNAPSHOT + HEALTH
 # =========================
 @app.route("/system_snapshot", methods=["GET"])
 def system_snapshot():
@@ -206,10 +207,46 @@ def system_snapshot():
     """)
     exposure = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
 
+    # =========================
+    # 🧠 SYSTEM HEALTH
+    # =========================
+
+    cur.execute("SELECT MAX(created_at) FROM signal_history_v2")
+    last_signal = cur.fetchone()[0]
+
+    cur.execute("SELECT MAX(opened_at) FROM bot_trades")
+    last_trade = cur.fetchone()[0]
+
+    cur.execute("""
+        SELECT COUNT(*) FROM signal_history_v2
+        WHERE created_at > NOW() - INTERVAL '1 hour'
+    """)
+    signals_1h = cur.fetchone()[0]
+
+    cur.execute("""
+        SELECT COUNT(*) FROM bot_trades
+        WHERE opened_at > NOW() - INTERVAL '1 hour'
+    """)
+    trades_1h = cur.fetchone()[0]
+
+    # 🚨 ALERT CONDITION
+    alert = None
+    if signals_1h > 50 and trades_1h == 0:
+        alert = "⚠️ SIGNALS ACTIVE BUT NO TRADES → CHECK EXECUTION"
+
+    health = {
+        "last_signal_time": str(last_signal),
+        "last_trade_time": str(last_trade),
+        "signals_last_hour": signals_1h,
+        "trades_last_hour": trades_1h,
+        "alert": alert
+    }
+
     cur.close()
     conn.close()
 
     return jsonify({
+        "health": health,
         "master": master,
         "open_trades": open_trades,
         "recent_trades": recent,
