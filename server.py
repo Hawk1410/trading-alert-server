@@ -12,7 +12,7 @@ def get_db():
 
 
 # =========================
-# 🚀 WEBHOOK (FIXED ENGINE)
+# 🚀 WEBHOOK (UPDATED V2.5)
 # =========================
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -43,7 +43,7 @@ def webhook():
             hold_reason = "counter_trend"
 
         # =========================
-        # 🚫 PREVENT STACKING
+        # 🚫 PREVENT STACKING (UPDATED)
         # =========================
         if hold_reason is None:
             cur.execute("""
@@ -52,7 +52,8 @@ def webhook():
             """, (symbol,))
             open_count = cur.fetchone()[0]
 
-            if open_count > 0:
+            # ✅ Allow up to 2 trades per symbol
+            if open_count >= 2:
                 hold_reason = "trade_exists"
 
         # =========================
@@ -83,7 +84,7 @@ def webhook():
         ))
 
         # =========================
-        # ✅ EXECUTE TRADE (FIXED)
+        # ✅ EXECUTE TRADE
         # =========================
         if hold_reason is None:
             cur.execute("""
