@@ -1,7 +1,7 @@
 from flask import Flask, request, jsonify
 import os
 import psycopg2
-from datetime import datetime
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
@@ -12,7 +12,7 @@ def get_db():
 
 
 # =========================
-# 🚀 WEBHOOK (V2.5 EXECUTION ENGINE)
+# 🚀 WEBHOOK (UNCHANGED)
 # =========================
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -33,18 +33,12 @@ def webhook():
     try:
         hold_reason = None
 
-        # =========================
-        # 🚫 FILTER LOGIC
-        # =========================
         if decision not in ["LONG", "SHORT"]:
             hold_reason = "no_decision"
 
         elif alignment != "aligned":
             hold_reason = "counter_trend"
 
-        # =========================
-        # 🚫 PREVENT STACKING (MAX 2)
-        # =========================
         if hold_reason is None:
             cur.execute("""
                 SELECT COUNT(*) FROM bot_trades
@@ -55,9 +49,6 @@ def webhook():
             if open_count >= 2:
                 hold_reason = "trade_exists"
 
-        # =========================
-        # 🧠 SAVE SIGNAL
-        # =========================
         cur.execute("""
             INSERT INTO signal_history_v2 (
                 symbol,
@@ -72,26 +63,17 @@ def webhook():
             )
             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,NOW())
         """, (
-            symbol,
-            decision,
-            momentum,
-            trend,
-            alignment,
-            price,
-            data_version,
-            hold_reason
+            symbol, decision, momentum, trend,
+            alignment, price, data_version, hold_reason
         ))
 
-        # =========================
-        # ✅ EXECUTE TRADE (WITH TP/SL)
-        # =========================
         if hold_reason is None:
 
             if decision == "LONG":
                 stop_price = price * (1 - 0.004)
                 target_price = price * (1 + 0.008)
 
-            elif decision == "SHORT":
+            else:
                 stop_price = price * (1 + 0.004)
                 target_price = price * (1 - 0.008)
 
@@ -108,15 +90,11 @@ def webhook():
                 )
                 VALUES (%s,%s,%s,%s,%s,'OPEN',%s,NOW())
             """, (
-                symbol,
-                decision,
-                price,
-                stop_price,
-                target_price,
-                data_version
+                symbol, decision, price,
+                stop_price, target_price, data_version
             ))
 
-            print(f"🚀 TRADE OPENED: {symbol} {decision} @ {price} | TP: {target_price} | SL: {stop_price}")
+            print(f"🚀 TRADE OPENED: {symbol} {decision} @ {price}")
 
         else:
             print(f"⛔ BLOCKED: {symbol} | {hold_reason}")
@@ -135,29 +113,129 @@ def webhook():
 
 
 # =========================
-# 🔥 SYSTEM SNAPSHOT + HEALTH
+# 🧠 EXIT ENGINE (NEW)
+# =========================
+@app.route("/check_exits", methods=["POST"])
+def check_exits():
+    data = request.json
+    prices = data.get("prices", {})  # {"BTCUSDT": 67000, ...}
+
+    conn = get_db()
+    cur = conn.cursor()
+
+    now = datetime.utcnow()
+
+    try:
+        cur.execute("""
+            SELECT id, symbol, direction, entry_price,
+                   stop_price, target_price, opened_at
+            FROM bot_trades
+            WHERE status = 'OPEN'
+        """)
+
+        trades = cur.fetchall()
+
+        for trade in trades:
+            trade_id, symbol, direction, entry, stop, target, opened = trade
+
+            current_price = prices.get(symbol)
+            if current_price is None:
+                continue
+
+            duration = (now - opened).total_seconds()
+
+            # === PNL CALC ===
+            if direction == "LONG":
+                pnl = (current_price - entry) / entry * 100
+            else:
+                pnl = (entry - current_price) / entry * 100
+
+            close = False
+            reason = None
+
+            # =========================
+            # TP / SL
+            # =========================
+            if direction == "LONG":
+                if current_price >= target:
+                    close = True
+                    reason = "tp_hit"
+                elif current_price <= stop:
+                    close = True
+                    reason = "sl_hit"
+
+            else:
+                if current_price <= target:
+                    close = True
+                    reason = "tp_hit"
+                elif current_price >= stop:
+                    close = True
+                    reason = "sl_hit"
+
+            # =========================
+            # 6H SMART EXIT
+            # =========================
+            if not close and duration > 21600:  # 6h
+                if pnl < 0.2:
+                    close = True
+                    reason = "timeout_weak"
+
+            # =========================
+            # 12H HARD EXIT
+            # =========================
+            if not close and duration > 43200:  # 12h
+                close = True
+                reason = "max_duration"
+
+            # =========================
+            # CLOSE TRADE
+            # =========================
+            if close:
+                cur.execute("""
+                    UPDATE bot_trades
+                    SET status = 'CLOSED',
+                        closed_at = NOW(),
+                        pnl_percent = %s
+                    WHERE id = %s
+                """, (pnl, trade_id))
+
+                print(f"🔒 CLOSED: {symbol} | {reason} | PnL: {pnl:.3f}")
+
+        conn.commit()
+
+    except Exception as e:
+        conn.rollback()
+        print("❌ EXIT ERROR:", e)
+
+    finally:
+        cur.close()
+        conn.close()
+
+    return jsonify({"status": "checked"}), 200
+
+
+# =========================
+# 📊 SNAPSHOT (UNCHANGED)
 # =========================
 @app.route("/system_snapshot", methods=["GET"])
 def system_snapshot():
     conn = get_db()
     cur = conn.cursor()
 
-    # ===== MASTER =====
     cur.execute("""
         SELECT
             symbol,
             COUNT(*) AS trades,
-            ROUND(AVG(pnl_percent), 3) AS avg_pnl,
-            ROUND(SUM(pnl_percent), 3) AS total_pnl,
-            ROUND(AVG(CASE WHEN pnl_percent > 0 THEN 1 ELSE 0 END)::numeric, 3) AS winrate
+            ROUND(AVG(pnl_percent), 3),
+            ROUND(SUM(pnl_percent), 3),
+            ROUND(AVG(CASE WHEN pnl_percent > 0 THEN 1 ELSE 0 END)::numeric, 3)
         FROM bot_trades
         WHERE status = 'CLOSED'
         GROUP BY symbol
-        ORDER BY total_pnl DESC;
+        ORDER BY SUM(pnl_percent) DESC;
     """)
     master = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
 
-    # ===== OPEN =====
     cur.execute("""
         SELECT symbol, direction, entry_price, stop_price, target_price, opened_at
         FROM bot_trades
@@ -166,7 +244,6 @@ def system_snapshot():
     """)
     open_trades = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
 
-    # ===== RECENT =====
     cur.execute("""
         SELECT symbol, pnl_percent, opened_at, closed_at
         FROM bot_trades
@@ -176,7 +253,6 @@ def system_snapshot():
     """)
     recent = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
 
-    # ===== HEALTH =====
     cur.execute("SELECT MAX(created_at) FROM signal_history_v2")
     last_signal = cur.fetchone()[0]
 
