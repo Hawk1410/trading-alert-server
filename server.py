@@ -12,7 +12,7 @@ def get_db():
 
 
 # =========================
-# 🚀 WEBHOOK (UPDATED V2.5)
+# 🚀 WEBHOOK (V2.5 EXECUTION ENGINE)
 # =========================
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -43,7 +43,7 @@ def webhook():
             hold_reason = "counter_trend"
 
         # =========================
-        # 🚫 PREVENT STACKING (UPDATED)
+        # 🚫 PREVENT STACKING (MAX 2)
         # =========================
         if hold_reason is None:
             cur.execute("""
@@ -52,7 +52,6 @@ def webhook():
             """, (symbol,))
             open_count = cur.fetchone()[0]
 
-            # ✅ Allow up to 2 trades per symbol
             if open_count >= 2:
                 hold_reason = "trade_exists"
 
@@ -84,27 +83,40 @@ def webhook():
         ))
 
         # =========================
-        # ✅ EXECUTE TRADE
+        # ✅ EXECUTE TRADE (WITH TP/SL)
         # =========================
         if hold_reason is None:
+
+            if decision == "LONG":
+                stop_price = price * (1 - 0.004)
+                target_price = price * (1 + 0.008)
+
+            elif decision == "SHORT":
+                stop_price = price * (1 + 0.004)
+                target_price = price * (1 - 0.008)
+
             cur.execute("""
                 INSERT INTO bot_trades (
                     symbol,
                     direction,
                     entry_price,
+                    stop_price,
+                    target_price,
                     status,
                     data_version,
                     opened_at
                 )
-                VALUES (%s,%s,%s,'OPEN',%s,NOW())
+                VALUES (%s,%s,%s,%s,%s,'OPEN',%s,NOW())
             """, (
                 symbol,
                 decision,
                 price,
+                stop_price,
+                target_price,
                 data_version
             ))
 
-            print(f"🚀 TRADE OPENED: {symbol} {decision} @ {price}")
+            print(f"🚀 TRADE OPENED: {symbol} {decision} @ {price} | TP: {target_price} | SL: {stop_price}")
 
         else:
             print(f"⛔ BLOCKED: {symbol} | {hold_reason}")
@@ -147,7 +159,7 @@ def system_snapshot():
 
     # ===== OPEN =====
     cur.execute("""
-        SELECT symbol, direction, entry_price, opened_at
+        SELECT symbol, direction, entry_price, stop_price, target_price, opened_at
         FROM bot_trades
         WHERE status = 'OPEN'
         ORDER BY opened_at DESC;
