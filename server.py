@@ -1,7 +1,7 @@
 from flask import Flask, request, jsonify
 import os
 import psycopg2
-from datetime import datetime, timedelta
+from datetime import datetime
 
 app = Flask(__name__)
 
@@ -12,7 +12,7 @@ def get_db():
 
 
 # =========================
-# 🚀 WEBHOOK (UNCHANGED)
+# 🚀 WEBHOOK (ENTRY + EXIT ENGINE)
 # =========================
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -30,7 +30,81 @@ def webhook():
     conn = get_db()
     cur = conn.cursor()
 
+    now = datetime.utcnow()
+
     try:
+        # =========================
+        # 🧠 EXIT ENGINE (RUN FIRST)
+        # =========================
+        cur.execute("""
+            SELECT id, symbol, direction, entry_price,
+                   stop_price, target_price, opened_at
+            FROM bot_trades
+            WHERE status = 'OPEN'
+        """)
+
+        open_trades = cur.fetchall()
+
+        for trade in open_trades:
+            trade_id, t_symbol, direction, entry, stop, target, opened = trade
+
+            # only evaluate if this webhook has price for that symbol
+            if t_symbol != symbol:
+                continue
+
+            duration = (now - opened).total_seconds()
+
+            # === PNL CALC ===
+            if direction == "LONG":
+                pnl = (price - entry) / entry * 100
+            else:
+                pnl = (entry - price) / entry * 100
+
+            close = False
+            reason = None
+
+            # === TP / SL ===
+            if direction == "LONG":
+                if price >= target:
+                    close = True
+                    reason = "tp_hit"
+                elif price <= stop:
+                    close = True
+                    reason = "sl_hit"
+            else:
+                if price <= target:
+                    close = True
+                    reason = "tp_hit"
+                elif price >= stop:
+                    close = True
+                    reason = "sl_hit"
+
+            # === 6H SMART EXIT ===
+            if not close and duration > 21600:
+                if pnl < 0.2:
+                    close = True
+                    reason = "timeout_weak"
+
+            # === 12H HARD EXIT ===
+            if not close and duration > 43200:
+                close = True
+                reason = "max_duration"
+
+            # === CLOSE TRADE ===
+            if close:
+                cur.execute("""
+                    UPDATE bot_trades
+                    SET status = 'CLOSED',
+                        closed_at = NOW(),
+                        pnl_percent = %s
+                    WHERE id = %s
+                """, (pnl, trade_id))
+
+                print(f"🔒 CLOSED: {t_symbol} | {reason} | PnL: {pnl:.3f}")
+
+        # =========================
+        # 🚫 ENTRY FILTER LOGIC
+        # =========================
         hold_reason = None
 
         if decision not in ["LONG", "SHORT"]:
@@ -39,6 +113,9 @@ def webhook():
         elif alignment != "aligned":
             hold_reason = "counter_trend"
 
+        # =========================
+        # 🚫 PREVENT STACKING (MAX 2)
+        # =========================
         if hold_reason is None:
             cur.execute("""
                 SELECT COUNT(*) FROM bot_trades
@@ -49,6 +126,9 @@ def webhook():
             if open_count >= 2:
                 hold_reason = "trade_exists"
 
+        # =========================
+        # 🧠 SAVE SIGNAL
+        # =========================
         cur.execute("""
             INSERT INTO signal_history_v2 (
                 symbol,
@@ -67,12 +147,14 @@ def webhook():
             alignment, price, data_version, hold_reason
         ))
 
+        # =========================
+        # ✅ EXECUTE TRADE
+        # =========================
         if hold_reason is None:
 
             if decision == "LONG":
                 stop_price = price * (1 - 0.004)
                 target_price = price * (1 + 0.008)
-
             else:
                 stop_price = price * (1 + 0.004)
                 target_price = price * (1 - 0.008)
@@ -110,108 +192,6 @@ def webhook():
         conn.close()
 
     return jsonify({"status": "processed"}), 200
-
-
-# =========================
-# 🧠 EXIT ENGINE (NEW)
-# =========================
-@app.route("/check_exits", methods=["POST"])
-def check_exits():
-    data = request.json
-    prices = data.get("prices", {})  # {"BTCUSDT": 67000, ...}
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    now = datetime.utcnow()
-
-    try:
-        cur.execute("""
-            SELECT id, symbol, direction, entry_price,
-                   stop_price, target_price, opened_at
-            FROM bot_trades
-            WHERE status = 'OPEN'
-        """)
-
-        trades = cur.fetchall()
-
-        for trade in trades:
-            trade_id, symbol, direction, entry, stop, target, opened = trade
-
-            current_price = prices.get(symbol)
-            if current_price is None:
-                continue
-
-            duration = (now - opened).total_seconds()
-
-            # === PNL CALC ===
-            if direction == "LONG":
-                pnl = (current_price - entry) / entry * 100
-            else:
-                pnl = (entry - current_price) / entry * 100
-
-            close = False
-            reason = None
-
-            # =========================
-            # TP / SL
-            # =========================
-            if direction == "LONG":
-                if current_price >= target:
-                    close = True
-                    reason = "tp_hit"
-                elif current_price <= stop:
-                    close = True
-                    reason = "sl_hit"
-
-            else:
-                if current_price <= target:
-                    close = True
-                    reason = "tp_hit"
-                elif current_price >= stop:
-                    close = True
-                    reason = "sl_hit"
-
-            # =========================
-            # 6H SMART EXIT
-            # =========================
-            if not close and duration > 21600:  # 6h
-                if pnl < 0.2:
-                    close = True
-                    reason = "timeout_weak"
-
-            # =========================
-            # 12H HARD EXIT
-            # =========================
-            if not close and duration > 43200:  # 12h
-                close = True
-                reason = "max_duration"
-
-            # =========================
-            # CLOSE TRADE
-            # =========================
-            if close:
-                cur.execute("""
-                    UPDATE bot_trades
-                    SET status = 'CLOSED',
-                        closed_at = NOW(),
-                        pnl_percent = %s
-                    WHERE id = %s
-                """, (pnl, trade_id))
-
-                print(f"🔒 CLOSED: {symbol} | {reason} | PnL: {pnl:.3f}")
-
-        conn.commit()
-
-    except Exception as e:
-        conn.rollback()
-        print("❌ EXIT ERROR:", e)
-
-    finally:
-        cur.close()
-        conn.close()
-
-    return jsonify({"status": "checked"}), 200
 
 
 # =========================
