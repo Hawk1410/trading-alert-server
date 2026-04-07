@@ -1,7 +1,7 @@
 from flask import Flask, request, jsonify
 import os
 import psycopg2
-from datetime import datetime
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
@@ -12,7 +12,7 @@ def get_db():
 
 
 # =========================
-# 🚀 WEBHOOK (ENTRY + EXIT ENGINE)
+# 🚀 WEBHOOK (ENTRY + EXIT ENGINE v2.6)
 # =========================
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -34,7 +34,7 @@ def webhook():
 
     try:
         # =========================
-        # 🧠 EXIT ENGINE (RUN FIRST)
+        # 🧠 EXIT ENGINE
         # =========================
         cur.execute("""
             SELECT id, symbol, direction, entry_price,
@@ -48,13 +48,11 @@ def webhook():
         for trade in open_trades:
             trade_id, t_symbol, direction, entry, stop, target, opened = trade
 
-            # only evaluate if this webhook has price for that symbol
             if t_symbol != symbol:
                 continue
 
             duration = (now - opened).total_seconds()
 
-            # === PNL CALC ===
             if direction == "LONG":
                 pnl = (price - entry) / entry * 100
             else:
@@ -63,7 +61,7 @@ def webhook():
             close = False
             reason = None
 
-            # === TP / SL ===
+            # TP / SL
             if direction == "LONG":
                 if price >= target:
                     close = True
@@ -79,18 +77,17 @@ def webhook():
                     close = True
                     reason = "sl_hit"
 
-            # === 6H SMART EXIT ===
+            # 6H smart exit
             if not close and duration > 21600:
                 if pnl < 0.2:
                     close = True
                     reason = "timeout_weak"
 
-            # === 12H HARD EXIT ===
+            # 12H hard exit
             if not close and duration > 43200:
                 close = True
                 reason = "max_duration"
 
-            # === CLOSE TRADE ===
             if close:
                 cur.execute("""
                     UPDATE bot_trades
@@ -114,17 +111,37 @@ def webhook():
             hold_reason = "counter_trend"
 
         # =========================
-        # 🚫 PREVENT STACKING (MAX 2)
+        # 🧠 SMART STACKING LOGIC (NEW)
         # =========================
         if hold_reason is None:
             cur.execute("""
-                SELECT COUNT(*) FROM bot_trades
+                SELECT entry_price, opened_at
+                FROM bot_trades
                 WHERE symbol = %s AND status = 'OPEN'
+                ORDER BY opened_at ASC
             """, (symbol,))
-            open_count = cur.fetchone()[0]
+            existing_trades = cur.fetchall()
 
+            open_count = len(existing_trades)
+
+            # Max cap
             if open_count >= 2:
                 hold_reason = "trade_exists"
+
+            # Smart second entry
+            elif open_count == 1:
+                first_entry, first_time = existing_trades[0]
+
+                # ⏱ TIME FILTER (20 mins)
+                if now - first_time < timedelta(minutes=20):
+                    hold_reason = "too_soon"
+
+                # 📉 PRICE IMPROVEMENT
+                elif decision == "LONG" and price >= first_entry:
+                    hold_reason = "no_better_price"
+
+                elif decision == "SHORT" and price <= first_entry:
+                    hold_reason = "no_better_price"
 
         # =========================
         # 🧠 SAVE SIGNAL
@@ -274,9 +291,6 @@ def system_snapshot():
     })
 
 
-# =========================
-# HEALTH CHECK
-# =========================
 @app.route("/", methods=["GET"])
 def home():
     return "Bot is running 🚀"
