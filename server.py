@@ -12,7 +12,7 @@ def get_db():
 
 
 # =========================
-# 🚀 WEBHOOK (ENTRY + EXIT ENGINE v2.6 FIXED)
+# 🚀 WEBHOOK (ENTRY + EXIT ENGINE v2.6.2)
 # =========================
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -26,6 +26,7 @@ def webhook():
     trend = data.get("trend_strength")
     alignment = data.get("trend_alignment")
     data_version = data.get("data_version")
+    vwap_bucket = data.get("vwap_distance_bucket")
 
     conn = get_db()
     cur = conn.cursor()
@@ -34,7 +35,54 @@ def webhook():
 
     try:
         # =========================
-        # 🧠 EXIT ENGINE
+        # 🧠 TAGGING ENGINE (NEW)
+        # =========================
+
+        abs_mom = abs(momentum) if momentum is not None else 0
+        abs_trend = abs(trend) if trend is not None else 0
+
+        # --- Trend Quality ---
+        if abs_trend > 0.25:
+            trend_quality = "strong"
+        elif abs_trend > 0.12:
+            trend_quality = "medium"
+        else:
+            trend_quality = "weak"
+
+        # --- Momentum State ---
+        if abs_mom > 0.45:
+            momentum_state = "impulse"
+        elif abs_mom > 0.2:
+            momentum_state = "build"
+        else:
+            momentum_state = "weak"
+
+        # --- Score ---
+        score = 0
+
+        if abs_mom > 0.45:
+            score += 2
+        elif abs_mom > 0.2:
+            score += 1
+
+        if abs_trend > 0.25:
+            score += 2
+        elif abs_trend > 0.12:
+            score += 1
+
+        if alignment == "aligned":
+            score += 1
+
+        # --- Final Tier ---
+        if score >= 5:
+            signal_quality = "A+"
+        elif score >= 3:
+            signal_quality = "B"
+        else:
+            signal_quality = "C"
+
+        # =========================
+        # 🧠 EXIT ENGINE (UNCHANGED)
         # =========================
         cur.execute("""
             SELECT id, symbol, direction, entry_price,
@@ -61,7 +109,6 @@ def webhook():
             close = False
             reason = None
 
-            # TP / SL
             if direction == "LONG":
                 if price >= target:
                     close = True
@@ -77,13 +124,11 @@ def webhook():
                     close = True
                     reason = "sl_hit"
 
-            # 6H smart exit
             if not close and duration > 21600:
                 if pnl < 0.2:
                     close = True
                     reason = "timeout_weak"
 
-            # 12H hard exit
             if not close and duration > 43200:
                 close = True
                 reason = "max_duration"
@@ -100,7 +145,7 @@ def webhook():
                 print(f"🔒 CLOSED: {t_symbol} | {reason} | PnL: {pnl:.3f}")
 
         # =========================
-        # 🚫 ENTRY FILTER LOGIC
+        # 🚫 ENTRY FILTER LOGIC (UNCHANGED)
         # =========================
         hold_reason = None
 
@@ -110,11 +155,7 @@ def webhook():
         elif alignment != "aligned":
             hold_reason = "counter_trend"
 
-        # =========================
-        # 🧠 STACKING LOGIC (FIXED)
-        # =========================
         if hold_reason is None:
-
             cur.execute("""
                 SELECT entry_price, opened_at
                 FROM bot_trades
@@ -125,23 +166,15 @@ def webhook():
 
             open_count = len(existing_trades)
 
-            # ✅ ALWAYS allow FIRST trade (CRITICAL FIX)
-            if open_count == 0:
-                pass  # no restriction
-
-            # 🚫 Max cap
-            elif open_count >= 2:
+            if open_count >= 2:
                 hold_reason = "trade_exists"
 
-            # 🧠 Smart second entry ONLY
             elif open_count == 1:
                 first_entry, first_time = existing_trades[0]
 
-                # ⏱ TIME FILTER (20 mins)
                 if now - first_time < timedelta(minutes=20):
                     hold_reason = "too_soon"
 
-                # 📉 PRICE IMPROVEMENT
                 elif decision == "LONG" and price >= first_entry:
                     hold_reason = "no_better_price"
 
@@ -149,7 +182,7 @@ def webhook():
                     hold_reason = "no_better_price"
 
         # =========================
-        # 🧠 SAVE SIGNAL
+        # 🧠 SAVE SIGNAL (UPDATED)
         # =========================
         cur.execute("""
             INSERT INTO signal_history_v2 (
@@ -161,16 +194,21 @@ def webhook():
                 price,
                 data_version,
                 hold_reason,
+                signal_quality,
+                trend_quality,
+                momentum_state,
+                signal_score,
                 created_at
             )
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
         """, (
             symbol, decision, momentum, trend,
-            alignment, price, data_version, hold_reason
+            alignment, price, data_version, hold_reason,
+            signal_quality, trend_quality, momentum_state, score
         ))
 
         # =========================
-        # ✅ EXECUTE TRADE
+        # ✅ EXECUTE TRADE (UNCHANGED)
         # =========================
         if hold_reason is None:
 
@@ -198,7 +236,7 @@ def webhook():
                 stop_price, target_price, data_version
             ))
 
-            print(f"🚀 TRADE OPENED: {symbol} {decision} @ {price}")
+            print(f"🚀 TRADE OPENED: {symbol} {decision} @ {price} | {signal_quality}")
 
         else:
             print(f"⛔ BLOCKED: {symbol} | {hold_reason}")
@@ -214,88 +252,3 @@ def webhook():
         conn.close()
 
     return jsonify({"status": "processed"}), 200
-
-
-# =========================
-# 📊 SNAPSHOT (UNCHANGED)
-# =========================
-@app.route("/system_snapshot", methods=["GET"])
-def system_snapshot():
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT
-            symbol,
-            COUNT(*) AS trades,
-            ROUND(AVG(pnl_percent), 3),
-            ROUND(SUM(pnl_percent), 3),
-            ROUND(AVG(CASE WHEN pnl_percent > 0 THEN 1 ELSE 0 END)::numeric, 3)
-        FROM bot_trades
-        WHERE status = 'CLOSED'
-        GROUP BY symbol
-        ORDER BY SUM(pnl_percent) DESC;
-    """)
-    master = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
-
-    cur.execute("""
-        SELECT symbol, direction, entry_price, stop_price, target_price, opened_at
-        FROM bot_trades
-        WHERE status = 'OPEN'
-        ORDER BY opened_at DESC;
-    """)
-    open_trades = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
-
-    cur.execute("""
-        SELECT symbol, pnl_percent, opened_at, closed_at
-        FROM bot_trades
-        WHERE status = 'CLOSED'
-        ORDER BY closed_at DESC
-        LIMIT 50;
-    """)
-    recent = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
-
-    cur.execute("SELECT MAX(created_at) FROM signal_history_v2")
-    last_signal = cur.fetchone()[0]
-
-    cur.execute("SELECT MAX(opened_at) FROM bot_trades")
-    last_trade = cur.fetchone()[0]
-
-    cur.execute("""
-        SELECT COUNT(*) FROM signal_history_v2
-        WHERE created_at > NOW() - INTERVAL '1 hour'
-    """)
-    signals_1h = cur.fetchone()[0]
-
-    cur.execute("""
-        SELECT COUNT(*) FROM bot_trades
-        WHERE opened_at > NOW() - INTERVAL '1 hour'
-    """)
-    trades_1h = cur.fetchone()[0]
-
-    alert = None
-    if signals_1h > 50 and trades_1h == 0:
-        alert = "⚠️ SIGNALS ACTIVE BUT NO TRADES → CHECK EXECUTION"
-
-    health = {
-        "last_signal_time": str(last_signal),
-        "last_trade_time": str(last_trade),
-        "signals_last_hour": signals_1h,
-        "trades_last_hour": trades_1h,
-        "alert": alert
-    }
-
-    cur.close()
-    conn.close()
-
-    return jsonify({
-        "health": health,
-        "master": master,
-        "open_trades": open_trades,
-        "recent_trades": recent
-    })
-
-
-@app.route("/", methods=["GET"])
-def home():
-    return "Bot is running 🚀"
