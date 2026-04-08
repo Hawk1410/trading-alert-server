@@ -12,7 +12,7 @@ def get_db():
 
 
 # =========================
-# 🚀 WEBHOOK (ENTRY + EXIT ENGINE v2.6)
+# 🚀 WEBHOOK (ENTRY + EXIT ENGINE v2.6 FIXED)
 # =========================
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -111,9 +111,10 @@ def webhook():
             hold_reason = "counter_trend"
 
         # =========================
-        # 🧠 SMART STACKING LOGIC (NEW)
+        # 🧠 STACKING LOGIC (FIXED)
         # =========================
         if hold_reason is None:
+
             cur.execute("""
                 SELECT entry_price, opened_at
                 FROM bot_trades
@@ -124,11 +125,15 @@ def webhook():
 
             open_count = len(existing_trades)
 
-            # Max cap
-            if open_count >= 2:
+            # ✅ ALWAYS allow FIRST trade (CRITICAL FIX)
+            if open_count == 0:
+                pass  # no restriction
+
+            # 🚫 Max cap
+            elif open_count >= 2:
                 hold_reason = "trade_exists"
 
-            # Smart second entry
+            # 🧠 Smart second entry ONLY
             elif open_count == 1:
                 first_entry, first_time = existing_trades[0]
 
