@@ -1,190 +1,5 @@
-from flask import Flask, request, jsonify
-import os
-import psycopg2
-from datetime import datetime, timedelta
-
-app = Flask(__name__)
-
-DATABASE_URL = os.environ.get("DATABASE_URL")
-
-def get_db():
-    return psycopg2.connect(DATABASE_URL)
-
-
 # =========================
-# 🏠 HEALTH ROUTES
-# =========================
-@app.route("/", methods=["GET"])
-def home():
-    return "Bot is running 🚀", 200
-
-@app.route("/ping", methods=["GET"])
-def ping():
-    return "pong", 200
-
-
-# =========================
-# 📊 LIGHT SNAPSHOT (SAFE)
-# =========================
-@app.route("/system_snapshot", methods=["GET"])
-def system_snapshot():
-    try:
-        conn = get_db()
-        cur = conn.cursor()
-
-        cur.execute("SELECT COUNT(*) FROM bot_trades WHERE status = 'OPEN'")
-        open_trades = cur.fetchone()[0]
-
-        cur.execute("""
-            SELECT COUNT(*) FROM signal_history_v2
-            WHERE created_at > NOW() - INTERVAL '1 hour'
-        """)
-        signals_1h = cur.fetchone()[0]
-
-        cur.execute("""
-            SELECT COUNT(*) FROM bot_trades
-            WHERE opened_at > NOW() - INTERVAL '1 hour'
-        """)
-        trades_1h = cur.fetchone()[0]
-
-        cur.close()
-        conn.close()
-
-        return jsonify({
-            "status": "ok",
-            "open_trades": open_trades,
-            "signals_last_hour": signals_1h,
-            "trades_last_hour": trades_1h
-        }), 200
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-# =========================
-# 🧠 FULL SNAPSHOT (GOD MODE)
-# =========================
-@app.route("/system_snapshot_full", methods=["GET"])
-def system_snapshot_full():
-    conn = get_db()
-    cur = conn.cursor()
-
-    try:
-        cur.execute("SELECT MAX(created_at) FROM signal_history_v2")
-        last_signal = cur.fetchone()[0]
-
-        cur.execute("SELECT MAX(opened_at) FROM bot_trades")
-        last_trade = cur.fetchone()[0]
-
-        cur.execute("""
-            SELECT COUNT(*) FROM signal_history_v2
-            WHERE created_at > NOW() - INTERVAL '1 hour'
-        """)
-        signals_1h = cur.fetchone()[0]
-
-        cur.execute("""
-            SELECT COUNT(*) FROM bot_trades
-            WHERE opened_at > NOW() - INTERVAL '1 hour'
-        """)
-        trades_1h = cur.fetchone()[0]
-
-        cur.execute("""
-            SELECT
-                symbol,
-                COUNT(*) AS trades,
-                ROUND(AVG(pnl_percent), 3) AS avg_pnl,
-                ROUND(SUM(pnl_percent), 3) AS total_pnl,
-                ROUND(AVG(CASE WHEN pnl_percent > 0 THEN 1 ELSE 0 END)::numeric, 3) AS winrate
-            FROM bot_trades
-            WHERE status = 'CLOSED'
-            GROUP BY symbol
-            ORDER BY total_pnl DESC
-        """)
-        master = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
-
-        cur.execute("""
-            SELECT
-                sh.signal_quality,
-                COUNT(*) AS trades,
-                ROUND(AVG(bt.pnl_percent), 3) AS avg_pnl,
-                ROUND(SUM(bt.pnl_percent), 3) AS total_pnl,
-                ROUND(AVG(CASE WHEN bt.pnl_percent > 0 THEN 1 ELSE 0 END)::numeric, 3) AS winrate
-            FROM bot_trades bt
-            JOIN signal_history_v2 sh
-              ON bt.symbol = sh.symbol
-             AND ABS(EXTRACT(EPOCH FROM (bt.opened_at - sh.created_at))) < 60
-            WHERE bt.status = 'CLOSED'
-            GROUP BY sh.signal_quality
-            ORDER BY total_pnl DESC
-        """)
-        tier_performance = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
-
-        cur.execute("""
-            SELECT
-                ROUND(sh.momentum_strength::numeric, 2) AS momentum,
-                COUNT(*) AS trades,
-                ROUND(AVG(bt.pnl_percent), 3) AS avg_pnl
-            FROM bot_trades bt
-            JOIN signal_history_v2 sh
-              ON bt.symbol = sh.symbol
-             AND ABS(EXTRACT(EPOCH FROM (bt.opened_at - sh.created_at))) < 60
-            WHERE bt.status = 'CLOSED'
-            GROUP BY momentum
-            ORDER BY trades DESC
-            LIMIT 20
-        """)
-        momentum = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
-
-        cur.execute("""
-            SELECT hold_reason, COUNT(*) as count
-            FROM signal_history_v2
-            WHERE created_at > NOW() - INTERVAL '6 hours'
-            AND hold_reason IS NOT NULL
-            GROUP BY hold_reason
-            ORDER BY count DESC
-        """)
-        holds = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
-
-        cur.execute("""
-            SELECT symbol, pnl_percent, opened_at, closed_at
-            FROM bot_trades
-            WHERE status = 'CLOSED'
-            ORDER BY closed_at DESC
-            LIMIT 20
-        """)
-        recent_trades = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
-
-        cur.execute("""
-            SELECT symbol, direction, entry_price, stop_price, target_price, opened_at
-            FROM bot_trades
-            WHERE status = 'OPEN'
-        """)
-        open_trades = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
-
-        cur.close()
-        conn.close()
-
-        return jsonify({
-            "health": {
-                "last_signal_time": str(last_signal),
-                "last_trade_time": str(last_trade),
-                "signals_last_hour": signals_1h,
-                "trades_last_hour": trades_1h
-            },
-            "master": master,
-            "tier_performance": tier_performance,
-            "momentum_performance": momentum,
-            "hold_reasons": holds,
-            "open_trades": open_trades,
-            "recent_trades": recent_trades
-        })
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-# =========================
-# 🚀 WEBHOOK (UPDATED v2.7)
+# 🚀 WEBHOOK (UPDATED v2.7.1)
 # =========================
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -205,6 +20,7 @@ def webhook():
     now = datetime.utcnow()
 
     try:
+        # TAGGING
         abs_mom = abs(momentum) if momentum else 0
         abs_trend = abs(trend) if trend else 0
 
@@ -255,7 +71,9 @@ def webhook():
                     WHERE id = %s
                 """, (pnl, trade_id))
 
+        # =========================
         # ENTRY FILTER
+        # =========================
         hold_reason = None
 
         if decision not in ["LONG", "SHORT"]:
@@ -264,10 +82,17 @@ def webhook():
         elif alignment != "aligned":
             hold_reason = "counter_trend"
 
-        # ✅ NEW FILTER (MOST IMPORTANT)
+        # ✅ TREND FILTER (already added)
         elif abs_trend < 0.12:
             hold_reason = "weak_trend"
 
+        # ✅ NEW: MOMENTUM FILTER
+        elif abs_mom < 0.2:
+            hold_reason = "weak_momentum"
+
+        # =========================
+        # STACKING LOGIC
+        # =========================
         if hold_reason is None:
             cur.execute("""
                 SELECT entry_price, opened_at
@@ -281,8 +106,10 @@ def webhook():
                 hold_reason = "trade_exists"
             elif len(existing) == 1:
                 first_entry, first_time = existing[0]
+
                 if now - first_time < timedelta(minutes=20):
                     hold_reason = "too_soon"
+
                 elif (decision == "LONG" and price >= first_entry) or \
                      (decision == "SHORT" and price <= first_entry):
                     hold_reason = "no_better_price"
