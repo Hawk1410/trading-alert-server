@@ -70,7 +70,6 @@ def system_snapshot_full():
     cur = conn.cursor()
 
     try:
-        # HEALTH
         cur.execute("SELECT MAX(created_at) FROM signal_history_v2")
         last_signal = cur.fetchone()[0]
 
@@ -89,7 +88,6 @@ def system_snapshot_full():
         """)
         trades_1h = cur.fetchone()[0]
 
-        # MASTER PERFORMANCE
         cur.execute("""
             SELECT
                 symbol,
@@ -104,7 +102,6 @@ def system_snapshot_full():
         """)
         master = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
 
-        # TIER PERFORMANCE
         cur.execute("""
             SELECT
                 sh.signal_quality,
@@ -122,7 +119,6 @@ def system_snapshot_full():
         """)
         tier_performance = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
 
-        # MOMENTUM PERFORMANCE
         cur.execute("""
             SELECT
                 ROUND(sh.momentum_strength::numeric, 2) AS momentum,
@@ -139,7 +135,6 @@ def system_snapshot_full():
         """)
         momentum = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
 
-        # HOLD REASONS
         cur.execute("""
             SELECT hold_reason, COUNT(*) as count
             FROM signal_history_v2
@@ -150,7 +145,6 @@ def system_snapshot_full():
         """)
         holds = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
 
-        # RECENT TRADES
         cur.execute("""
             SELECT symbol, pnl_percent, opened_at, closed_at
             FROM bot_trades
@@ -160,7 +154,6 @@ def system_snapshot_full():
         """)
         recent_trades = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
 
-        # OPEN TRADES
         cur.execute("""
             SELECT symbol, direction, entry_price, stop_price, target_price, opened_at
             FROM bot_trades
@@ -191,7 +184,7 @@ def system_snapshot_full():
 
 
 # =========================
-# 🚀 WEBHOOK (UNCHANGED LOGIC)
+# 🚀 WEBHOOK (UPDATED v2.7)
 # =========================
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -212,7 +205,6 @@ def webhook():
     now = datetime.utcnow()
 
     try:
-        # TAGGING
         abs_mom = abs(momentum) if momentum else 0
         abs_trend = abs(trend) if trend else 0
 
@@ -227,7 +219,7 @@ def webhook():
 
         signal_quality = "A+" if score >= 5 else "B" if score >= 3 else "C"
 
-        # EXIT ENGINE
+        # EXIT ENGINE (unchanged)
         cur.execute("""
             SELECT id, symbol, direction, entry_price,
                    stop_price, target_price, opened_at
@@ -243,20 +235,16 @@ def webhook():
             pnl = ((price - entry) / entry * 100) if direction == "LONG" else ((entry - price) / entry * 100)
 
             close = False
-            reason = None
 
             if (direction == "LONG" and (price >= target or price <= stop)) or \
                (direction == "SHORT" and (price <= target or price >= stop)):
                 close = True
-                reason = "tp_hit" if (price >= target or price <= target) else "sl_hit"
 
             if not close and duration > 21600 and pnl < 0.2:
                 close = True
-                reason = "timeout_weak"
 
             if not close and duration > 43200:
                 close = True
-                reason = "max_duration"
 
             if close:
                 cur.execute("""
@@ -272,8 +260,13 @@ def webhook():
 
         if decision not in ["LONG", "SHORT"]:
             hold_reason = "no_decision"
+
         elif alignment != "aligned":
             hold_reason = "counter_trend"
+
+        # ✅ NEW FILTER (MOST IMPORTANT)
+        elif abs_trend < 0.12:
+            hold_reason = "weak_trend"
 
         if hold_reason is None:
             cur.execute("""
