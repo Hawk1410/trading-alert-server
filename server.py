@@ -8,6 +8,13 @@ app = Flask(__name__)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
+# =========================
+# ⚙️ LIVE CONFIG
+# =========================
+MAX_OPEN_TRADES = 7
+CAPITAL_PER_TRADE = 60  # £60 per trade
+
+
 def get_db():
     return psycopg2.connect(DATABASE_URL)
 
@@ -63,7 +70,7 @@ def system_snapshot():
 
 
 # =========================
-# 🧠 FULL SNAPSHOT (FIXED)
+# 🧠 FULL SNAPSHOT
 # =========================
 @app.route("/system_snapshot_full", methods=["GET"])
 def system_snapshot_full():
@@ -115,7 +122,7 @@ def system_snapshot_full():
 
 
 # =========================
-# 🚀 WEBHOOK (SMART EXIT VERSION)
+# 🚀 WEBHOOK (LIVE CONFIG)
 # =========================
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -167,6 +174,18 @@ def webhook():
 
         elif abs_mom > 2.5:
             hold_reason = "extreme_momentum"
+
+        # =========================
+        # 🔒 GLOBAL TRADE LIMIT
+        # =========================
+        if hold_reason is None:
+            cur.execute("""
+                SELECT COUNT(*) FROM bot_trades WHERE status = 'OPEN'
+            """)
+            open_count = cur.fetchone()[0]
+
+            if open_count >= MAX_OPEN_TRADES:
+                hold_reason = "max_open_trades_reached"
 
         # =========================
         # 🔁 EXISTING TRADE LOGIC
@@ -244,7 +263,6 @@ def webhook():
 
         for trade_id, sym, direction, entry_price, opened_at in open_trades:
 
-            # use current price if same symbol, else skip (no price feed yet)
             if sym != symbol:
                 continue
 
@@ -258,19 +276,15 @@ def webhook():
 
             close_reason = None
 
-            # ✅ HARD CUT (60 MIN)
             if time_open > 60:
                 close_reason = "time_cut"
 
-            # ✅ TAKE PROFIT EARLY
             elif pnl > 0.005:
                 close_reason = "quick_profit"
 
-            # ✅ MOMENTUM WEAKENING
             elif pnl > 0 and abs_mom < 0.1:
                 close_reason = "momentum_drop"
 
-            # ✅ TREND FLIP
             elif pnl > 0 and alignment != "aligned":
                 close_reason = "trend_flip"
 
