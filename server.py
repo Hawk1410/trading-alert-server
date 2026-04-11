@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify
 import os
 import psycopg2
 from datetime import datetime, timedelta
+import json
 
 app = Flask(__name__)
 
@@ -123,13 +124,29 @@ def system_snapshot_full():
 # =========================
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    data = request.json
 
+    # 🔥 FIX: handle TradingView (text/plain) AND JSON
+    data = request.get_json(silent=True)
+
+    if data is None:
+        try:
+            data = json.loads(request.data.decode("utf-8"))
+        except Exception:
+            return jsonify({"error": "Invalid JSON"}), 400
+
+    # =========================
+    # 🧠 SAFE PARSING
+    # =========================
     symbol = data.get("symbol")
     decision = data.get("decision_model")
-    price = data.get("price")
-    momentum = data.get("momentum_strength")
-    trend = data.get("trend_strength")
+
+    try:
+        price = float(data.get("price", 0))
+        momentum = float(data.get("momentum_strength", 0))
+        trend = float(data.get("trend_strength", 0))
+    except:
+        return jsonify({"error": "Bad numeric values"}), 400
+
     alignment = data.get("trend_alignment")
     data_version = data.get("data_version")
 
@@ -138,8 +155,8 @@ def webhook():
     now = datetime.utcnow()
 
     try:
-        abs_mom = abs(momentum) if momentum else 0
-        abs_trend = abs(trend) if trend else 0
+        abs_mom = abs(momentum)
+        abs_trend = abs(trend)
 
         # =========================
         # 🧠 SIGNAL SCORING
@@ -155,7 +172,7 @@ def webhook():
         hold_reason = None
 
         # =========================
-        # 🔥 EDGE FILTER (ALIGNED WITH PINE)
+        # 🔥 EDGE FILTER (ALIGNED)
         # =========================
         if decision not in ["LONG", "SHORT"]:
             hold_reason = "no_decision"
@@ -163,14 +180,12 @@ def webhook():
         elif alignment != "aligned":
             hold_reason = "counter_trend"
 
-        # ✅ MATCHES PINE (FIXED)
         elif abs_trend < 0.20:
             hold_reason = "not_strong_trend"
 
         elif abs_mom < 0.20:
             hold_reason = "momentum_too_weak"
 
-        # ✅ KEY FIX — A+ BYPASSES MOMENTUM CAP
         elif abs_mom > 0.50 and signal_quality != "A+":
             hold_reason = "momentum_too_strong"
 
