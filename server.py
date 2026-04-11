@@ -63,14 +63,65 @@ def system_snapshot():
 
 
 # =========================
-# 🚀 WEBHOOK (FINAL FIXED)
+# 🧠 FULL SNAPSHOT (RESTORED)
+# =========================
+@app.route("/system_snapshot_full", methods=["GET"])
+def system_snapshot_full():
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+
+        cur.execute("SELECT MAX(created_at) FROM signal_history_v2")
+        last_signal = cur.fetchone()[0]
+
+        cur.execute("SELECT MAX(opened_at) FROM bot_trades")
+        last_trade = cur.fetchone()[0]
+
+        cur.execute("""
+            SELECT COUNT(*) FROM signal_history_v2
+            WHERE created_at > NOW() - INTERVAL '1 hour'
+        """)
+        signals_1h = cur.fetchone()[0]
+
+        cur.execute("""
+            SELECT COUNT(*) FROM bot_trades
+            WHERE opened_at > NOW() - INTERVAL '1 hour'
+        """)
+        trades_1h = cur.fetchone()[0]
+
+        cur.execute("""
+            SELECT signal_quality, COUNT(*)
+            FROM signal_history_v2
+            GROUP BY signal_quality
+        """)
+        quality = dict(cur.fetchall())
+
+        cur.close()
+        conn.close()
+
+        return jsonify({
+            "health": {
+                "last_signal": str(last_signal),
+                "last_trade": str(last_trade),
+                "signals_1h": signals_1h,
+                "trades_1h": trades_1h
+            },
+            "signal_quality_distribution": quality
+        }), 200
+
+    except Exception as e:
+        print("❌ SNAPSHOT FULL ERROR:", e)
+        return jsonify({"error": str(e)}), 500
+
+
+# =========================
+# 🚀 WEBHOOK (TUNED V3)
 # =========================
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
         data = request.get_json(force=True)
 
-        # ✅ SAFE PARSING
         symbol = data.get("symbol")
         decision = data.get("decision_model")
         price = float(data.get("price", 0))
@@ -100,7 +151,7 @@ def webhook():
         hold_reason = None
 
         # =========================
-        # 🔥 EDGE FILTER (MATCHES PINE)
+        # 🔥 EDGE FILTER (TUNED)
         # =========================
         if decision not in ["LONG", "SHORT"]:
             hold_reason = "no_decision"
@@ -108,13 +159,12 @@ def webhook():
         elif alignment != "aligned":
             hold_reason = "counter_trend"
 
-        elif abs_trend < 0.20:
+        elif abs_trend < 0.15:
             hold_reason = "not_strong_trend"
 
-        elif abs_mom < 0.20:
+        elif abs_mom < 0.15:
             hold_reason = "momentum_too_weak"
 
-        # ✅ VERY IMPORTANT — allow big momentum now
         elif abs_mom > 2.5:
             hold_reason = "extreme_momentum"
 
