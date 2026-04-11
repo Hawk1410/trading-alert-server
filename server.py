@@ -63,7 +63,7 @@ def system_snapshot():
 
 
 # =========================
-# 🧠 FULL SNAPSHOT (RESTORED)
+# 🧠 FULL SNAPSHOT (FIXED)
 # =========================
 @app.route("/system_snapshot_full", methods=["GET"])
 def system_snapshot_full():
@@ -94,15 +94,15 @@ def system_snapshot_full():
             FROM signal_history_v2
             GROUP BY signal_quality
         """)
-        quality = dict(cur.fetchall())
+        quality = {k: v for k, v in cur.fetchall() if k is not None}
 
         cur.close()
         conn.close()
 
         return jsonify({
             "health": {
-                "last_signal": str(last_signal),
-                "last_trade": str(last_trade),
+                "last_signal": str(last_signal) if last_signal else None,
+                "last_trade": str(last_trade) if last_trade else None,
                 "signals_1h": signals_1h,
                 "trades_1h": trades_1h
             },
@@ -115,7 +115,7 @@ def system_snapshot_full():
 
 
 # =========================
-# 🚀 WEBHOOK (TUNED V3)
+# 🚀 WEBHOOK (SMART EXIT VERSION)
 # =========================
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -151,7 +151,7 @@ def webhook():
         hold_reason = None
 
         # =========================
-        # 🔥 EDGE FILTER (TUNED)
+        # 🔥 ENTRY FILTER
         # =========================
         if decision not in ["LONG", "SHORT"]:
             hold_reason = "no_decision"
@@ -209,7 +209,7 @@ def webhook():
         ))
 
         # =========================
-        # 🚀 EXECUTE TRADE
+        # 🚀 OPEN TRADE
         # =========================
         if hold_reason is None:
             stop_price = price * (0.996 if decision == "LONG" else 1.004)
@@ -232,8 +232,61 @@ def webhook():
         else:
             print(f"⛔ BLOCKED: {symbol} | {hold_reason}")
 
-        conn.commit()
+        # =========================
+        # 🧠 SMART EXIT ENGINE
+        # =========================
+        cur.execute("""
+            SELECT id, symbol, direction, entry_price, opened_at
+            FROM bot_trades
+            WHERE status = 'OPEN'
+        """)
+        open_trades = cur.fetchall()
 
+        for trade_id, sym, direction, entry_price, opened_at in open_trades:
+
+            # use current price if same symbol, else skip (no price feed yet)
+            if sym != symbol:
+                continue
+
+            pnl = (
+                (price - entry_price) / entry_price
+                if direction == "LONG"
+                else (entry_price - price) / entry_price
+            )
+
+            time_open = (now - opened_at).total_seconds() / 60
+
+            close_reason = None
+
+            # ✅ HARD CUT (60 MIN)
+            if time_open > 60:
+                close_reason = "time_cut"
+
+            # ✅ TAKE PROFIT EARLY
+            elif pnl > 0.005:
+                close_reason = "quick_profit"
+
+            # ✅ MOMENTUM WEAKENING
+            elif pnl > 0 and abs_mom < 0.1:
+                close_reason = "momentum_drop"
+
+            # ✅ TREND FLIP
+            elif pnl > 0 and alignment != "aligned":
+                close_reason = "trend_flip"
+
+            if close_reason:
+                cur.execute("""
+                    UPDATE bot_trades
+                    SET status = 'CLOSED',
+                        closed_at = NOW(),
+                        pnl_percent = %s,
+                        close_reason = %s
+                    WHERE id = %s
+                """, (pnl * 100, close_reason, trade_id))
+
+                print(f"💰 CLOSED: {sym} | {close_reason} | {round(pnl*100, 3)}%")
+
+        conn.commit()
         cur.close()
         conn.close()
 
