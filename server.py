@@ -154,7 +154,7 @@ def system_snapshot_full():
 
 
 # =========================
-# 🚀 WEBHOOK (V2.9 EDGE ONLY)
+# 🚀 WEBHOOK (V3 EDGE ENGINE)
 # =========================
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -170,22 +170,25 @@ def webhook():
 
     conn = get_db()
     cur = conn.cursor()
+    now = datetime.utcnow()
 
     try:
         abs_mom = abs(momentum) if momentum else 0
         abs_trend = abs(trend) if trend else 0
 
+        # keep score for analysis (optional)
         score = (
             (2 if abs_mom > 0.45 else 1 if abs_mom > 0.2 else 0) +
             (2 if abs_trend > 0.25 else 1 if abs_trend > 0.12 else 0) +
             (1 if alignment == "aligned" else 0)
         )
-
         signal_quality = "A+" if score >= 5 else "B" if score >= 3 else "C"
 
         hold_reason = None
 
-        # 🔥 EDGE FILTER
+        # =========================
+        # 🔥 EDGE FILTER (CORE LOGIC)
+        # =========================
         if decision not in ["LONG", "SHORT"]:
             hold_reason = "no_decision"
 
@@ -195,10 +198,40 @@ def webhook():
         elif abs_trend < 0.25:
             hold_reason = "not_strong_trend"
 
-        elif signal_quality != "A+":
-            hold_reason = "not_A_plus"
+        elif abs_mom < 0.2:
+            hold_reason = "momentum_too_weak"
 
-        # SAVE SIGNAL
+        elif abs_mom > 0.4:
+            hold_reason = "momentum_too_strong"
+
+        # =========================
+        # 🔁 EXISTING TRADE LOGIC (KEEP SAFE)
+        # =========================
+        if hold_reason is None:
+            cur.execute("""
+                SELECT entry_price, opened_at
+                FROM bot_trades
+                WHERE symbol = %s AND status = 'OPEN'
+                ORDER BY opened_at ASC
+            """, (symbol,))
+            existing = cur.fetchall()
+
+            if len(existing) >= 2:
+                hold_reason = "trade_exists"
+
+            elif len(existing) == 1:
+                first_entry, first_time = existing[0]
+
+                if now - first_time < timedelta(minutes=20):
+                    hold_reason = "too_soon"
+
+                elif (decision == "LONG" and price >= first_entry) or \
+                     (decision == "SHORT" and price <= first_entry):
+                    hold_reason = "no_better_price"
+
+        # =========================
+        # 💾 SAVE SIGNAL
+        # =========================
         cur.execute("""
             INSERT INTO signal_history_v2 (
                 symbol, decision_model, momentum_strength, trend_strength,
@@ -211,7 +244,9 @@ def webhook():
             alignment, price, data_version, hold_reason, signal_quality
         ))
 
-        # EXECUTE TRADE
+        # =========================
+        # 🚀 EXECUTE TRADE
+        # =========================
         if hold_reason is None:
             stop_price = price * (0.996 if decision == "LONG" else 1.004)
             target_price = price * (1.008 if decision == "LONG" else 0.992)
@@ -227,6 +262,11 @@ def webhook():
                 symbol, decision, price,
                 stop_price, target_price, data_version
             ))
+
+            print(f"🚀 TRADE OPENED: {symbol} | EDGE MATCH")
+
+        else:
+            print(f"⛔ BLOCKED: {symbol} | {hold_reason}")
 
         conn.commit()
 
