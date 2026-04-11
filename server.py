@@ -14,6 +14,11 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 MAX_OPEN_TRADES = 7
 CAPITAL_PER_TRADE = 60  # £60 per trade
 
+# 🧠 COOLDOWN CONFIG
+ENABLE_COOLDOWN = True
+COOLDOWN_MINUTES = 20
+LOSS_STREAK_LIMIT = 2
+
 
 def get_db():
     return psycopg2.connect(DATABASE_URL)
@@ -145,6 +150,38 @@ def webhook():
         abs_trend = abs(trend)
 
         # =========================
+        # 🧠 COOLDOWN CHECK (NEW)
+        # =========================
+        if ENABLE_COOLDOWN:
+            cur.execute("""
+                SELECT pnl_percent, closed_at
+                FROM bot_trades
+                WHERE status = 'CLOSED'
+                ORDER BY closed_at DESC
+                LIMIT %s
+            """, (LOSS_STREAK_LIMIT,))
+            recent = cur.fetchall()
+
+            if len(recent) == LOSS_STREAK_LIMIT:
+                losses = all(r[0] < 0 for r in recent if r[0] is not None)
+
+                if losses:
+                    last_closed_time = recent[0][1]
+                    minutes_since = (now - last_closed_time).total_seconds() / 60
+
+                    if minutes_since < COOLDOWN_MINUTES:
+                        print(f"⛔ COOLDOWN ACTIVE ({LOSS_STREAK_LIMIT} losses, {round(minutes_since,1)} mins elapsed)")
+                        hold_reason = "cooldown_active"
+                    else:
+                        hold_reason = None
+                else:
+                    hold_reason = None
+            else:
+                hold_reason = None
+        else:
+            hold_reason = None
+
+        # =========================
         # 🧠 SIGNAL SCORING
         # =========================
         score = (
@@ -155,25 +192,25 @@ def webhook():
 
         signal_quality = "A+" if score >= 5 else "B" if score >= 3 else "C"
 
-        hold_reason = None
-
         # =========================
         # 🔥 ENTRY FILTER
         # =========================
-        if decision not in ["LONG", "SHORT"]:
-            hold_reason = "no_decision"
+        if hold_reason is None:
 
-        elif alignment != "aligned":
-            hold_reason = "counter_trend"
+            if decision not in ["LONG", "SHORT"]:
+                hold_reason = "no_decision"
 
-        elif abs_trend < 0.15:
-            hold_reason = "not_strong_trend"
+            elif alignment != "aligned":
+                hold_reason = "counter_trend"
 
-        elif abs_mom < 0.15:
-            hold_reason = "momentum_too_weak"
+            elif abs_trend < 0.15:
+                hold_reason = "not_strong_trend"
 
-        elif abs_mom > 2.5:
-            hold_reason = "extreme_momentum"
+            elif abs_mom < 0.15:
+                hold_reason = "momentum_too_weak"
+
+            elif abs_mom > 2.5:
+                hold_reason = "extreme_momentum"
 
         # =========================
         # 🔒 GLOBAL TRADE LIMIT
