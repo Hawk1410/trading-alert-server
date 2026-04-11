@@ -1,152 +1,25 @@
-from flask import Flask, request, jsonify
-import os
-import psycopg2
-from datetime import datetime, timedelta
 import json
 
-app = Flask(__name__)
-
-DATABASE_URL = os.environ.get("DATABASE_URL")
-
-def get_db():
-    return psycopg2.connect(DATABASE_URL)
-
-
-# =========================
-# 🏠 HEALTH ROUTES
-# =========================
-@app.route("/", methods=["GET"])
-def home():
-    return "Bot is running 🚀", 200
-
-@app.route("/ping", methods=["GET"])
-def ping():
-    return "pong", 200
-
-
-# =========================
-# 📊 LIGHT SNAPSHOT
-# =========================
-@app.route("/system_snapshot", methods=["GET"])
-def system_snapshot():
-    try:
-        conn = get_db()
-        cur = conn.cursor()
-
-        cur.execute("SELECT COUNT(*) FROM bot_trades WHERE status = 'OPEN'")
-        open_trades = cur.fetchone()[0]
-
-        cur.execute("""
-            SELECT COUNT(*) FROM signal_history_v2
-            WHERE created_at > NOW() - INTERVAL '1 hour'
-        """)
-        signals_1h = cur.fetchone()[0]
-
-        cur.execute("""
-            SELECT COUNT(*) FROM bot_trades
-            WHERE opened_at > NOW() - INTERVAL '1 hour'
-        """)
-        trades_1h = cur.fetchone()[0]
-
-        cur.close()
-        conn.close()
-
-        return jsonify({
-            "status": "ok",
-            "open_trades": open_trades,
-            "signals_last_hour": signals_1h,
-            "trades_last_hour": trades_1h
-        }), 200
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-# =========================
-# 🧠 FULL SNAPSHOT
-# =========================
-@app.route("/system_snapshot_full", methods=["GET"])
-def system_snapshot_full():
-    try:
-        conn = get_db()
-        cur = conn.cursor()
-
-        cur.execute("SELECT MAX(created_at) FROM signal_history_v2")
-        last_signal = cur.fetchone()[0]
-
-        cur.execute("SELECT MAX(opened_at) FROM bot_trades")
-        last_trade = cur.fetchone()[0]
-
-        cur.execute("""
-            SELECT COUNT(*) FROM signal_history_v2
-            WHERE created_at > NOW() - INTERVAL '1 hour'
-        """)
-        signals_1h = cur.fetchone()[0]
-
-        cur.execute("""
-            SELECT COUNT(*) FROM bot_trades
-            WHERE opened_at > NOW() - INTERVAL '1 hour'
-        """)
-        trades_1h = cur.fetchone()[0]
-
-        cur.execute("""
-            SELECT symbol,
-                   COUNT(*) trades,
-                   ROUND(AVG(pnl_percent),3) avg_pnl,
-                   ROUND(SUM(pnl_percent),3) total_pnl
-            FROM bot_trades
-            WHERE status = 'CLOSED'
-            GROUP BY symbol
-            ORDER BY total_pnl DESC
-        """)
-        master = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
-
-        cur.close()
-        conn.close()
-
-        return jsonify({
-            "health": {
-                "last_signal": str(last_signal),
-                "last_trade": str(last_trade),
-                "signals_1h": signals_1h,
-                "trades_1h": trades_1h
-            },
-            "master": master
-        }), 200
-
-    except Exception as e:
-        print("❌ SNAPSHOT ERROR:", e)
-        return jsonify({"error": str(e)}), 500
-
-
-# =========================
-# 🚀 WEBHOOK (V3 EDGE ENGINE - FIXED)
-# =========================
 @app.route("/webhook", methods=["POST"])
 def webhook():
+    try:
+        raw = request.data.decode("utf-8").strip()
 
-    # 🔥 FIX: handle TradingView (text/plain) AND JSON
-    data = request.get_json(silent=True)
+        if not raw:
+            raise ValueError("Empty payload")
 
-    if data is None:
-        try:
-            data = json.loads(request.data.decode("utf-8"))
-        except Exception:
-            return jsonify({"error": "Invalid JSON"}), 400
+        data = json.loads(raw)
 
-    # =========================
-    # 🧠 SAFE PARSING
-    # =========================
+    except Exception as e:
+        print("❌ JSON PARSE ERROR:", e)
+        print("RAW DATA:", request.data)
+        return jsonify({"error": "invalid payload"}), 400
+
     symbol = data.get("symbol")
     decision = data.get("decision_model")
-
-    try:
-        price = float(data.get("price", 0))
-        momentum = float(data.get("momentum_strength", 0))
-        trend = float(data.get("trend_strength", 0))
-    except:
-        return jsonify({"error": "Bad numeric values"}), 400
-
+    price = data.get("price")
+    momentum = data.get("momentum_strength")
+    trend = data.get("trend_strength")
     alignment = data.get("trend_alignment")
     data_version = data.get("data_version")
 
@@ -155,12 +28,9 @@ def webhook():
     now = datetime.utcnow()
 
     try:
-        abs_mom = abs(momentum)
-        abs_trend = abs(trend)
+        abs_mom = abs(momentum) if momentum else 0
+        abs_trend = abs(trend) if trend else 0
 
-        # =========================
-        # 🧠 SIGNAL SCORING
-        # =========================
         score = (
             (2 if abs_mom > 0.45 else 1 if abs_mom > 0.2 else 0) +
             (2 if abs_trend > 0.25 else 1 if abs_trend > 0.12 else 0) +
@@ -171,9 +41,6 @@ def webhook():
 
         hold_reason = None
 
-        # =========================
-        # 🔥 EDGE FILTER (ALIGNED)
-        # =========================
         if decision not in ["LONG", "SHORT"]:
             hold_reason = "no_decision"
 
@@ -189,9 +56,6 @@ def webhook():
         elif abs_mom > 0.50 and signal_quality != "A+":
             hold_reason = "momentum_too_strong"
 
-        # =========================
-        # 🔁 EXISTING TRADE LOGIC
-        # =========================
         if hold_reason is None:
             cur.execute("""
                 SELECT entry_price, opened_at
@@ -214,9 +78,6 @@ def webhook():
                      (decision == "SHORT" and price <= first_entry):
                     hold_reason = "no_better_price"
 
-        # =========================
-        # 💾 SAVE SIGNAL
-        # =========================
         cur.execute("""
             INSERT INTO signal_history_v2 (
                 symbol, decision_model, momentum_strength, trend_strength,
@@ -229,9 +90,6 @@ def webhook():
             alignment, price, data_version, hold_reason, signal_quality
         ))
 
-        # =========================
-        # 🚀 EXECUTE TRADE
-        # =========================
         if hold_reason is None:
             stop_price = price * (0.996 if decision == "LONG" else 1.004)
             target_price = price * (1.008 if decision == "LONG" else 0.992)
@@ -248,7 +106,7 @@ def webhook():
                 stop_price, target_price, data_version
             ))
 
-            print(f"🚀 TRADE OPENED: {symbol} | V3 EDGE")
+            print(f"🚀 TRADE OPENED: {symbol}")
 
         else:
             print(f"⛔ BLOCKED: {symbol} | {hold_reason}")
