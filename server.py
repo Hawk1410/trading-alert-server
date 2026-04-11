@@ -62,7 +62,7 @@ def system_snapshot():
 
 
 # =========================
-# 🧠 FULL SNAPSHOT (PRO MODE)
+# 🧠 FULL SNAPSHOT
 # =========================
 @app.route("/system_snapshot_full", methods=["GET"])
 def system_snapshot_full():
@@ -70,7 +70,6 @@ def system_snapshot_full():
         conn = get_db()
         cur = conn.cursor()
 
-        # HEALTH
         cur.execute("SELECT MAX(created_at) FROM signal_history_v2")
         last_signal = cur.fetchone()[0]
 
@@ -89,7 +88,6 @@ def system_snapshot_full():
         """)
         trades_1h = cur.fetchone()[0]
 
-        # MASTER PERFORMANCE
         cur.execute("""
             SELECT symbol,
                    COUNT(*) trades,
@@ -102,7 +100,6 @@ def system_snapshot_full():
         """)
         master = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
 
-        # TREND BUCKET PERFORMANCE (NEW 🔥)
         cur.execute("""
             SELECT
                 CASE
@@ -122,7 +119,6 @@ def system_snapshot_full():
         """)
         trend_buckets = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
 
-        # TIER PERFORMANCE
         cur.execute("""
             SELECT sh.signal_quality,
                    COUNT(*) trades,
@@ -158,7 +154,7 @@ def system_snapshot_full():
 
 
 # =========================
-# 🚀 WEBHOOK (UPDATED FILTERS)
+# 🚀 WEBHOOK (V2.9 EDGE ONLY)
 # =========================
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -174,7 +170,6 @@ def webhook():
 
     conn = get_db()
     cur = conn.cursor()
-    now = datetime.utcnow()
 
     try:
         abs_mom = abs(momentum) if momentum else 0
@@ -190,20 +185,18 @@ def webhook():
 
         hold_reason = None
 
-        # BASE FILTERS
+        # 🔥 EDGE FILTER
         if decision not in ["LONG", "SHORT"]:
             hold_reason = "no_decision"
+
         elif alignment != "aligned":
             hold_reason = "counter_trend"
-        elif abs_trend < 0.12:
-            hold_reason = "weak_trend"
 
-        # 🔥 HARD B FILTER
-        if hold_reason is None and signal_quality == "B":
-            if abs_trend < 0.25:
-                hold_reason = "blocked_B_weak_trend"
-            elif abs_mom < 0.45:
-                hold_reason = "blocked_B_weak_momentum"
+        elif abs_trend < 0.25:
+            hold_reason = "not_strong_trend"
+
+        elif signal_quality != "A+":
+            hold_reason = "not_A_plus"
 
         # SAVE SIGNAL
         cur.execute("""
