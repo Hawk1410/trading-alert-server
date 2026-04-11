@@ -100,39 +100,6 @@ def system_snapshot_full():
         """)
         master = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
 
-        cur.execute("""
-            SELECT
-                CASE
-                    WHEN ABS(sh.trend_strength) < 0.12 THEN 'weak'
-                    WHEN ABS(sh.trend_strength) < 0.25 THEN 'medium'
-                    ELSE 'strong'
-                END AS trend_bucket,
-                COUNT(*) trades,
-                ROUND(AVG(bt.pnl_percent),3) avg_pnl,
-                ROUND(SUM(bt.pnl_percent),3) total_pnl
-            FROM bot_trades bt
-            JOIN signal_history_v2 sh
-              ON bt.symbol = sh.symbol
-             AND ABS(EXTRACT(EPOCH FROM (bt.opened_at - sh.created_at))) < 60
-            WHERE bt.status = 'CLOSED'
-            GROUP BY trend_bucket
-        """)
-        trend_buckets = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
-
-        cur.execute("""
-            SELECT sh.signal_quality,
-                   COUNT(*) trades,
-                   ROUND(AVG(bt.pnl_percent),3) avg_pnl,
-                   ROUND(SUM(bt.pnl_percent),3) total_pnl
-            FROM bot_trades bt
-            JOIN signal_history_v2 sh
-              ON bt.symbol = sh.symbol
-             AND ABS(EXTRACT(EPOCH FROM (bt.opened_at - sh.created_at))) < 60
-            WHERE bt.status = 'CLOSED'
-            GROUP BY sh.signal_quality
-        """)
-        tiers = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
-
         cur.close()
         conn.close()
 
@@ -143,9 +110,7 @@ def system_snapshot_full():
                 "signals_1h": signals_1h,
                 "trades_1h": trades_1h
             },
-            "master": master,
-            "trend_buckets": trend_buckets,
-            "tiers": tiers
+            "master": master
         }), 200
 
     except Exception as e:
@@ -154,7 +119,7 @@ def system_snapshot_full():
 
 
 # =========================
-# 🚀 WEBHOOK (V3 EDGE ENGINE)
+# 🚀 WEBHOOK (V3 EDGE ENGINE - FIXED)
 # =========================
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -176,18 +141,21 @@ def webhook():
         abs_mom = abs(momentum) if momentum else 0
         abs_trend = abs(trend) if trend else 0
 
-        # keep score for analysis (optional)
+        # =========================
+        # 🧠 SIGNAL SCORING
+        # =========================
         score = (
             (2 if abs_mom > 0.45 else 1 if abs_mom > 0.2 else 0) +
             (2 if abs_trend > 0.25 else 1 if abs_trend > 0.12 else 0) +
             (1 if alignment == "aligned" else 0)
         )
+
         signal_quality = "A+" if score >= 5 else "B" if score >= 3 else "C"
 
         hold_reason = None
 
         # =========================
-        # 🔥 EDGE FILTER (CORE LOGIC)
+        # 🔥 EDGE FILTER (ALIGNED WITH PINE)
         # =========================
         if decision not in ["LONG", "SHORT"]:
             hold_reason = "no_decision"
@@ -195,17 +163,19 @@ def webhook():
         elif alignment != "aligned":
             hold_reason = "counter_trend"
 
-        elif abs_trend < 0.25:
+        # ✅ MATCHES PINE (FIXED)
+        elif abs_trend < 0.20:
             hold_reason = "not_strong_trend"
 
-        elif abs_mom < 0.2:
+        elif abs_mom < 0.20:
             hold_reason = "momentum_too_weak"
 
-        elif abs_mom > 0.4:
+        # ✅ KEY FIX — A+ BYPASSES MOMENTUM CAP
+        elif abs_mom > 0.50 and signal_quality != "A+":
             hold_reason = "momentum_too_strong"
 
         # =========================
-        # 🔁 EXISTING TRADE LOGIC (KEEP SAFE)
+        # 🔁 EXISTING TRADE LOGIC
         # =========================
         if hold_reason is None:
             cur.execute("""
@@ -263,7 +233,7 @@ def webhook():
                 stop_price, target_price, data_version
             ))
 
-            print(f"🚀 TRADE OPENED: {symbol} | EDGE MATCH")
+            print(f"🚀 TRADE OPENED: {symbol} | V3 EDGE")
 
         else:
             print(f"⛔ BLOCKED: {symbol} | {hold_reason}")
