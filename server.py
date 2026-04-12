@@ -1,15 +1,12 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.2
+# VERSION: v3.3
 # DEPLOYED: 2026-04-12
 # NOTES:
-# - Decision pipeline fix (NONE → None)
-# - Snapshot system preserved
-# - Regime filter added
-# - FULL exit engine restored + upgraded
-# - Trade limits + duplicate protection restored
-# - Debug logging added (entry / block / exit / no decision)
+# - Stacking toggle added (OFF by default)
+# - Exit engine v2 preserved
+# - Full system integrity maintained
 # =========================
 
 from flask import Flask, request, jsonify
@@ -32,6 +29,7 @@ COOLDOWN_MINUTES = 20
 LOSS_STREAK_LIMIT = 2
 
 ENABLE_REGIME_FILTER = True
+ENABLE_STACKING = False  # 🔥 NEW
 
 
 def get_db():
@@ -67,7 +65,7 @@ def webhook():
         data_version = data.get("data_version")
 
         # =========================
-        # 🔥 DECISION FIX + DEBUG
+        # 🔥 DECISION FIX
         # =========================
         if decision:
             decision = decision.upper().strip()
@@ -136,7 +134,7 @@ def webhook():
                 hold_reason = "max_open_trades"
 
         # =========================
-        # 🔁 DUPLICATE CONTROL
+        # 🔁 DUPLICATE / STACKING CONTROL
         # =========================
         if hold_reason is None:
             cur.execute("""
@@ -147,18 +145,25 @@ def webhook():
             """, (symbol,))
             existing = cur.fetchall()
 
-            if len(existing) >= 2:
-                hold_reason = "too_many_positions"
+            if ENABLE_STACKING:
+                # 🟡 OLD BEHAVIOUR (max 2)
+                if len(existing) >= 2:
+                    hold_reason = "too_many_positions"
 
-            elif len(existing) == 1:
-                first_price, first_time = existing[0]
+                elif len(existing) == 1:
+                    first_price, first_time = existing[0]
 
-                if now - first_time < timedelta(minutes=20):
-                    hold_reason = "too_soon"
+                    if now - first_time < timedelta(minutes=20):
+                        hold_reason = "too_soon"
 
-                elif (decision == "LONG" and price >= first_price) or \
-                     (decision == "SHORT" and price <= first_price):
-                    hold_reason = "no_better_price"
+                    elif (decision == "LONG" and price >= first_price) or \
+                         (decision == "SHORT" and price <= first_price):
+                        hold_reason = "no_better_price"
+
+            else:
+                # 🔴 STRICT MODE (1 trade only)
+                if len(existing) >= 1:
+                    hold_reason = "stacking_disabled"
 
         # =========================
         # 🧠 REGIME FILTER
@@ -206,7 +211,7 @@ def webhook():
             print(f"⛔ BLOCKED: {symbol} | {hold_reason}")
 
         # =========================
-        # 🧠 EXIT ENGINE (v2 🔥)
+        # 🧠 EXIT ENGINE (v2)
         # =========================
         cur.execute("""
             SELECT id, symbol, direction, entry_price, opened_at
