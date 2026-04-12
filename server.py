@@ -76,7 +76,7 @@ def system_snapshot():
 
 
 # =========================
-# 🧠 FULL SNAPSHOT (UPGRADED 🔥)
+# 🧠 FULL SNAPSHOT
 # =========================
 @app.route("/system_snapshot_full", methods=["GET"])
 def system_snapshot_full():
@@ -86,18 +86,12 @@ def system_snapshot_full():
 
         now = datetime.utcnow()
 
-        # =========================
-        # 🧠 BASIC HEALTH
-        # =========================
         cur.execute("SELECT MAX(created_at) FROM signal_history_v2")
         last_signal = cur.fetchone()[0]
 
         cur.execute("SELECT MAX(opened_at) FROM bot_trades")
         last_trade = cur.fetchone()[0]
 
-        # =========================
-        # 📊 ACTIVITY
-        # =========================
         cur.execute("""
             SELECT COUNT(*) FROM signal_history_v2
             WHERE created_at > NOW() - INTERVAL '1 hour'
@@ -110,17 +104,11 @@ def system_snapshot_full():
         """)
         trades_1h = cur.fetchone()[0]
 
-        # =========================
-        # 📈 OPEN EXPOSURE
-        # =========================
         cur.execute("SELECT COUNT(*) FROM bot_trades WHERE status = 'OPEN'")
         open_trades = cur.fetchone()[0]
 
         exposure = open_trades * CAPITAL_PER_TRADE
 
-        # =========================
-        # 📊 PERFORMANCE
-        # =========================
         cur.execute("""
             SELECT 
                 COUNT(*),
@@ -131,9 +119,6 @@ def system_snapshot_full():
         """)
         total_trades, avg_pnl, winrate = cur.fetchone()
 
-        # =========================
-        # 🔥 RECENT PERFORMANCE (1H)
-        # =========================
         cur.execute("""
             SELECT 
                 COUNT(*),
@@ -145,9 +130,6 @@ def system_snapshot_full():
         """)
         r_trades, r_avg_pnl, r_winrate = cur.fetchone()
 
-        # =========================
-        # 🧠 HOLD REASONS (CRITICAL)
-        # =========================
         cur.execute("""
             SELECT hold_reason, COUNT(*)
             FROM signal_history_v2
@@ -156,9 +138,6 @@ def system_snapshot_full():
         """)
         hold_reasons = {k if k else "executed": v for k, v in cur.fetchall()}
 
-        # =========================
-        # 🧠 SIGNAL QUALITY
-        # =========================
         cur.execute("""
             SELECT signal_quality, COUNT(*)
             FROM signal_history_v2
@@ -166,49 +145,7 @@ def system_snapshot_full():
         """)
         quality = {k: v for k, v in cur.fetchall() if k}
 
-        # =========================
-        # 🧠 REGIME PERFORMANCE
-        # =========================
-        cur.execute("""
-            WITH joined AS (
-                SELECT 
-                    t.pnl_percent,
-                    ABS(s.momentum_strength) AS mom,
-                    ABS(s.trend_strength) AS trend
-                FROM bot_trades t
-                JOIN signal_history_v2 s 
-                ON s.symbol = t.symbol
-                AND s.created_at <= t.opened_at
-                WHERE t.status = 'CLOSED'
-            ),
-            classified AS (
-                SELECT *,
-                    CASE 
-                        WHEN mom > 0.2 AND trend > 0.2 THEN 'NORMAL'
-                        ELSE 'BAD'
-                    END AS regime
-                FROM joined
-            )
-            SELECT 
-                regime,
-                COUNT(*),
-                ROUND(AVG(pnl_percent), 3),
-                ROUND(AVG(CASE WHEN pnl_percent > 0 THEN 1 ELSE 0 END), 3)
-            FROM classified
-            GROUP BY regime
-        """)
-        regime_perf = {
-            row[0]: {
-                "trades": row[1],
-                "avg_pnl": row[2],
-                "winrate": row[3]
-            }
-            for row in cur.fetchall()
-        }
-
-        # =========================
-        # 🧠 LOSS STREAK (LIVE)
-        # =========================
+        # LOSS STREAK
         cur.execute("""
             SELECT pnl_percent
             FROM bot_trades
@@ -229,9 +166,6 @@ def system_snapshot_full():
         if ENABLE_COOLDOWN and loss_streak >= LOSS_STREAK_LIMIT:
             cooldown_active = True
 
-        # =========================
-        # 📦 FINAL JSON
-        # =========================
         result = {
             "health": {
                 "last_signal": str(last_signal) if last_signal else None,
@@ -255,7 +189,6 @@ def system_snapshot_full():
                 "avg_pnl": r_avg_pnl,
                 "winrate": r_winrate
             },
-            "regime_performance": regime_perf,
             "signal_quality": quality,
             "hold_reasons_1h": hold_reasons,
             "risk_state": {
@@ -275,9 +208,125 @@ def system_snapshot_full():
 
 
 # =========================
-# 🚀 WEBHOOK (UNCHANGED)
+# 🚀 WEBHOOK (FIXED 🔥)
 # =========================
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    # (KEEP YOUR EXISTING WEBHOOK EXACTLY AS IS)
-    return jsonify({"status": "use previous version"}), 200
+    try:
+        data = request.get_json(force=True)
+
+        symbol = data.get("symbol")
+        decision = data.get("decision_model")
+        price = float(data.get("price", 0))
+        momentum = float(data.get("momentum_strength", 0))
+        trend = float(data.get("trend_strength", 0))
+        alignment = data.get("trend_alignment")
+        data_version = data.get("data_version")
+
+        # =========================
+        # 🔥 DECISION FIX
+        # =========================
+        if decision is not None:
+            decision = decision.upper().strip()
+
+        if decision in ["NONE", "", "NULL"]:
+            decision = None
+
+        if decision is None:
+            print(f"⚠️ NO DECISION: {symbol}")
+
+        conn = get_db()
+        cur = conn.cursor()
+        now = datetime.utcnow()
+
+        abs_mom = abs(momentum)
+        abs_trend = abs(trend)
+
+        hold_reason = None
+
+        # =========================
+        # 🧠 COOLDOWN
+        # =========================
+        if ENABLE_COOLDOWN:
+            cur.execute("""
+                SELECT pnl_percent, closed_at
+                FROM bot_trades
+                WHERE status = 'CLOSED'
+                ORDER BY closed_at DESC
+                LIMIT %s
+            """, (LOSS_STREAK_LIMIT,))
+            recent = cur.fetchall()
+
+            if len(recent) == LOSS_STREAK_LIMIT:
+                losses = all(r[0] < 0 for r in recent if r[0] is not None)
+
+                if losses:
+                    last_closed_time = recent[0][1]
+                    minutes_since = (now - last_closed_time).total_seconds() / 60
+
+                    if minutes_since < COOLDOWN_MINUTES:
+                        hold_reason = "cooldown_active"
+
+        # =========================
+        # ENTRY FILTER
+        # =========================
+        if hold_reason is None:
+
+            if decision not in ["LONG", "SHORT"]:
+                hold_reason = "no_decision"
+
+            elif alignment != "aligned":
+                hold_reason = "counter_trend"
+
+            elif abs_trend < 0.15:
+                hold_reason = "not_strong_trend"
+
+            elif abs_mom < 0.15:
+                hold_reason = "momentum_too_weak"
+
+            elif abs_mom > 2.5:
+                hold_reason = "extreme_momentum"
+
+        # =========================
+        # SAVE SIGNAL
+        # =========================
+        cur.execute("""
+            INSERT INTO signal_history_v2 (
+                symbol, decision_model, momentum_strength, trend_strength,
+                trend_alignment, price, data_version, hold_reason,
+                created_at
+            )
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+        """, (
+            symbol, decision, momentum, trend,
+            alignment, price, data_version, hold_reason
+        ))
+
+        # =========================
+        # OPEN TRADE
+        # =========================
+        if hold_reason is None:
+            cur.execute("""
+                INSERT INTO bot_trades (
+                    symbol, direction, entry_price,
+                    status, data_version, opened_at
+                )
+                VALUES (%s,%s,%s,'OPEN',%s,NOW())
+            """, (
+                symbol, decision, price, data_version
+            ))
+
+            print(f"🚀 TRADE OPENED: {symbol}")
+
+        else:
+            print(f"⛔ BLOCKED: {symbol} | {hold_reason}")
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return jsonify({"status": "processed"}), 200
+
+    except Exception as e:
+        print("❌ WEBHOOK ERROR:", e)
+        return jsonify({"error": str(e)}), 400
