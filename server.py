@@ -1,12 +1,14 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.3
-# DEPLOYED: 2026-04-12
+# VERSION: v3.4
+# DEPLOYED: 2026-04-13
 # NOTES:
-# - Stacking toggle added (OFF by default)
-# - Exit engine v2 preserved
-# - Full system integrity maintained
+# - Early trend capture enabled (lower trend threshold)
+# - Overextension momentum cap added
+# - Sweet spot regime toggle added
+# - Smart stacking override ready
+# - Fully toggle-controlled (safe testing)
 # =========================
 
 from flask import Flask, request, jsonify
@@ -29,7 +31,26 @@ COOLDOWN_MINUTES = 20
 LOSS_STREAK_LIMIT = 2
 
 ENABLE_REGIME_FILTER = True
-ENABLE_STACKING = False  # 🔥 NEW
+ENABLE_STACKING = False
+
+# 🆕 NEW TOGGLES
+ENABLE_EARLY_TREND = True
+ENABLE_MOMENTUM_CAP = True
+ENABLE_SWEET_SPOT = False
+ENABLE_SMART_STACKING = False
+
+# 🆕 THRESHOLDS
+MIN_TREND = 0.10   # ↓ from 0.15
+MIN_MOM = 0.15
+
+MOMENTUM_CAP = 0.8
+
+SWEET_MIN_MOM = 0.2
+SWEET_MAX_MOM = 0.6
+SWEET_MAX_TREND = 0.2
+
+STACK_STRONG_MOM = 0.35
+STACK_STRONG_TREND = 0.15
 
 
 def get_db():
@@ -49,7 +70,7 @@ def ping():
 
 
 # =========================
-# 🚀 WEBHOOK (FULL SYSTEM)
+# 🚀 WEBHOOK
 # =========================
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -64,9 +85,6 @@ def webhook():
         alignment = data.get("trend_alignment")
         data_version = data.get("data_version")
 
-        # =========================
-        # 🔥 DECISION FIX
-        # =========================
         if decision:
             decision = decision.upper().strip()
 
@@ -116,14 +134,23 @@ def webhook():
             elif alignment != "aligned":
                 hold_reason = "counter_trend"
 
-            elif abs_trend < 0.15:
+            elif abs_trend < MIN_TREND:
                 hold_reason = "not_strong_trend"
 
-            elif abs_mom < 0.15:
+            elif abs_mom < MIN_MOM:
                 hold_reason = "momentum_too_weak"
 
             elif abs_mom > 2.5:
                 hold_reason = "extreme_momentum"
+
+            # 🆕 Momentum cap (avoid chasing tops)
+            elif ENABLE_MOMENTUM_CAP and abs_mom > MOMENTUM_CAP:
+                hold_reason = "overextended"
+
+            # 🆕 Sweet spot filter (optional precision mode)
+            elif ENABLE_SWEET_SPOT:
+                if not (SWEET_MIN_MOM <= abs_mom <= SWEET_MAX_MOM and abs_trend <= SWEET_MAX_TREND):
+                    hold_reason = "outside_sweet_spot"
 
         # =========================
         # 🔒 GLOBAL LIMIT
@@ -134,7 +161,7 @@ def webhook():
                 hold_reason = "max_open_trades"
 
         # =========================
-        # 🔁 DUPLICATE / STACKING CONTROL
+        # 🔁 STACKING CONTROL
         # =========================
         if hold_reason is None:
             cur.execute("""
@@ -146,7 +173,7 @@ def webhook():
             existing = cur.fetchall()
 
             if ENABLE_STACKING:
-                # 🟡 OLD BEHAVIOUR (max 2)
+
                 if len(existing) >= 2:
                     hold_reason = "too_many_positions"
 
@@ -156,17 +183,29 @@ def webhook():
                     if now - first_time < timedelta(minutes=20):
                         hold_reason = "too_soon"
 
-                    elif (decision == "LONG" and price >= first_price) or \
-                         (decision == "SHORT" and price <= first_price):
-                        hold_reason = "no_better_price"
+                    else:
+                        worse_price = (
+                            (decision == "LONG" and price >= first_price) or
+                            (decision == "SHORT" and price <= first_price)
+                        )
+
+                        if worse_price:
+
+                            # 🆕 Smart stacking override
+                            if ENABLE_SMART_STACKING:
+                                if abs_mom >= STACK_STRONG_MOM and abs_trend >= STACK_STRONG_TREND:
+                                    pass  # allow
+                                else:
+                                    hold_reason = "no_better_price"
+                            else:
+                                hold_reason = "no_better_price"
 
             else:
-                # 🔴 STRICT MODE (1 trade only)
                 if len(existing) >= 1:
                     hold_reason = "stacking_disabled"
 
         # =========================
-        # 🧠 REGIME FILTER
+        # 🧠 REGIME FILTER (legacy)
         # =========================
         if hold_reason is None and ENABLE_REGIME_FILTER:
             if 0.2 < abs_mom < 0.45 and abs_trend > 0.25:
@@ -211,7 +250,7 @@ def webhook():
             print(f"⛔ BLOCKED: {symbol} | {hold_reason}")
 
         # =========================
-        # 🧠 EXIT ENGINE (v2)
+        # 🧠 EXIT ENGINE (UNCHANGED)
         # =========================
         cur.execute("""
             SELECT id, symbol, direction, entry_price, opened_at
