@@ -1,14 +1,12 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.4
-# DEPLOYED: 2026-04-13
+# VERSION: v3.5
+# DEPLOYED: 2026-04-14
 # NOTES:
-# - Early trend capture enabled (lower trend threshold)
-# - Overextension momentum cap added
-# - Sweet spot regime toggle added
-# - Smart stacking override ready
-# - Fully toggle-controlled (safe testing)
+# - Lower momentum threshold (capture subtle trends)
+# - Slightly lower trend threshold
+# - Everything else unchanged from v3.4
 # =========================
 
 from flask import Flask, request, jsonify
@@ -40,8 +38,8 @@ ENABLE_SWEET_SPOT = False
 ENABLE_SMART_STACKING = False
 
 # 🆕 THRESHOLDS
-MIN_TREND = 0.10   # ↓ from 0.15
-MIN_MOM = 0.15
+MIN_TREND = 0.07   # ↓ from 0.10
+MIN_MOM = 0.05     # ↓ from 0.15
 
 MOMENTUM_CAP = 0.8
 
