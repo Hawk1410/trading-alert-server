@@ -1,12 +1,13 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.6
+# VERSION: v3.7
 # DEPLOYED: 2026-04-15
 # NOTES:
 # - Enforced high-trend filter (MIN_TREND = 0.20)
 # - Disabled early trend capture (proven unprofitable)
-# - Everything else unchanged from v3.5
+# - Disabled regime_exit (was cutting winners too early)
+# - Everything else unchanged from v3.6
 # =========================
 
 from flask import Flask, request, jsonify
@@ -28,7 +29,7 @@ ENABLE_COOLDOWN = True
 COOLDOWN_MINUTES = 20
 LOSS_STREAK_LIMIT = 2
 
-ENABLE_REGIME_FILTER = True
+ENABLE_REGIME_FILTER = False  # ❌ DISABLED (was hurting performance)
 ENABLE_STACKING = False
 
 # 🆕 NEW TOGGLES
@@ -38,7 +39,7 @@ ENABLE_SWEET_SPOT = False
 ENABLE_SMART_STACKING = False
 
 # 🆕 THRESHOLDS
-MIN_TREND = 0.20   # ✅ KEY CHANGE (confirmed edge)
+MIN_TREND = 0.20   # ✅ KEY EDGE
 MIN_MOM = 0.05
 
 MOMENTUM_CAP = 0.8
@@ -200,7 +201,7 @@ def webhook():
                     hold_reason = "stacking_disabled"
 
         # =========================
-        # 🧠 REGIME FILTER (legacy)
+        # 🧠 REGIME FILTER (DISABLED)
         # =========================
         if hold_reason is None and ENABLE_REGIME_FILTER:
             if 0.2 < abs_mom < 0.45 and abs_trend > 0.25:
@@ -245,7 +246,8 @@ def webhook():
             print(f"⛔ BLOCKED: {symbol} | {hold_reason}")
 
         # =========================
-        # 🧠 EXIT ENGINE (UNCHANGED)
+        # 🧠 EXIT ENGINE
+        # =========================
         cur.execute("""
             SELECT id, symbol, direction, entry_price, opened_at
             FROM bot_trades
