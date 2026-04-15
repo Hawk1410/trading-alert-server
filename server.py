@@ -1,12 +1,12 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.5
-# DEPLOYED: 2026-04-14
+# VERSION: v3.6
+# DEPLOYED: 2026-04-15
 # NOTES:
-# - Lower momentum threshold (capture subtle trends)
-# - Slightly lower trend threshold
-# - Everything else unchanged from v3.4
+# - Enforced high-trend filter (MIN_TREND = 0.20)
+# - Disabled early trend capture (proven unprofitable)
+# - Everything else unchanged from v3.5
 # =========================
 
 from flask import Flask, request, jsonify
@@ -32,14 +32,14 @@ ENABLE_REGIME_FILTER = True
 ENABLE_STACKING = False
 
 # 🆕 NEW TOGGLES
-ENABLE_EARLY_TREND = True
+ENABLE_EARLY_TREND = False   # ❌ DISABLED (no longer used)
 ENABLE_MOMENTUM_CAP = True
 ENABLE_SWEET_SPOT = False
 ENABLE_SMART_STACKING = False
 
 # 🆕 THRESHOLDS
-MIN_TREND = 0.07   # ↓ from 0.10
-MIN_MOM = 0.05     # ↓ from 0.15
+MIN_TREND = 0.20   # ✅ KEY CHANGE (confirmed edge)
+MIN_MOM = 0.05
 
 MOMENTUM_CAP = 0.8
 
@@ -141,11 +141,9 @@ def webhook():
             elif abs_mom > 2.5:
                 hold_reason = "extreme_momentum"
 
-            # 🆕 Momentum cap (avoid chasing tops)
             elif ENABLE_MOMENTUM_CAP and abs_mom > MOMENTUM_CAP:
                 hold_reason = "overextended"
 
-            # 🆕 Sweet spot filter (optional precision mode)
             elif ENABLE_SWEET_SPOT:
                 if not (SWEET_MIN_MOM <= abs_mom <= SWEET_MAX_MOM and abs_trend <= SWEET_MAX_TREND):
                     hold_reason = "outside_sweet_spot"
@@ -189,10 +187,9 @@ def webhook():
 
                         if worse_price:
 
-                            # 🆕 Smart stacking override
                             if ENABLE_SMART_STACKING:
                                 if abs_mom >= STACK_STRONG_MOM and abs_trend >= STACK_STRONG_TREND:
-                                    pass  # allow
+                                    pass
                                 else:
                                     hold_reason = "no_better_price"
                             else:
@@ -249,7 +246,6 @@ def webhook():
 
         # =========================
         # 🧠 EXIT ENGINE (UNCHANGED)
-        # =========================
         cur.execute("""
             SELECT id, symbol, direction, entry_price, opened_at
             FROM bot_trades
