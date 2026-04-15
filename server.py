@@ -1,13 +1,13 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.7
-# DEPLOYED: 2026-04-15
+# VERSION: v3.8
+# DEPLOYED: 2026-04-16
 # NOTES:
-# - Enforced high-trend filter (MIN_TREND = 0.20)
-# - Disabled early trend capture (proven unprofitable)
-# - Disabled regime_exit (was cutting winners too early)
-# - Everything else unchanged from v3.6
+# - Added market regime danger cooldown (loss cluster protection)
+# - 15min rolling window + 20min cooldown
+# - Fully toggleable via ENABLE_MARKET_FILTER
+# - No other changes
 # =========================
 
 from flask import Flask, request, jsonify
@@ -29,17 +29,23 @@ ENABLE_COOLDOWN = True
 COOLDOWN_MINUTES = 20
 LOSS_STREAK_LIMIT = 2
 
-ENABLE_REGIME_FILTER = False  # ❌ DISABLED (was hurting performance)
+# 🔥 NEW MARKET FILTER
+ENABLE_MARKET_FILTER = True
+MARKET_WINDOW_MINUTES = 15
+MARKET_MIN_TRADES = 3
+MARKET_MAX_WINRATE = 0.34
+MARKET_MAX_AVG_PNL = -0.1
+MARKET_COOLDOWN_MINUTES = 20
+
+ENABLE_REGIME_FILTER = False
 ENABLE_STACKING = False
 
-# 🆕 NEW TOGGLES
-ENABLE_EARLY_TREND = False   # ❌ DISABLED (no longer used)
+ENABLE_EARLY_TREND = False
 ENABLE_MOMENTUM_CAP = True
 ENABLE_SWEET_SPOT = False
 ENABLE_SMART_STACKING = False
 
-# 🆕 THRESHOLDS
-MIN_TREND = 0.20   # ✅ KEY EDGE
+MIN_TREND = 0.20
 MIN_MOM = 0.05
 
 MOMENTUM_CAP = 0.8
@@ -56,9 +62,6 @@ def get_db():
     return psycopg2.connect(DATABASE_URL)
 
 
-# =========================
-# 🏠 HEALTH ROUTES
-# =========================
 @app.route("/", methods=["GET"])
 def home():
     return "Bot is running 🚀", 200
@@ -68,9 +71,6 @@ def ping():
     return "pong", 200
 
 
-# =========================
-# 🚀 WEBHOOK
-# =========================
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
@@ -90,9 +90,6 @@ def webhook():
         if decision in ["NONE", "", "NULL"]:
             decision = None
 
-        if decision is None:
-            print(f"⚠️ NO DECISION: {symbol}")
-
         conn = get_db()
         cur = conn.cursor()
         now = datetime.utcnow()
@@ -103,9 +100,45 @@ def webhook():
         hold_reason = None
 
         # =========================
+        # 🧠 MARKET DANGER FILTER (NEW)
+        # =========================
+        if ENABLE_MARKET_FILTER:
+            window_start = now - timedelta(minutes=MARKET_WINDOW_MINUTES)
+
+            cur.execute("""
+                SELECT 
+                    COUNT(*),
+                    AVG(pnl_percent),
+                    AVG(CASE WHEN pnl_percent > 0 THEN 1 ELSE 0 END)
+                FROM bot_trades
+                WHERE status = 'CLOSED'
+                AND closed_at >= %s
+            """, (window_start,))
+
+            count, avg_pnl, winrate = cur.fetchone()
+
+            if count and count >= MARKET_MIN_TRADES:
+                if (winrate is not None and winrate <= MARKET_MAX_WINRATE) or \
+                   (avg_pnl is not None and avg_pnl <= MARKET_MAX_AVG_PNL):
+
+                    # find last loss cluster trigger time
+                    cur.execute("""
+                        SELECT MAX(closed_at)
+                        FROM bot_trades
+                        WHERE status = 'CLOSED'
+                        AND closed_at >= %s
+                    """, (window_start,))
+                    last_event = cur.fetchone()[0]
+
+                    if last_event:
+                        mins = (now - last_event).total_seconds() / 60
+                        if mins < MARKET_COOLDOWN_MINUTES:
+                            hold_reason = "market_danger"
+
+        # =========================
         # 🧠 COOLDOWN
         # =========================
-        if ENABLE_COOLDOWN:
+        if hold_reason is None and ENABLE_COOLDOWN:
             cur.execute("""
                 SELECT pnl_percent, closed_at
                 FROM bot_trades
@@ -201,13 +234,6 @@ def webhook():
                     hold_reason = "stacking_disabled"
 
         # =========================
-        # 🧠 REGIME FILTER (DISABLED)
-        # =========================
-        if hold_reason is None and ENABLE_REGIME_FILTER:
-            if 0.2 < abs_mom < 0.45 and abs_trend > 0.25:
-                hold_reason = "bad_regime"
-
-        # =========================
         # 💾 SAVE SIGNAL
         # =========================
         cur.execute("""
@@ -246,7 +272,7 @@ def webhook():
             print(f"⛔ BLOCKED: {symbol} | {hold_reason}")
 
         # =========================
-        # 🧠 EXIT ENGINE
+        # 🧠 EXIT ENGINE (UNCHANGED)
         # =========================
         cur.execute("""
             SELECT id, symbol, direction, entry_price, opened_at
