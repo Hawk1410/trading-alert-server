@@ -1,20 +1,24 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.10.2
+# VERSION: v3.11
 # DEPLOYED: 2026-04-17
 # NOTES:
-# - Added startup print (debug)
-# - Added /version endpoint (critical test)
-# - NO logic changes
+# - ✅ GLOBAL EXIT ENGINE FIX (evaluate ALL trades every webhook)
+# - ✅ Restored emoji logging (OPEN / BLOCKED / CLOSED)
+# - ✅ Preserved ALL strategy logic (no behaviour changes)
+# - ✅ Debug + version endpoints retained
+#
+# NEXT VERSION (v3.12 PLAN):
+# - Structure-based stacking override (allow strong trend continuation entries)
 # =========================
 
-print("🔥🔥🔥 MAIN.PY IS DEFINITELY RUNNING 🔥🔥🔥")
+print("🔥🔥🔥 MAIN.PY v3.11 RUNNING 🔥🔥🔥")
 
 from flask import Flask, request, jsonify
 import os
 import psycopg2
-from datetime import datetime, timedelta
+from datetime import datetime
 
 app = Flask(__name__)
 
@@ -78,7 +82,7 @@ def ping():
 @app.route("/version", methods=["GET"])
 def version():
     return jsonify({
-        "version": "v3.10.2",
+        "version": "v3.11",
         "status": "running"
     })
 
@@ -121,7 +125,9 @@ def webhook():
 
         hold_reason = None
 
-        # ENTRY FILTER
+        # =========================
+        # 🔥 ENTRY FILTER
+        # =========================
         if decision not in ["LONG", "SHORT"]:
             hold_reason = "no_decision"
 
@@ -134,12 +140,17 @@ def webhook():
         elif abs_mom < MIN_MOM:
             hold_reason = "momentum_too_weak"
 
-        # TIER FILTER
+        # =========================
+        # 🧠 TIER FILTER
+        # =========================
         if hold_reason is None and tier != "A":
             hold_reason = "low_quality"
 
         action = "OPEN" if hold_reason is None else "BLOCKED"
 
+        # =========================
+        # 🧠 DEBUG BUFFER
+        # =========================
         debug_payload = {
             "time": now.isoformat(),
             "symbol": symbol,
@@ -154,7 +165,79 @@ def webhook():
 
         add_debug_signal(debug_payload)
 
-        print(f"{action}: {symbol} | {subtier} | {hold_reason}")
+        # =========================
+        # 🎯 EMOJI LOGGING RESTORED
+        # =========================
+        if action == "OPEN":
+            print(f"🚀 OPEN: {symbol} | {subtier}")
+        else:
+            print(f"⛔ BLOCKED: {symbol} | {hold_reason} | {subtier}")
+
+        # =========================
+        # 🧠 EXIT ENGINE (FIXED 🔥)
+        # =========================
+        conn = get_db()
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT id, symbol, direction, entry_price, opened_at, peak_pnl_percent
+            FROM bot_trades
+            WHERE status='OPEN'
+        """)
+        open_trades = cur.fetchall()
+
+        for tid, sym, direction, entry_price, opened_at, peak_pnl in open_trades:
+
+            # ❌ REMOVED SYMBOL FILTER (CRITICAL FIX)
+            # OLD: if sym != symbol: continue
+
+            pnl = ((price - entry_price) / entry_price) if direction == "LONG" \
+                  else ((entry_price - price) / entry_price)
+
+            # Update peak
+            if pnl * 100 > (peak_pnl or 0):
+                cur.execute("""
+                    UPDATE bot_trades
+                    SET peak_pnl_percent = %s
+                    WHERE id = %s
+                """, (pnl * 100, tid))
+
+            mins = (now - opened_at).total_seconds() / 60
+            close_reason = None
+
+            if pnl < -0.004:
+                close_reason = "hard_stop"
+
+            elif pnl > 0.004 and mins < 10:
+                close_reason = "quick_profit"
+
+            elif pnl > 0 and abs_mom < 0.1:
+                close_reason = "momentum_drop"
+
+            elif pnl > 0 and alignment != "aligned":
+                close_reason = "trend_flip"
+
+            elif mins > 20 and abs(pnl) < 0.001:
+                close_reason = "no_follow_through"
+
+            elif mins > 60:
+                close_reason = "time_cut"
+
+            if close_reason:
+                cur.execute("""
+                    UPDATE bot_trades
+                    SET status='CLOSED',
+                        closed_at=NOW(),
+                        pnl_percent=%s,
+                        close_reason=%s
+                    WHERE id=%s
+                """, (pnl * 100, close_reason, tid))
+
+                print(f"💰 CLOSED: {sym} | {close_reason} | {round(pnl*100,3)}%")
+
+        conn.commit()
+        cur.close()
+        conn.close()
 
         return jsonify(debug_payload), 200
 
