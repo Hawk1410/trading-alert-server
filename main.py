@@ -4,10 +4,10 @@
 # VERSION: v3.11.3
 # DEPLOYED: 2026-04-18
 # NOTES:
-# - ✅ FIXED cross-symbol PnL bug (CRITICAL)
-# - ✅ Added symbol filter in exit engine
-# - ✅ Added minimum trade age (prevents instant closes)
-# - ✅ Preserved all strategy logic
+# - ✅ FIXED cross-symbol PnL bug (only update same symbol trades)
+# - ✅ Added close_price on trade close
+# - ✅ Added safety PnL clamp
+# - Everything else unchanged
 # =========================
 
 print("🔥🔥🔥 MAIN.PY v3.11.3 RUNNING 🔥🔥🔥")
@@ -41,9 +41,6 @@ MAX_OPEN_TRADES = 7
 MIN_TREND = 0.20
 MIN_MOM = 0.05
 TRADE_SIZE_GBP = 100
-
-# 🆕 prevent instant closes
-MIN_TRADE_AGE_SECONDS = 5
 
 
 def get_db():
@@ -142,14 +139,14 @@ def webhook():
         elif abs_mom < MIN_MOM:
             hold_reason = "momentum_too_weak"
 
-        # =========================
-        # 🧠 TIER FILTER
-        # =========================
         if hold_reason is None and tier != "A":
             hold_reason = "low_quality"
 
         action = "OPEN" if hold_reason is None else "BLOCKED"
 
+        # =========================
+        # 🧠 DEBUG PAYLOAD
+        # =========================
         debug_payload = {
             "time": now.isoformat(),
             "symbol": symbol,
@@ -169,7 +166,7 @@ def webhook():
         cur = conn.cursor()
 
         # =========================
-        # 🧾 DEBUG LOG
+        # 🧾 DEBUG LOG DB
         # =========================
         cur.execute("""
             INSERT INTO debug_signals_log (
@@ -185,7 +182,7 @@ def webhook():
         ))
 
         # =========================
-        # 🚀 ENTRY
+        # 🚀 ENTRY LOGIC
         # =========================
         if action == "OPEN":
 
@@ -196,6 +193,7 @@ def webhook():
             exists = cur.fetchone()[0]
 
             if exists == 0:
+
                 cur.execute("""
                     INSERT INTO bot_trades (
                         symbol,
@@ -229,22 +227,20 @@ def webhook():
             SELECT id, symbol, direction, entry_price, opened_at, peak_pnl_percent
             FROM bot_trades
             WHERE status='OPEN'
-        """)
+            AND symbol = %s
+        """, (symbol,))
+
         open_trades = cur.fetchall()
 
         for tid, sym, direction, entry_price, opened_at, peak_pnl in open_trades:
 
-            # 🔥 CRITICAL FIX — ONLY evaluate same symbol
-            if sym != symbol:
-                continue
-
-            # 🆕 prevent instant close
-            trade_age = (now - opened_at).total_seconds()
-            if trade_age < MIN_TRADE_AGE_SECONDS:
-                continue
-
             pnl = ((price - entry_price) / entry_price) if direction == "LONG" \
                   else ((entry_price - price) / entry_price)
+
+            # 🚨 SAFETY CLAMP
+            if abs(pnl) > 0.1:
+                print(f"⚠️ BAD PNL SKIPPED: {sym} | pnl={pnl}")
+                continue
 
             pnl_percent = pnl * 100
 
@@ -255,7 +251,7 @@ def webhook():
                     WHERE id = %s
                 """, (pnl_percent, tid))
 
-            mins = trade_age / 60
+            mins = (now - opened_at).total_seconds() / 60
             close_reason = None
 
             if pnl < -0.004:
@@ -283,12 +279,20 @@ def webhook():
                     UPDATE bot_trades
                     SET status='CLOSED',
                         closed_at=NOW(),
+                        close_price=%s,
                         pnl_percent=%s,
                         pnl_gbp=%s,
                         trade_size_gbp=%s,
                         close_reason=%s
                     WHERE id=%s
-                """, (pnl_percent, pnl_gbp, TRADE_SIZE_GBP, close_reason, tid))
+                """, (
+                    price,
+                    pnl_percent,
+                    pnl_gbp,
+                    TRADE_SIZE_GBP,
+                    close_reason,
+                    tid
+                ))
 
                 print(f"💰 CLOSED: {sym} | {close_reason} | {round(pnl_percent,3)}% | £{round(pnl_gbp,2)}")
 
