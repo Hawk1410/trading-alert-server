@@ -1,19 +1,15 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.11
+# VERSION: v3.11.1
 # DEPLOYED: 2026-04-17
 # NOTES:
-# - ✅ GLOBAL EXIT ENGINE FIX (evaluate ALL trades every webhook)
-# - ✅ Restored emoji logging (OPEN / BLOCKED / CLOSED)
-# - ✅ Preserved ALL strategy logic (no behaviour changes)
-# - ✅ Debug + version endpoints retained
-#
-# NEXT VERSION (v3.12 PLAN):
-# - Structure-based stacking override (allow strong trend continuation entries)
+# - Added pnl_gbp tracking (fixed £100 per trade)
+# - No strategy changes
+# - GBP PnL calculated on trade close only
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v3.11 RUNNING 🔥🔥🔥")
+print("🔥🔥🔥 MAIN.PY v3.11.1 RUNNING 🔥🔥🔥")
 
 from flask import Flask, request, jsonify
 import os
@@ -43,6 +39,9 @@ def add_debug_signal(signal):
 MAX_OPEN_TRADES = 7
 MIN_TREND = 0.20
 MIN_MOM = 0.05
+
+# 💰 NEW
+TRADE_SIZE_GBP = 100
 
 
 def get_db():
@@ -82,7 +81,7 @@ def ping():
 @app.route("/version", methods=["GET"])
 def version():
     return jsonify({
-        "version": "v3.11",
+        "version": "v3.11.1",
         "status": "running"
     })
 
@@ -166,7 +165,7 @@ def webhook():
         add_debug_signal(debug_payload)
 
         # =========================
-        # 🎯 EMOJI LOGGING RESTORED
+        # 🎯 LOGGING
         # =========================
         if action == "OPEN":
             print(f"🚀 OPEN: {symbol} | {subtier}")
@@ -174,7 +173,7 @@ def webhook():
             print(f"⛔ BLOCKED: {symbol} | {hold_reason} | {subtier}")
 
         # =========================
-        # 🧠 EXIT ENGINE (FIXED 🔥)
+        # 🧠 EXIT ENGINE
         # =========================
         conn = get_db()
         cur = conn.cursor()
@@ -188,19 +187,18 @@ def webhook():
 
         for tid, sym, direction, entry_price, opened_at, peak_pnl in open_trades:
 
-            # ❌ REMOVED SYMBOL FILTER (CRITICAL FIX)
-            # OLD: if sym != symbol: continue
-
             pnl = ((price - entry_price) / entry_price) if direction == "LONG" \
                   else ((entry_price - price) / entry_price)
 
+            pnl_percent = pnl * 100
+
             # Update peak
-            if pnl * 100 > (peak_pnl or 0):
+            if pnl_percent > (peak_pnl or 0):
                 cur.execute("""
                     UPDATE bot_trades
                     SET peak_pnl_percent = %s
                     WHERE id = %s
-                """, (pnl * 100, tid))
+                """, (pnl_percent, tid))
 
             mins = (now - opened_at).total_seconds() / 60
             close_reason = None
@@ -224,16 +222,20 @@ def webhook():
                 close_reason = "time_cut"
 
             if close_reason:
+                pnl_gbp = (pnl_percent / 100) * TRADE_SIZE_GBP
+
                 cur.execute("""
                     UPDATE bot_trades
                     SET status='CLOSED',
                         closed_at=NOW(),
                         pnl_percent=%s,
+                        pnl_gbp=%s,
+                        trade_size_gbp=%s,
                         close_reason=%s
                     WHERE id=%s
-                """, (pnl * 100, close_reason, tid))
+                """, (pnl_percent, pnl_gbp, TRADE_SIZE_GBP, close_reason, tid))
 
-                print(f"💰 CLOSED: {sym} | {close_reason} | {round(pnl*100,3)}%")
+                print(f"💰 CLOSED: {sym} | {close_reason} | {round(pnl_percent,3)}% | £{round(pnl_gbp,2)}")
 
         conn.commit()
         cur.close()
