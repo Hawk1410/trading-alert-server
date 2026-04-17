@@ -1,16 +1,16 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.11.2
-# DEPLOYED: 2026-04-17
+# VERSION: v3.11.3
+# DEPLOYED: 2026-04-18
 # NOTES:
-# - ✅ Added trade INSERT logic (fix missing trades)
-# - ✅ Prevent duplicate open trades per symbol
-# - ✅ Added debug_signals_log DB logging
-# - ✅ Added GBP tracking on close (unchanged)
+# - ✅ FIXED cross-symbol PnL bug (CRITICAL)
+# - ✅ Added symbol filter in exit engine
+# - ✅ Added minimum trade age (prevents instant closes)
+# - ✅ Preserved all strategy logic
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v3.11.2 RUNNING 🔥🔥🔥")
+print("🔥🔥🔥 MAIN.PY v3.11.3 RUNNING 🔥🔥🔥")
 
 from flask import Flask, request, jsonify
 import os
@@ -41,6 +41,9 @@ MAX_OPEN_TRADES = 7
 MIN_TREND = 0.20
 MIN_MOM = 0.05
 TRADE_SIZE_GBP = 100
+
+# 🆕 prevent instant closes
+MIN_TRADE_AGE_SECONDS = 5
 
 
 def get_db():
@@ -80,7 +83,7 @@ def ping():
 @app.route("/version", methods=["GET"])
 def version():
     return jsonify({
-        "version": "v3.11.2",
+        "version": "v3.11.3",
         "status": "running"
     })
 
@@ -107,7 +110,6 @@ def webhook():
         momentum = float(data.get("momentum_strength", 0))
         trend = float(data.get("trend_strength", 0))
         alignment = data.get("trend_alignment")
-
         data_version = data.get("data_version", "V3_UNKNOWN")
 
         if decision:
@@ -148,9 +150,6 @@ def webhook():
 
         action = "OPEN" if hold_reason is None else "BLOCKED"
 
-        # =========================
-        # 🧠 DEBUG PAYLOAD
-        # =========================
         debug_payload = {
             "time": now.isoformat(),
             "symbol": symbol,
@@ -166,14 +165,11 @@ def webhook():
 
         add_debug_signal(debug_payload)
 
-        # =========================
-        # 🗄️ DB CONNECTION
-        # =========================
         conn = get_db()
         cur = conn.cursor()
 
         # =========================
-        # 🧾 LOG DEBUG SIGNAL TO DB
+        # 🧾 DEBUG LOG
         # =========================
         cur.execute("""
             INSERT INTO debug_signals_log (
@@ -189,11 +185,10 @@ def webhook():
         ))
 
         # =========================
-        # 🚀 ENTRY LOGIC (NEW)
+        # 🚀 ENTRY
         # =========================
         if action == "OPEN":
 
-            # Prevent duplicate trades
             cur.execute("""
                 SELECT COUNT(*) FROM bot_trades
                 WHERE symbol=%s AND status='OPEN'
@@ -201,7 +196,6 @@ def webhook():
             exists = cur.fetchone()[0]
 
             if exists == 0:
-
                 cur.execute("""
                     INSERT INTO bot_trades (
                         symbol,
@@ -222,7 +216,6 @@ def webhook():
                 ))
 
                 print(f"🚀 OPEN: {symbol} | {subtier}")
-
             else:
                 print(f"⚠️ SKIPPED (already open): {symbol}")
 
@@ -230,7 +223,7 @@ def webhook():
             print(f"⛔ BLOCKED: {symbol} | {hold_reason} | {subtier}")
 
         # =========================
-        # 🧠 EXIT ENGINE
+        # 🧠 EXIT ENGINE (FIXED)
         # =========================
         cur.execute("""
             SELECT id, symbol, direction, entry_price, opened_at, peak_pnl_percent
@@ -240,6 +233,15 @@ def webhook():
         open_trades = cur.fetchall()
 
         for tid, sym, direction, entry_price, opened_at, peak_pnl in open_trades:
+
+            # 🔥 CRITICAL FIX — ONLY evaluate same symbol
+            if sym != symbol:
+                continue
+
+            # 🆕 prevent instant close
+            trade_age = (now - opened_at).total_seconds()
+            if trade_age < MIN_TRADE_AGE_SECONDS:
+                continue
 
             pnl = ((price - entry_price) / entry_price) if direction == "LONG" \
                   else ((entry_price - price) / entry_price)
@@ -253,7 +255,7 @@ def webhook():
                     WHERE id = %s
                 """, (pnl_percent, tid))
 
-            mins = (now - opened_at).total_seconds() / 60
+            mins = trade_age / 60
             close_reason = None
 
             if pnl < -0.004:
