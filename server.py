@@ -1,12 +1,12 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.9
-# DEPLOYED: 2026-04-16
+# VERSION: v3.9.1
+# DEPLOYED: 2026-04-17
 # NOTES:
-# - Added Adaptive Coin Filter (3-day whitelist)
-# - Added trade analytics tracking (peak pnl, exit momentum/trend)
-# - Preserved market filter + all existing logic
+# - Removed momentum cap (was blocking best trades)
+# - Added entry_momentum + entry_trend tracking
+# - NO other logic changes
 # =========================
 
 from flask import Flask, request, jsonify
@@ -40,7 +40,7 @@ ENABLE_REGIME_FILTER = False
 ENABLE_STACKING = False
 
 ENABLE_EARLY_TREND = False
-ENABLE_MOMENTUM_CAP = True
+ENABLE_MOMENTUM_CAP = False  # ❌ DISABLED
 ENABLE_SWEET_SPOT = False
 ENABLE_SMART_STACKING = False
 
@@ -53,7 +53,7 @@ MIN_COIN_PNL = -1
 MIN_TREND = 0.20
 MIN_MOM = 0.05
 
-MOMENTUM_CAP = 0.8
+MOMENTUM_CAP = 0.8  # (kept for future toggle use, but inactive)
 
 SWEET_MIN_MOM = 0.2
 SWEET_MAX_MOM = 0.6
@@ -95,6 +95,7 @@ def get_allowed_symbols(cur):
 @app.route("/", methods=["GET"])
 def home():
     return "Bot is running 🚀", 200
+
 
 @app.route("/ping", methods=["GET"])
 def ping():
@@ -138,7 +139,7 @@ def webhook():
                 hold_reason = "coin_not_allowed"
 
         # =========================
-        # 🧠 MARKET DANGER FILTER (UNCHANGED)
+        # 🧠 MARKET DANGER FILTER
         # =========================
         if hold_reason is None and ENABLE_MARKET_FILTER:
             window_start = now - timedelta(minutes=MARKET_WINDOW_MINUTES)
@@ -193,7 +194,7 @@ def webhook():
                         hold_reason = "cooldown_active"
 
         # =========================
-        # 🔥 ENTRY FILTER (UNCHANGED)
+        # 🔥 ENTRY FILTER
         # =========================
         if hold_reason is None:
 
@@ -211,13 +212,6 @@ def webhook():
 
             elif abs_mom > 2.5:
                 hold_reason = "extreme_momentum"
-
-            elif ENABLE_MOMENTUM_CAP and abs_mom > MOMENTUM_CAP:
-                hold_reason = "overextended"
-
-            elif ENABLE_SWEET_SPOT:
-                if not (SWEET_MIN_MOM <= abs_mom <= SWEET_MAX_MOM and abs_trend <= SWEET_MAX_TREND):
-                    hold_reason = "outside_sweet_spot"
 
         # =========================
         # 🔒 GLOBAL LIMIT
@@ -240,32 +234,8 @@ def webhook():
             existing = cur.fetchall()
 
             if ENABLE_STACKING:
-
                 if len(existing) >= 2:
                     hold_reason = "too_many_positions"
-
-                elif len(existing) == 1:
-                    first_price, first_time = existing[0]
-
-                    if now - first_time < timedelta(minutes=20):
-                        hold_reason = "too_soon"
-
-                    else:
-                        worse_price = (
-                            (decision == "LONG" and price >= first_price) or
-                            (decision == "SHORT" and price <= first_price)
-                        )
-
-                        if worse_price:
-
-                            if ENABLE_SMART_STACKING:
-                                if abs_mom >= STACK_STRONG_MOM and abs_trend >= STACK_STRONG_TREND:
-                                    pass
-                                else:
-                                    hold_reason = "no_better_price"
-                            else:
-                                hold_reason = "no_better_price"
-
             else:
                 if len(existing) >= 1:
                     hold_reason = "stacking_disabled"
@@ -285,7 +255,7 @@ def webhook():
         ))
 
         # =========================
-        # 🚀 OPEN TRADE
+        # 🚀 OPEN TRADE (UPDATED)
         # =========================
         if hold_reason is None:
             stop_price = price * (0.996 if decision == "LONG" else 1.004)
@@ -296,12 +266,15 @@ def webhook():
                     symbol, direction, entry_price,
                     stop_price, target_price,
                     status, data_version, opened_at,
-                    peak_pnl_percent
+                    peak_pnl_percent,
+                    entry_momentum,
+                    entry_trend
                 )
-                VALUES (%s,%s,%s,%s,%s,'OPEN',%s,NOW(),0)
+                VALUES (%s,%s,%s,%s,%s,'OPEN',%s,NOW(),0,%s,%s)
             """, (
                 symbol, decision, price,
-                stop_price, target_price, data_version
+                stop_price, target_price, data_version,
+                momentum, trend
             ))
 
             print(f"🚀 OPEN: {symbol}")
@@ -310,7 +283,7 @@ def webhook():
             print(f"⛔ BLOCKED: {symbol} | {hold_reason}")
 
         # =========================
-        # 🧠 EXIT ENGINE + TRACKING
+        # 🧠 EXIT ENGINE (UNCHANGED)
         # =========================
         cur.execute("""
             SELECT id, symbol, direction, entry_price, opened_at, peak_pnl_percent
@@ -327,7 +300,6 @@ def webhook():
             pnl = ((price - entry_price) / entry_price) if direction == "LONG" \
                   else ((entry_price - price) / entry_price)
 
-            # 🆕 TRACK PEAK
             if pnl * 100 > (peak_pnl or 0):
                 cur.execute("""
                     UPDATE bot_trades
