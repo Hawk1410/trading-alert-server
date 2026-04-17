@@ -1,15 +1,16 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.11.1
+# VERSION: v3.11.2
 # DEPLOYED: 2026-04-17
 # NOTES:
-# - Added pnl_gbp tracking (fixed £100 per trade)
-# - No strategy changes
-# - GBP PnL calculated on trade close only
+# - ✅ Added trade INSERT logic (fix missing trades)
+# - ✅ Prevent duplicate open trades per symbol
+# - ✅ Added debug_signals_log DB logging
+# - ✅ Added GBP tracking on close (unchanged)
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v3.11.1 RUNNING 🔥🔥🔥")
+print("🔥🔥🔥 MAIN.PY v3.11.2 RUNNING 🔥🔥🔥")
 
 from flask import Flask, request, jsonify
 import os
@@ -39,8 +40,6 @@ def add_debug_signal(signal):
 MAX_OPEN_TRADES = 7
 MIN_TREND = 0.20
 MIN_MOM = 0.05
-
-# 💰 NEW
 TRADE_SIZE_GBP = 100
 
 
@@ -81,7 +80,7 @@ def ping():
 @app.route("/version", methods=["GET"])
 def version():
     return jsonify({
-        "version": "v3.11.1",
+        "version": "v3.11.2",
         "status": "running"
     })
 
@@ -108,6 +107,8 @@ def webhook():
         momentum = float(data.get("momentum_strength", 0))
         trend = float(data.get("trend_strength", 0))
         alignment = data.get("trend_alignment")
+
+        data_version = data.get("data_version", "V3_UNKNOWN")
 
         if decision:
             decision = decision.upper().strip()
@@ -148,7 +149,7 @@ def webhook():
         action = "OPEN" if hold_reason is None else "BLOCKED"
 
         # =========================
-        # 🧠 DEBUG BUFFER
+        # 🧠 DEBUG PAYLOAD
         # =========================
         debug_payload = {
             "time": now.isoformat(),
@@ -159,25 +160,78 @@ def webhook():
             "tier": tier,
             "subtier": subtier,
             "hold_reason": hold_reason,
-            "action": action
+            "action": action,
+            "data_version": data_version
         }
 
         add_debug_signal(debug_payload)
 
         # =========================
-        # 🎯 LOGGING
+        # 🗄️ DB CONNECTION
+        # =========================
+        conn = get_db()
+        cur = conn.cursor()
+
+        # =========================
+        # 🧾 LOG DEBUG SIGNAL TO DB
+        # =========================
+        cur.execute("""
+            INSERT INTO debug_signals_log (
+                time, symbol, momentum, trend,
+                decision, hold_reason, action,
+                tier, subtier, data_version
+            )
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        """, (
+            now, symbol, momentum, trend,
+            decision, hold_reason, action,
+            tier, subtier, data_version
+        ))
+
+        # =========================
+        # 🚀 ENTRY LOGIC (NEW)
         # =========================
         if action == "OPEN":
-            print(f"🚀 OPEN: {symbol} | {subtier}")
+
+            # Prevent duplicate trades
+            cur.execute("""
+                SELECT COUNT(*) FROM bot_trades
+                WHERE symbol=%s AND status='OPEN'
+            """, (symbol,))
+            exists = cur.fetchone()[0]
+
+            if exists == 0:
+
+                cur.execute("""
+                    INSERT INTO bot_trades (
+                        symbol,
+                        direction,
+                        entry_price,
+                        status,
+                        opened_at,
+                        tier,
+                        data_version
+                    )
+                    VALUES (%s,%s,%s,'OPEN',NOW(),%s,%s)
+                """, (
+                    symbol,
+                    decision,
+                    price,
+                    tier,
+                    data_version
+                ))
+
+                print(f"🚀 OPEN: {symbol} | {subtier}")
+
+            else:
+                print(f"⚠️ SKIPPED (already open): {symbol}")
+
         else:
             print(f"⛔ BLOCKED: {symbol} | {hold_reason} | {subtier}")
 
         # =========================
         # 🧠 EXIT ENGINE
         # =========================
-        conn = get_db()
-        cur = conn.cursor()
-
         cur.execute("""
             SELECT id, symbol, direction, entry_price, opened_at, peak_pnl_percent
             FROM bot_trades
@@ -192,7 +246,6 @@ def webhook():
 
             pnl_percent = pnl * 100
 
-            # Update peak
             if pnl_percent > (peak_pnl or 0):
                 cur.execute("""
                     UPDATE bot_trades
