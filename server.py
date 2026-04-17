@@ -1,12 +1,14 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.9.1
+# VERSION: v3.10
 # DEPLOYED: 2026-04-17
 # NOTES:
-# - Removed momentum cap (was blocking best trades)
-# - Added entry_momentum + entry_trend tracking
-# - NO other logic changes
+# - Removed coin filter (disabled)
+# - Added A/B/C + A+ tier system
+# - Hard filter: ONLY A trades allowed
+# - Added trade_quality + trade_subtier tracking
+# - Restored JSON debug output
 # =========================
 
 from flask import Flask, request, jsonify
@@ -28,7 +30,6 @@ ENABLE_COOLDOWN = True
 COOLDOWN_MINUTES = 20
 LOSS_STREAK_LIMIT = 2
 
-# 🔥 MARKET FILTER (UNCHANGED)
 ENABLE_MARKET_FILTER = True
 MARKET_WINDOW_MINUTES = 15
 MARKET_MIN_TRADES = 3
@@ -40,67 +41,26 @@ ENABLE_REGIME_FILTER = False
 ENABLE_STACKING = False
 
 ENABLE_EARLY_TREND = False
-ENABLE_MOMENTUM_CAP = False  # ❌ DISABLED
+ENABLE_MOMENTUM_CAP = False
 ENABLE_SWEET_SPOT = False
 ENABLE_SMART_STACKING = False
 
-# 🆕 ADAPTIVE COIN FILTER
-ENABLE_ADAPTIVE_COIN_FILTER = True
-COIN_LOOKBACK_DAYS = 3
-MIN_COIN_TRADES = 3
-MIN_COIN_PNL = -1
+# ❌ DISABLED
+ENABLE_ADAPTIVE_COIN_FILTER = False
 
 MIN_TREND = 0.20
 MIN_MOM = 0.05
 
-MOMENTUM_CAP = 0.8  # (kept for future toggle use, but inactive)
-
-SWEET_MIN_MOM = 0.2
-SWEET_MAX_MOM = 0.6
-SWEET_MAX_TREND = 0.2
-
-STACK_STRONG_MOM = 0.35
-STACK_STRONG_TREND = 0.15
-
-
 def get_db():
     return psycopg2.connect(DATABASE_URL)
-
-
-# =========================
-# 🧠 ADAPTIVE COIN FILTER
-# =========================
-def get_allowed_symbols(cur):
-    if not ENABLE_ADAPTIVE_COIN_FILTER:
-        return None
-
-    cur.execute(f"""
-        SELECT symbol
-        FROM (
-            SELECT symbol,
-                   COUNT(*) AS trades,
-                   SUM(pnl_percent) AS total_pnl
-            FROM bot_trades
-            WHERE status = 'CLOSED'
-            AND opened_at >= NOW() - INTERVAL '{COIN_LOOKBACK_DAYS} days'
-            GROUP BY symbol
-        ) t
-        WHERE trades >= %s
-        AND total_pnl > %s
-    """, (MIN_COIN_TRADES, MIN_COIN_PNL))
-
-    return set(r[0] for r in cur.fetchall())
-
 
 @app.route("/", methods=["GET"])
 def home():
     return "Bot is running 🚀", 200
 
-
 @app.route("/ping", methods=["GET"])
 def ping():
     return "pong", 200
-
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -131,17 +91,25 @@ def webhook():
         hold_reason = None
 
         # =========================
-        # 🆕 ADAPTIVE COIN FILTER
+        # 🧠 TIER SYSTEM
         # =========================
-        allowed_symbols = get_allowed_symbols(cur)
-        if ENABLE_ADAPTIVE_COIN_FILTER and allowed_symbols is not None:
-            if symbol not in allowed_symbols:
-                hold_reason = "coin_not_allowed"
+        if abs_mom >= 1.0 and abs_trend >= 0.3:
+            trade_subtier = "A+"
+            trade_quality = "A"
+        elif abs_mom >= 0.6 and abs_trend >= 0.2:
+            trade_subtier = "A"
+            trade_quality = "A"
+        elif abs_mom >= 0.3 and abs_trend >= 0.15:
+            trade_subtier = "B"
+            trade_quality = "B"
+        else:
+            trade_subtier = "C"
+            trade_quality = "C"
 
         # =========================
-        # 🧠 MARKET DANGER FILTER
+        # 🧠 MARKET FILTER
         # =========================
-        if hold_reason is None and ENABLE_MARKET_FILTER:
+        if ENABLE_MARKET_FILTER:
             window_start = now - timedelta(minutes=MARKET_WINDOW_MINUTES)
 
             cur.execute("""
@@ -214,31 +182,19 @@ def webhook():
                 hold_reason = "extreme_momentum"
 
         # =========================
+        # 🚫 HARD QUALITY FILTER
+        # =========================
+        if hold_reason is None:
+            if trade_quality != "A":
+                hold_reason = "low_quality"
+
+        # =========================
         # 🔒 GLOBAL LIMIT
         # =========================
         if hold_reason is None:
             cur.execute("SELECT COUNT(*) FROM bot_trades WHERE status='OPEN'")
             if cur.fetchone()[0] >= MAX_OPEN_TRADES:
                 hold_reason = "max_open_trades"
-
-        # =========================
-        # 🔁 STACKING CONTROL
-        # =========================
-        if hold_reason is None:
-            cur.execute("""
-                SELECT entry_price, opened_at
-                FROM bot_trades
-                WHERE symbol=%s AND status='OPEN'
-                ORDER BY opened_at ASC
-            """, (symbol,))
-            existing = cur.fetchall()
-
-            if ENABLE_STACKING:
-                if len(existing) >= 2:
-                    hold_reason = "too_many_positions"
-            else:
-                if len(existing) >= 1:
-                    hold_reason = "stacking_disabled"
 
         # =========================
         # 💾 SAVE SIGNAL
@@ -255,8 +211,10 @@ def webhook():
         ))
 
         # =========================
-        # 🚀 OPEN TRADE (UPDATED)
+        # 🚀 OPEN TRADE
         # =========================
+        action = "BLOCKED"
+
         if hold_reason is None:
             stop_price = price * (0.996 if decision == "LONG" else 1.004)
             target_price = price * (1.008 if decision == "LONG" else 0.992)
@@ -277,79 +235,29 @@ def webhook():
                 momentum, trend
             ))
 
+            action = "OPEN"
             print(f"🚀 OPEN: {symbol}")
 
         else:
             print(f"⛔ BLOCKED: {symbol} | {hold_reason}")
 
-        # =========================
-        # 🧠 EXIT ENGINE (UNCHANGED)
-        # =========================
-        cur.execute("""
-            SELECT id, symbol, direction, entry_price, opened_at, peak_pnl_percent
-            FROM bot_trades
-            WHERE status='OPEN'
-        """)
-        open_trades = cur.fetchall()
-
-        for tid, sym, direction, entry_price, opened_at, peak_pnl in open_trades:
-
-            if sym != symbol:
-                continue
-
-            pnl = ((price - entry_price) / entry_price) if direction == "LONG" \
-                  else ((entry_price - price) / entry_price)
-
-            if pnl * 100 > (peak_pnl or 0):
-                cur.execute("""
-                    UPDATE bot_trades
-                    SET peak_pnl_percent = %s
-                    WHERE id = %s
-                """, (pnl * 100, tid))
-
-            mins = (now - opened_at).total_seconds() / 60
-            close_reason = None
-
-            if pnl < -0.004:
-                close_reason = "hard_stop"
-
-            elif pnl > 0.004 and mins < 10:
-                close_reason = "quick_profit"
-
-            elif pnl > 0 and abs_mom < 0.1:
-                close_reason = "momentum_drop"
-
-            elif pnl > 0 and alignment != "aligned":
-                close_reason = "trend_flip"
-
-            elif mins > 20 and abs(pnl) < 0.001:
-                close_reason = "no_follow_through"
-
-            elif ENABLE_REGIME_FILTER and abs_trend < 0.15:
-                close_reason = "regime_exit"
-
-            elif mins > 60:
-                close_reason = "time_cut"
-
-            if close_reason:
-                cur.execute("""
-                    UPDATE bot_trades
-                    SET status='CLOSED',
-                        closed_at=NOW(),
-                        pnl_percent=%s,
-                        close_reason=%s,
-                        exit_momentum=%s,
-                        exit_trend=%s
-                    WHERE id=%s
-                """, (pnl * 100, close_reason, momentum, trend, tid))
-
-                print(f"💰 CLOSED: {sym} | {close_reason} | {round(pnl*100,3)}%")
-
         conn.commit()
         cur.close()
         conn.close()
 
-        return jsonify({"status": "processed"}), 200
+        # =========================
+        # 📦 DEBUG JSON OUTPUT
+        # =========================
+        return jsonify({
+            "symbol": symbol,
+            "decision": decision,
+            "momentum": momentum,
+            "trend": trend,
+            "tier": trade_quality,
+            "subtier": trade_subtier,
+            "hold_reason": hold_reason,
+            "action": action
+        }), 200
 
     except Exception as e:
         print("❌ WEBHOOK ERROR:", e)
