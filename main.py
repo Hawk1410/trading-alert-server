@@ -1,17 +1,17 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.12
+# VERSION: v3.12.1
 # DEPLOYED: 2026-04-18
 # NOTES:
-# - ✅ Added entry_momentum + entry_trend tracking
-# - ✅ Added entry_tier + entry_subtier tracking
-# - ✅ Added exit_momentum + exit_trend tracking
+# - ✅ FIXED DB column mismatch (removed entry_tier / entry_subtier)
+# - ✅ entry_momentum + entry_trend retained
+# - ✅ exit_momentum + exit_trend retained
 # - ✅ Peak PnL tracking preserved
 # - ❌ NO strategy logic changes
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v3.12 RUNNING 🔥🔥🔥")
+print("🔥🔥🔥 MAIN.PY v3.12.1 RUNNING 🔥🔥🔥")
 
 from flask import Flask, request, jsonify
 import os
@@ -81,7 +81,7 @@ def ping():
 @app.route("/version", methods=["GET"])
 def version():
     return jsonify({
-        "version": "v3.12",
+        "version": "v3.12.1",
         "status": "running"
     })
 
@@ -206,11 +206,9 @@ def webhook():
                         data_version,
                         entry_momentum,
                         entry_trend,
-                        entry_tier,
-                        entry_subtier,
                         peak_pnl_percent
                     )
-                    VALUES (%s,%s,%s,'OPEN',NOW(),%s,%s,%s,%s,%s,%s,%s)
+                    VALUES (%s,%s,%s,'OPEN',NOW(),%s,%s,%s,%s,%s)
                 """, (
                     symbol,
                     decision,
@@ -219,8 +217,6 @@ def webhook():
                     data_version,
                     momentum,
                     trend,
-                    tier,
-                    subtier,
                     0
                 ))
 
@@ -232,7 +228,7 @@ def webhook():
             print(f"⛔ BLOCKED: {symbol} | {hold_reason} | {subtier}")
 
         # =========================
-        # 🧠 EXIT ENGINE (FIXED)
+        # 🧠 EXIT ENGINE
         # =========================
         cur.execute("""
             SELECT id, symbol, direction, entry_price, opened_at, peak_pnl_percent
