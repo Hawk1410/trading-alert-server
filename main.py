@@ -1,16 +1,17 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.11.3
+# VERSION: v3.12
 # DEPLOYED: 2026-04-18
 # NOTES:
-# - ✅ FIXED cross-symbol PnL bug (only update same symbol trades)
-# - ✅ Added close_price on trade close
-# - ✅ Added safety PnL clamp
-# - Everything else unchanged
+# - ✅ Added entry_momentum + entry_trend tracking
+# - ✅ Added entry_tier + entry_subtier tracking
+# - ✅ Added exit_momentum + exit_trend tracking
+# - ✅ Peak PnL tracking preserved
+# - ❌ NO strategy logic changes
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v3.11.3 RUNNING 🔥🔥🔥")
+print("🔥🔥🔥 MAIN.PY v3.12 RUNNING 🔥🔥🔥")
 
 from flask import Flask, request, jsonify
 import os
@@ -80,7 +81,7 @@ def ping():
 @app.route("/version", methods=["GET"])
 def version():
     return jsonify({
-        "version": "v3.11.3",
+        "version": "v3.12",
         "status": "running"
     })
 
@@ -202,15 +203,25 @@ def webhook():
                         status,
                         opened_at,
                         tier,
-                        data_version
+                        data_version,
+                        entry_momentum,
+                        entry_trend,
+                        entry_tier,
+                        entry_subtier,
+                        peak_pnl_percent
                     )
-                    VALUES (%s,%s,%s,'OPEN',NOW(),%s,%s)
+                    VALUES (%s,%s,%s,'OPEN',NOW(),%s,%s,%s,%s,%s,%s,%s)
                 """, (
                     symbol,
                     decision,
                     price,
                     tier,
-                    data_version
+                    data_version,
+                    momentum,
+                    trend,
+                    tier,
+                    subtier,
+                    0
                 ))
 
                 print(f"🚀 OPEN: {symbol} | {subtier}")
@@ -283,7 +294,9 @@ def webhook():
                         pnl_percent=%s,
                         pnl_gbp=%s,
                         trade_size_gbp=%s,
-                        close_reason=%s
+                        close_reason=%s,
+                        exit_momentum=%s,
+                        exit_trend=%s
                     WHERE id=%s
                 """, (
                     price,
@@ -291,6 +304,8 @@ def webhook():
                     pnl_gbp,
                     TRADE_SIZE_GBP,
                     close_reason,
+                    momentum,
+                    trend,
                     tid
                 ))
 
