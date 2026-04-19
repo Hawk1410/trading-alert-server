@@ -1,15 +1,16 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.14
+# VERSION: v3.15
 # DEPLOYED: 2026-04-19
 # NOTES:
-# - ✅ Added GIVEBACK EXIT ENGINE (core edge unlock)
-# - ✅ Toggle controlled (ENABLE_GIVEBACK_EXIT)
-# - ✅ No entry logic changes
+# - ✅ FIXED logging visibility (flush=True)
+# - ✅ Added webhook hit logging
+# - ✅ Added giveback debug prints
+# - ✅ No strategy logic changes
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v3.14 RUNNING 🔥🔥🔥")
+print("🔥🔥🔥 MAIN.PY v3.15 RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -28,10 +29,9 @@ MIN_TREND = 0.20
 MIN_MOM = 0.05
 TRADE_SIZE_GBP = 100
 
-# 🔥 NEW EDGE CONFIG
 ENABLE_GIVEBACK_EXIT = True
-PROTECT_PROFIT_THRESHOLD = 0.2   # % profit before protection activates
-GIVEBACK_RATIO = 0.5             # allow 50% giveback
+PROTECT_PROFIT_THRESHOLD = 0.2
+GIVEBACK_RATIO = 0.5
 
 
 def get_db():
@@ -84,7 +84,7 @@ def ping():
 @app.route("/version", methods=["GET"])
 def version():
     return jsonify({
-        "version": "v3.14",
+        "version": "v3.15",
         "status": "running"
     })
 
@@ -103,6 +103,8 @@ def debug_signals():
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
+        print("📩 WEBHOOK HIT", flush=True)
+
         data = request.get_json(force=True)
 
         symbol = data.get("symbol")
@@ -148,39 +150,10 @@ def webhook():
 
         action = "OPEN" if hold_reason is None else "BLOCKED"
 
-        debug_payload = {
-            "time": now.isoformat(),
-            "symbol": symbol,
-            "decision": decision,
-            "momentum": momentum,
-            "trend": trend,
-            "tier": tier,
-            "subtier": subtier,
-            "hold_reason": hold_reason,
-            "action": action,
-            "data_version": data_version
-        }
-
-        add_debug_signal(debug_payload)
+        print(f"📊 SIGNAL: {symbol} | {decision} | mom={momentum:.3f} | trend={trend:.3f} | {tier}/{subtier}", flush=True)
 
         conn = get_db()
         cur = conn.cursor()
-
-        # =========================
-        # 🧾 DEBUG LOG
-        # =========================
-        cur.execute("""
-            INSERT INTO debug_signals_log (
-                time, symbol, momentum, trend,
-                decision, hold_reason, action,
-                tier, subtier, data_version
-            )
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-        """, (
-            now, symbol, momentum, trend,
-            decision, hold_reason, action,
-            tier, subtier, data_version
-        ))
 
         # =========================
         # 🚀 ENTRY
@@ -190,8 +163,10 @@ def webhook():
             cur.execute("SELECT COUNT(*) FROM bot_trades WHERE status='OPEN'")
             total_open = cur.fetchone()[0]
 
-            if total_open < MAX_OPEN_TRADES:
+            if total_open >= MAX_OPEN_TRADES:
+                print(f"⚠️ MAX OPEN TRADES REACHED ({total_open})", flush=True)
 
+            else:
                 cur.execute("""
                     SELECT COUNT(*) FROM bot_trades
                     WHERE symbol=%s AND status='OPEN'
@@ -216,6 +191,14 @@ def webhook():
                         0
                     ))
 
+                    print(f"🚀 OPEN: {symbol} | {subtier}", flush=True)
+
+                else:
+                    print(f"⚠️ SKIPPED (already open): {symbol}", flush=True)
+
+        else:
+            print(f"⛔ BLOCKED: {symbol} | {hold_reason} | {subtier}", flush=True)
+
         # =========================
         # 🧠 EXIT ENGINE
         # =========================
@@ -238,7 +221,7 @@ def webhook():
 
             pnl_percent = pnl * 100
 
-            # 🔥 Update peak
+            # Update peak
             if pnl_percent > (peak_pnl or 0):
                 cur.execute("""
                     UPDATE bot_trades
@@ -255,11 +238,17 @@ def webhook():
             if ENABLE_GIVEBACK_EXIT and peak_pnl:
 
                 if peak_pnl >= PROTECT_PROFIT_THRESHOLD:
-                    if pnl_percent < peak_pnl * GIVEBACK_RATIO:
+
+                    giveback_level = peak_pnl * GIVEBACK_RATIO
+
+                    print(f"📈 {sym} peak={peak_pnl:.3f}% | current={pnl_percent:.3f}% | giveback={giveback_level:.3f}%", flush=True)
+
+                    if pnl_percent < giveback_level:
                         close_reason = "giveback_exit"
+                        print(f"💡 GIVEBACK TRIGGERED: {sym}", flush=True)
 
             # =========================
-            # EXISTING LOGIC (fallback)
+            # FALLBACK EXITS
             # =========================
             if not close_reason:
 
@@ -307,12 +296,14 @@ def webhook():
                     tid
                 ))
 
+                print(f"💰 CLOSED: {sym} | {close_reason} | {round(pnl_percent,3)}%", flush=True)
+
         conn.commit()
         cur.close()
         conn.close()
 
-        return jsonify(debug_payload), 200
+        return jsonify({"status": "ok"}), 200
 
     except Exception as e:
-        print("❌ WEBHOOK ERROR:", e)
+        print("❌ WEBHOOK ERROR:", e, flush=True)
         return jsonify({"error": str(e)}), 400
