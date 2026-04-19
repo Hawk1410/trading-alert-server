@@ -1,16 +1,16 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.15
+# VERSION: v3.15.1
 # DEPLOYED: 2026-04-19
 # NOTES:
-# - ✅ FIXED logging visibility (flush=True)
-# - ✅ Added webhook hit logging
-# - ✅ Added giveback debug prints
+# - ✅ HARD LOCKED data_version (v3.15.1)
+# - ✅ Ensures clean dataset separation
+# - ✅ Logging visibility confirmed
 # - ✅ No strategy logic changes
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v3.15 RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v3.15.1 RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -33,22 +33,12 @@ ENABLE_GIVEBACK_EXIT = True
 PROTECT_PROFIT_THRESHOLD = 0.2
 GIVEBACK_RATIO = 0.5
 
+# 🔥 LOCKED VERSION
+DATA_VERSION = "v3.15.1"
+
 
 def get_db():
     return psycopg2.connect(DATABASE_URL)
-
-
-# =========================
-# 🧠 DEBUG BUFFER
-# =========================
-DEBUG_SIGNALS = []
-MAX_DEBUG_SIGNALS = 50
-
-
-def add_debug_signal(signal):
-    DEBUG_SIGNALS.append(signal)
-    if len(DEBUG_SIGNALS) > MAX_DEBUG_SIGNALS:
-        DEBUG_SIGNALS.pop(0)
 
 
 # =========================
@@ -84,16 +74,8 @@ def ping():
 @app.route("/version", methods=["GET"])
 def version():
     return jsonify({
-        "version": "v3.15",
+        "version": DATA_VERSION,
         "status": "running"
-    })
-
-
-@app.route("/debug_signals", methods=["GET"])
-def debug_signals():
-    return jsonify({
-        "count": len(DEBUG_SIGNALS),
-        "signals": DEBUG_SIGNALS
     })
 
 
@@ -103,7 +85,7 @@ def debug_signals():
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
-        print("📩 WEBHOOK HIT", flush=True)
+        print(f"📩 WEBHOOK HIT | {DATA_VERSION}", flush=True)
 
         data = request.get_json(force=True)
 
@@ -113,7 +95,9 @@ def webhook():
         momentum = float(data.get("momentum_strength", 0))
         trend = float(data.get("trend_strength", 0))
         alignment = data.get("trend_alignment")
-        data_version = data.get("data_version", "V3_UNKNOWN")
+
+        # 🔥 FORCE VERSION
+        data_version = DATA_VERSION
 
         if decision:
             decision = decision.upper().strip()
@@ -191,7 +175,7 @@ def webhook():
                         0
                     ))
 
-                    print(f"🚀 OPEN: {symbol} | {subtier}", flush=True)
+                    print(f"🚀 OPEN: {symbol} | {subtier} | {DATA_VERSION}", flush=True)
 
                 else:
                     print(f"⚠️ SKIPPED (already open): {symbol}", flush=True)
@@ -221,7 +205,6 @@ def webhook():
 
             pnl_percent = pnl * 100
 
-            # Update peak
             if pnl_percent > (peak_pnl or 0):
                 cur.execute("""
                     UPDATE bot_trades
@@ -232,13 +215,9 @@ def webhook():
             mins = (now - opened_at).total_seconds() / 60
             close_reason = None
 
-            # =========================
-            # 💰 GIVEBACK ENGINE
-            # =========================
+            # GIVEBACK
             if ENABLE_GIVEBACK_EXIT and peak_pnl:
-
                 if peak_pnl >= PROTECT_PROFIT_THRESHOLD:
-
                     giveback_level = peak_pnl * GIVEBACK_RATIO
 
                     print(f"📈 {sym} peak={peak_pnl:.3f}% | current={pnl_percent:.3f}% | giveback={giveback_level:.3f}%", flush=True)
@@ -247,9 +226,7 @@ def webhook():
                         close_reason = "giveback_exit"
                         print(f"💡 GIVEBACK TRIGGERED: {sym}", flush=True)
 
-            # =========================
-            # FALLBACK EXITS
-            # =========================
+            # FALLBACK
             if not close_reason:
 
                 if pnl < -0.004:
@@ -296,7 +273,7 @@ def webhook():
                     tid
                 ))
 
-                print(f"💰 CLOSED: {sym} | {close_reason} | {round(pnl_percent,3)}%", flush=True)
+                print(f"💰 CLOSED: {sym} | {close_reason} | {round(pnl_percent,3)}% | {DATA_VERSION}", flush=True)
 
         conn.commit()
         cur.close()
