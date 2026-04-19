@@ -8,6 +8,7 @@
 # - ✅ entry_momentum + entry_trend retained
 # - ✅ exit_momentum + exit_trend retained
 # - ✅ Peak PnL tracking preserved
+# - ✅ Added MAX_OPEN_TRADES enforcement
 # - ❌ NO strategy logic changes
 # =========================
 
@@ -187,42 +188,52 @@ def webhook():
         # =========================
         if action == "OPEN":
 
+            # GLOBAL exposure check (NEW)
             cur.execute("""
                 SELECT COUNT(*) FROM bot_trades
-                WHERE symbol=%s AND status='OPEN'
-            """, (symbol,))
-            exists = cur.fetchone()[0]
+                WHERE status='OPEN'
+            """)
+            total_open = cur.fetchone()[0]
 
-            if exists == 0:
-
+            if total_open >= MAX_OPEN_TRADES:
+                print(f"⚠️ MAX OPEN TRADES REACHED ({total_open})")
+            else:
                 cur.execute("""
-                    INSERT INTO bot_trades (
+                    SELECT COUNT(*) FROM bot_trades
+                    WHERE symbol=%s AND status='OPEN'
+                """, (symbol,))
+                exists = cur.fetchone()[0]
+
+                if exists == 0:
+
+                    cur.execute("""
+                        INSERT INTO bot_trades (
+                            symbol,
+                            direction,
+                            entry_price,
+                            status,
+                            opened_at,
+                            tier,
+                            data_version,
+                            entry_momentum,
+                            entry_trend,
+                            peak_pnl_percent
+                        )
+                        VALUES (%s,%s,%s,'OPEN',NOW(),%s,%s,%s,%s,%s)
+                    """, (
                         symbol,
-                        direction,
-                        entry_price,
-                        status,
-                        opened_at,
+                        decision,
+                        price,
                         tier,
                         data_version,
-                        entry_momentum,
-                        entry_trend,
-                        peak_pnl_percent
-                    )
-                    VALUES (%s,%s,%s,'OPEN',NOW(),%s,%s,%s,%s,%s)
-                """, (
-                    symbol,
-                    decision,
-                    price,
-                    tier,
-                    data_version,
-                    momentum,
-                    trend,
-                    0
-                ))
+                        momentum,
+                        trend,
+                        0
+                    ))
 
-                print(f"🚀 OPEN: {symbol} | {subtier}")
-            else:
-                print(f"⚠️ SKIPPED (already open): {symbol}")
+                    print(f"🚀 OPEN: {symbol} | {subtier}")
+                else:
+                    print(f"⚠️ SKIPPED (already open): {symbol}")
 
         else:
             print(f"⛔ BLOCKED: {symbol} | {hold_reason} | {subtier}")
