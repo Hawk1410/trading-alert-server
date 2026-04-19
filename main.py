@@ -1,19 +1,15 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.13
+# VERSION: v3.14
 # DEPLOYED: 2026-04-19
 # NOTES:
-# - ✅ Re-enabled entry_tier + entry_subtier logging
-# - ✅ DB now aligned (columns exist)
-# - ✅ entry_momentum + entry_trend retained
-# - ✅ exit_momentum + exit_trend retained
-# - ✅ Peak PnL tracking preserved
-# - ✅ MAX_OPEN_TRADES enforced
-# - ❌ NO strategy logic changes
+# - ✅ Added GIVEBACK EXIT ENGINE (core edge unlock)
+# - ✅ Toggle controlled (ENABLE_GIVEBACK_EXIT)
+# - ✅ No entry logic changes
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v3.13 RUNNING 🔥🔥🔥")
+print("🔥🔥🔥 MAIN.PY v3.14 RUNNING 🔥🔥🔥")
 
 from flask import Flask, request, jsonify
 import os
@@ -23,6 +19,24 @@ from datetime import datetime
 app = Flask(__name__)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
+
+# =========================
+# ⚙️ CONFIG
+# =========================
+MAX_OPEN_TRADES = 7
+MIN_TREND = 0.20
+MIN_MOM = 0.05
+TRADE_SIZE_GBP = 100
+
+# 🔥 NEW EDGE CONFIG
+ENABLE_GIVEBACK_EXIT = True
+PROTECT_PROFIT_THRESHOLD = 0.2   # % profit before protection activates
+GIVEBACK_RATIO = 0.5             # allow 50% giveback
+
+
+def get_db():
+    return psycopg2.connect(DATABASE_URL)
+
 
 # =========================
 # 🧠 DEBUG BUFFER
@@ -35,19 +49,6 @@ def add_debug_signal(signal):
     DEBUG_SIGNALS.append(signal)
     if len(DEBUG_SIGNALS) > MAX_DEBUG_SIGNALS:
         DEBUG_SIGNALS.pop(0)
-
-
-# =========================
-# ⚙️ CONFIG
-# =========================
-MAX_OPEN_TRADES = 7
-MIN_TREND = 0.20
-MIN_MOM = 0.05
-TRADE_SIZE_GBP = 100
-
-
-def get_db():
-    return psycopg2.connect(DATABASE_URL)
 
 
 # =========================
@@ -83,7 +84,7 @@ def ping():
 @app.route("/version", methods=["GET"])
 def version():
     return jsonify({
-        "version": "v3.13",
+        "version": "v3.14",
         "status": "running"
     })
 
@@ -147,9 +148,6 @@ def webhook():
 
         action = "OPEN" if hold_reason is None else "BLOCKED"
 
-        # =========================
-        # 🧠 DEBUG PAYLOAD
-        # =========================
         debug_payload = {
             "time": now.isoformat(),
             "symbol": symbol,
@@ -169,7 +167,7 @@ def webhook():
         cur = conn.cursor()
 
         # =========================
-        # 🧾 DEBUG LOG DB
+        # 🧾 DEBUG LOG
         # =========================
         cur.execute("""
             INSERT INTO debug_signals_log (
@@ -185,20 +183,15 @@ def webhook():
         ))
 
         # =========================
-        # 🚀 ENTRY LOGIC
+        # 🚀 ENTRY
         # =========================
         if action == "OPEN":
 
-            # GLOBAL exposure check
-            cur.execute("""
-                SELECT COUNT(*) FROM bot_trades
-                WHERE status='OPEN'
-            """)
+            cur.execute("SELECT COUNT(*) FROM bot_trades WHERE status='OPEN'")
             total_open = cur.fetchone()[0]
 
-            if total_open >= MAX_OPEN_TRADES:
-                print(f"⚠️ MAX OPEN TRADES REACHED ({total_open})")
-            else:
+            if total_open < MAX_OPEN_TRADES:
+
                 cur.execute("""
                     SELECT COUNT(*) FROM bot_trades
                     WHERE symbol=%s AND status='OPEN'
@@ -206,42 +199,22 @@ def webhook():
                 exists = cur.fetchone()[0]
 
                 if exists == 0:
-
                     cur.execute("""
                         INSERT INTO bot_trades (
-                            symbol,
-                            direction,
-                            entry_price,
-                            status,
-                            opened_at,
-                            tier,
-                            data_version,
-                            entry_momentum,
-                            entry_trend,
-                            entry_tier,
-                            entry_subtier,
+                            symbol, direction, entry_price,
+                            status, opened_at, tier, data_version,
+                            entry_momentum, entry_trend,
+                            entry_tier, entry_subtier,
                             peak_pnl_percent
                         )
                         VALUES (%s,%s,%s,'OPEN',NOW(),%s,%s,%s,%s,%s,%s,%s)
                     """, (
-                        symbol,
-                        decision,
-                        price,
-                        tier,
-                        data_version,
-                        momentum,
-                        trend,
-                        tier,
-                        subtier,
+                        symbol, decision, price,
+                        tier, data_version,
+                        momentum, trend,
+                        tier, subtier,
                         0
                     ))
-
-                    print(f"🚀 OPEN: {symbol} | {subtier}")
-                else:
-                    print(f"⚠️ SKIPPED (already open): {symbol}")
-
-        else:
-            print(f"⛔ BLOCKED: {symbol} | {hold_reason} | {subtier}")
 
         # =========================
         # 🧠 EXIT ENGINE
@@ -260,13 +233,12 @@ def webhook():
             pnl = ((price - entry_price) / entry_price) if direction == "LONG" \
                   else ((entry_price - price) / entry_price)
 
-            # SAFETY CLAMP
             if abs(pnl) > 0.1:
-                print(f"⚠️ BAD PNL SKIPPED: {sym} | pnl={pnl}")
                 continue
 
             pnl_percent = pnl * 100
 
+            # 🔥 Update peak
             if pnl_percent > (peak_pnl or 0):
                 cur.execute("""
                     UPDATE bot_trades
@@ -277,23 +249,37 @@ def webhook():
             mins = (now - opened_at).total_seconds() / 60
             close_reason = None
 
-            if pnl < -0.004:
-                close_reason = "hard_stop"
+            # =========================
+            # 💰 GIVEBACK ENGINE
+            # =========================
+            if ENABLE_GIVEBACK_EXIT and peak_pnl:
 
-            elif pnl > 0.004 and mins < 10:
-                close_reason = "quick_profit"
+                if peak_pnl >= PROTECT_PROFIT_THRESHOLD:
+                    if pnl_percent < peak_pnl * GIVEBACK_RATIO:
+                        close_reason = "giveback_exit"
 
-            elif pnl > 0 and abs_mom < 0.1:
-                close_reason = "momentum_drop"
+            # =========================
+            # EXISTING LOGIC (fallback)
+            # =========================
+            if not close_reason:
 
-            elif pnl > 0 and alignment != "aligned":
-                close_reason = "trend_flip"
+                if pnl < -0.004:
+                    close_reason = "hard_stop"
 
-            elif mins > 20 and abs(pnl) < 0.001:
-                close_reason = "no_follow_through"
+                elif pnl > 0.004 and mins < 10:
+                    close_reason = "quick_profit"
 
-            elif mins > 60:
-                close_reason = "time_cut"
+                elif pnl > 0 and abs_mom < 0.1:
+                    close_reason = "momentum_drop"
+
+                elif pnl > 0 and alignment != "aligned":
+                    close_reason = "trend_flip"
+
+                elif mins > 20 and abs(pnl) < 0.001:
+                    close_reason = "no_follow_through"
+
+                elif mins > 60:
+                    close_reason = "time_cut"
 
             if close_reason:
                 pnl_gbp = (pnl_percent / 100) * TRADE_SIZE_GBP
@@ -320,8 +306,6 @@ def webhook():
                     trend,
                     tid
                 ))
-
-                print(f"💰 CLOSED: {sym} | {close_reason} | {round(pnl_percent,3)}% | £{round(pnl_gbp,2)}")
 
         conn.commit()
         cur.close()
