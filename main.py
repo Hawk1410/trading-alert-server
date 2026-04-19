@@ -1,18 +1,19 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.12.1
-# DEPLOYED: 2026-04-18
+# VERSION: v3.13
+# DEPLOYED: 2026-04-19
 # NOTES:
-# - ✅ FIXED DB column mismatch (removed entry_tier / entry_subtier)
+# - ✅ Re-enabled entry_tier + entry_subtier logging
+# - ✅ DB now aligned (columns exist)
 # - ✅ entry_momentum + entry_trend retained
 # - ✅ exit_momentum + exit_trend retained
 # - ✅ Peak PnL tracking preserved
-# - ✅ Added MAX_OPEN_TRADES enforcement
+# - ✅ MAX_OPEN_TRADES enforced
 # - ❌ NO strategy logic changes
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v3.12.1 RUNNING 🔥🔥🔥")
+print("🔥🔥🔥 MAIN.PY v3.13 RUNNING 🔥🔥🔥")
 
 from flask import Flask, request, jsonify
 import os
@@ -82,7 +83,7 @@ def ping():
 @app.route("/version", methods=["GET"])
 def version():
     return jsonify({
-        "version": "v3.12.1",
+        "version": "v3.13",
         "status": "running"
     })
 
@@ -188,7 +189,7 @@ def webhook():
         # =========================
         if action == "OPEN":
 
-            # GLOBAL exposure check (NEW)
+            # GLOBAL exposure check
             cur.execute("""
                 SELECT COUNT(*) FROM bot_trades
                 WHERE status='OPEN'
@@ -217,9 +218,11 @@ def webhook():
                             data_version,
                             entry_momentum,
                             entry_trend,
+                            entry_tier,
+                            entry_subtier,
                             peak_pnl_percent
                         )
-                        VALUES (%s,%s,%s,'OPEN',NOW(),%s,%s,%s,%s,%s)
+                        VALUES (%s,%s,%s,'OPEN',NOW(),%s,%s,%s,%s,%s,%s,%s)
                     """, (
                         symbol,
                         decision,
@@ -228,6 +231,8 @@ def webhook():
                         data_version,
                         momentum,
                         trend,
+                        tier,
+                        subtier,
                         0
                     ))
 
@@ -255,7 +260,7 @@ def webhook():
             pnl = ((price - entry_price) / entry_price) if direction == "LONG" \
                   else ((entry_price - price) / entry_price)
 
-            # 🚨 SAFETY CLAMP
+            # SAFETY CLAMP
             if abs(pnl) > 0.1:
                 print(f"⚠️ BAD PNL SKIPPED: {sym} | pnl={pnl}")
                 continue
