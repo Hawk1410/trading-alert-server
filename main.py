@@ -1,16 +1,17 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.15.1
+# VERSION: v3.15.2
 # DEPLOYED: 2026-04-19
 # NOTES:
-# - ✅ HARD LOCKED data_version (v3.15.1)
-# - ✅ Ensures clean dataset separation
-# - ✅ Logging visibility confirmed
-# - ✅ No strategy logic changes
+# - ✅ JSON fallback fix (TradingView safe)
+# - ✅ RAW webhook logging added
+# - ✅ Shadow momentum filter (toggle only, no behaviour change)
+# - ✅ Structure score logging added
+# - ✅ No schema changes (safe deploy)
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v3.15.1 RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v3.15.2 RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -33,8 +34,11 @@ ENABLE_GIVEBACK_EXIT = True
 PROTECT_PROFIT_THRESHOLD = 0.2
 GIVEBACK_RATIO = 0.5
 
+# 🔥 SHADOW TOGGLE (NO EXECUTION IMPACT)
+ENABLE_MOMENTUM_FILTER = True
+
 # 🔥 LOCKED VERSION
-DATA_VERSION = "v3.15.1"
+DATA_VERSION = "v3.15.2"
 
 
 def get_db():
@@ -89,11 +93,26 @@ def webhook():
 
         data = request.get_json(force=True)
 
+        # 🔥 RAW DEBUG (CRITICAL)
+        print(f"📦 RAW DATA: {data}", flush=True)
+
         symbol = data.get("symbol")
-        decision = data.get("decision_model")
-        price = float(data.get("price", 0))
-        momentum = float(data.get("momentum_strength", 0))
-        trend = float(data.get("trend_strength", 0))
+
+        # 🔥 JSON FALLBACK FIX
+        decision = data.get("decision_model") or data.get("decision")
+
+        momentum = float(
+            data.get("momentum_strength")
+            or data.get("momentum")
+            or 0
+        )
+
+        trend = float(
+            data.get("trend_strength")
+            or data.get("trend")
+            or 0
+        )
+
         alignment = data.get("trend_alignment")
 
         # 🔥 FORCE VERSION
@@ -111,6 +130,35 @@ def webhook():
         abs_trend = abs(trend)
 
         tier, subtier = classify_trade(momentum, trend)
+
+        # =========================
+        # 🧠 EXTRA LOGGING
+        # =========================
+        structure_score = round(abs_mom * abs_trend, 3)
+
+        print(f"📊 SIGNAL: {symbol} | {decision} | mom={momentum:.3f} | trend={trend:.3f} | {tier}/{subtier}", flush=True)
+        print(f"📈 DIR: {symbol} | {decision}", flush=True)
+        print(f"🧠 STRUCTURE: {symbol} | score={structure_score}", flush=True)
+
+        # =========================
+        # 🧪 SHADOW MOMENTUM FILTER
+        # =========================
+        mom_band = None
+        shadow_would_skip = False
+
+        if abs_mom < 0.5:
+            mom_band = "LOW"
+        elif abs_mom < 1.0:
+            mom_band = "MID"
+        elif abs_mom < 2.0:
+            mom_band = "HIGH"
+        else:
+            mom_band = "EXTREME"
+
+        if ENABLE_MOMENTUM_FILTER and mom_band in ["HIGH", "EXTREME"]:
+            shadow_would_skip = True
+
+        print(f"🧪 SHADOW: {symbol} | band={mom_band} | would_skip={shadow_would_skip}", flush=True)
 
         hold_reason = None
 
@@ -133,8 +181,6 @@ def webhook():
             hold_reason = "low_quality"
 
         action = "OPEN" if hold_reason is None else "BLOCKED"
-
-        print(f"📊 SIGNAL: {symbol} | {decision} | mom={momentum:.3f} | trend={trend:.3f} | {tier}/{subtier}", flush=True)
 
         conn = get_db()
         cur = conn.cursor()
