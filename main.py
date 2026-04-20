@@ -8,7 +8,7 @@
 # - ✅ RAW webhook logging added
 # - ✅ Shadow momentum filter (toggle only, no behaviour change)
 # - ✅ Structure score logging added
-# - ✅ No schema changes (safe deploy)
+# - ✅ FIXED: price not defined bug
 # =========================
 
 print("🔥🔥🔥 MAIN.PY v3.15.2 RUNNING 🔥🔥🔥", flush=True)
@@ -93,12 +93,15 @@ def webhook():
 
         data = request.get_json(force=True)
 
-        # 🔥 RAW DEBUG (CRITICAL)
+        # 🔥 RAW DEBUG
         print(f"📦 RAW DATA: {data}", flush=True)
 
         symbol = data.get("symbol")
 
-        # 🔥 JSON FALLBACK FIX
+        # 🔥 FIX: PRICE (CRITICAL)
+        price = float(data.get("price", 0))
+
+        # 🔥 JSON FALLBACK
         decision = data.get("decision_model") or data.get("decision")
 
         momentum = float(
@@ -115,7 +118,6 @@ def webhook():
 
         alignment = data.get("trend_alignment")
 
-        # 🔥 FORCE VERSION
         data_version = DATA_VERSION
 
         if decision:
@@ -132,7 +134,7 @@ def webhook():
         tier, subtier = classify_trade(momentum, trend)
 
         # =========================
-        # 🧠 EXTRA LOGGING
+        # 🧠 LOGGING
         # =========================
         structure_score = round(abs_mom * abs_trend, 3)
 
@@ -141,11 +143,8 @@ def webhook():
         print(f"🧠 STRUCTURE: {symbol} | score={structure_score}", flush=True)
 
         # =========================
-        # 🧪 SHADOW MOMENTUM FILTER
+        # 🧪 SHADOW FILTER
         # =========================
-        mom_band = None
-        shadow_would_skip = False
-
         if abs_mom < 0.5:
             mom_band = "LOW"
         elif abs_mom < 1.0:
@@ -155,8 +154,7 @@ def webhook():
         else:
             mom_band = "EXTREME"
 
-        if ENABLE_MOMENTUM_FILTER and mom_band in ["HIGH", "EXTREME"]:
-            shadow_would_skip = True
+        shadow_would_skip = ENABLE_MOMENTUM_FILTER and mom_band in ["HIGH", "EXTREME"]
 
         print(f"🧪 SHADOW: {symbol} | band={mom_band} | would_skip={shadow_would_skip}", flush=True)
 
@@ -261,7 +259,6 @@ def webhook():
             mins = (now - opened_at).total_seconds() / 60
             close_reason = None
 
-            # GIVEBACK
             if ENABLE_GIVEBACK_EXIT and peak_pnl:
                 if peak_pnl >= PROTECT_PROFIT_THRESHOLD:
                     giveback_level = peak_pnl * GIVEBACK_RATIO
@@ -272,7 +269,6 @@ def webhook():
                         close_reason = "giveback_exit"
                         print(f"💡 GIVEBACK TRIGGERED: {sym}", flush=True)
 
-            # FALLBACK
             if not close_reason:
 
                 if pnl < -0.004:
