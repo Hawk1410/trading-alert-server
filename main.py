@@ -1,17 +1,16 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.15.2
-# DEPLOYED: 2026-04-19
+# VERSION: v3.15.3
+# DEPLOYED: 2026-04-20
 # NOTES:
-# - ✅ JSON fallback fix (TradingView safe)
-# - ✅ RAW webhook logging added
-# - ✅ Shadow momentum filter (toggle only, no behaviour change)
-# - ✅ Structure score logging added
-# - ✅ FIXED: price not defined bug
+# - ✅ LIVE momentum filter (HIGH only)
+# - ✅ EXTREME trades still allowed
+# - ✅ Shadow logging still active
+# - ✅ No schema changes
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v3.15.2 RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v3.15.3 RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -34,11 +33,11 @@ ENABLE_GIVEBACK_EXIT = True
 PROTECT_PROFIT_THRESHOLD = 0.2
 GIVEBACK_RATIO = 0.5
 
-# 🔥 SHADOW TOGGLE (NO EXECUTION IMPACT)
-ENABLE_MOMENTUM_FILTER = True
+# 🔥 FILTER TOGGLES
+ENABLE_MOMENTUM_FILTER = True   # now affects execution
 
 # 🔥 LOCKED VERSION
-DATA_VERSION = "v3.15.2"
+DATA_VERSION = "v3.15.3"
 
 
 def get_db():
@@ -93,12 +92,11 @@ def webhook():
 
         data = request.get_json(force=True)
 
-        # 🔥 RAW DEBUG
         print(f"📦 RAW DATA: {data}", flush=True)
 
         symbol = data.get("symbol")
 
-        # 🔥 FIX: PRICE (CRITICAL)
+        # 🔥 PRICE FIX
         price = float(data.get("price", 0))
 
         # 🔥 JSON FALLBACK
@@ -143,7 +141,7 @@ def webhook():
         print(f"🧠 STRUCTURE: {symbol} | score={structure_score}", flush=True)
 
         # =========================
-        # 🧪 SHADOW FILTER
+        # 🧪 MOMENTUM BANDING
         # =========================
         if abs_mom < 0.5:
             mom_band = "LOW"
@@ -154,9 +152,21 @@ def webhook():
         else:
             mom_band = "EXTREME"
 
-        shadow_would_skip = ENABLE_MOMENTUM_FILTER and mom_band in ["HIGH", "EXTREME"]
+        # -------------------------
+        # SHADOW (unchanged)
+        # -------------------------
+        shadow_would_skip = mom_band in ["HIGH", "EXTREME"]
 
         print(f"🧪 SHADOW: {symbol} | band={mom_band} | would_skip={shadow_would_skip}", flush=True)
+
+        # -------------------------
+        # 🔥 LIVE FILTER (NEW)
+        # -------------------------
+        live_filter_block = False
+
+        if ENABLE_MOMENTUM_FILTER:
+            if mom_band == "HIGH":
+                live_filter_block = True
 
         hold_reason = None
 
@@ -174,6 +184,9 @@ def webhook():
 
         elif abs_mom < MIN_MOM:
             hold_reason = "momentum_too_weak"
+
+        elif live_filter_block:
+            hold_reason = "filtered_high_momentum"
 
         if hold_reason is None and tier != "A":
             hold_reason = "low_quality"
@@ -267,7 +280,6 @@ def webhook():
 
                     if pnl_percent < giveback_level:
                         close_reason = "giveback_exit"
-                        print(f"💡 GIVEBACK TRIGGERED: {sym}", flush=True)
 
             if not close_reason:
 
