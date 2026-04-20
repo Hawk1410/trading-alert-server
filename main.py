@@ -1,18 +1,16 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.15.4
+# VERSION: v3.15.5
 # DEPLOYED: 2026-04-20
 # NOTES:
 # - ✅ LIVE momentum filter (HIGH only)
 # - ✅ EXTREME trades still allowed
-# - ✅ Regime logging added
-# - ✅ Market condition logging added
-# - ✅ Structure bucket logging added
-# - ✅ No behaviour change beyond filter
+# - ✅ Regime + Market + Structure STORED in DB
+# - ✅ Proper analytics foundation
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v3.15.3 RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v3.15.5 RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -37,7 +35,7 @@ GIVEBACK_RATIO = 0.5
 
 ENABLE_MOMENTUM_FILTER = True
 
-DATA_VERSION = "v3.15.3"
+DATA_VERSION = "v3.15.5"
 
 
 def get_db():
@@ -62,7 +60,7 @@ def classify_trade(momentum, trend):
 
 
 # =========================
-# 🧠 REGIME CLASSIFICATION
+# 🧠 REGIME
 # =========================
 def classify_regime(abs_trend):
     if abs_trend >= 0.25:
@@ -78,14 +76,10 @@ def classify_regime(abs_trend):
 # =========================
 def classify_market(regime, mom_band):
     if regime == "TRENDING":
-        if mom_band in ["HIGH", "EXTREME"]:
-            return "TRENDING_OVEREXTENDED"
-        return "TRENDING_CLEAN"
+        return "TRENDING_OVEREXTENDED" if mom_band in ["HIGH", "EXTREME"] else "TRENDING_CLEAN"
 
     if regime == "TRANSITION":
-        if mom_band in ["HIGH", "EXTREME"]:
-            return "TRANSITION_OVEREXTENDED"
-        return "TRANSITION_CLEAN"
+        return "TRANSITION_OVEREXTENDED" if mom_band in ["HIGH", "EXTREME"] else "TRANSITION_CLEAN"
 
     return "CHOP"
 
@@ -146,20 +140,17 @@ def webhook():
         tier, subtier = classify_trade(momentum, trend)
 
         # =========================
-        # 🧠 STRUCTURE + REGIME
+        # 🧠 STRUCTURE
         # =========================
         structure_score = round(abs_mom * abs_trend, 3)
 
-        if structure_score >= 0.15:
-            structure_bucket = "HIGH_STRUCT"
-        else:
-            structure_bucket = "MID_STRUCT"
+        structure_bucket = "HIGH_STRUCT" if structure_score >= 0.15 else "MID_STRUCT"
 
+        # =========================
+        # 🧠 REGIME + MOM BAND
+        # =========================
         regime = classify_regime(abs_trend)
 
-        # =========================
-        # 🧪 MOMENTUM BAND
-        # =========================
         if abs_mom < 0.5:
             mom_band = "LOW"
         elif abs_mom < 1.0:
@@ -172,7 +163,7 @@ def webhook():
         market_condition = classify_market(regime, mom_band)
 
         print(f"📊 SIGNAL: {symbol} | {decision} | mom={momentum:.3f} | trend={trend:.3f} | {tier}/{subtier}", flush=True)
-        print(f"🧠 STRUCTURE: {symbol} | score={structure_score} | {structure_bucket}", flush=True)
+        print(f"🧠 STRUCTURE: {symbol} | {structure_bucket}", flush=True)
         print(f"🌍 REGIME: {symbol} | {regime}", flush=True)
         print(f"🌡️ MARKET: {symbol} | {market_condition}", flush=True)
 
@@ -207,7 +198,7 @@ def webhook():
         cur = conn.cursor()
 
         # =========================
-        # 🚀 ENTRY
+        # 🚀 ENTRY (UPDATED)
         # =========================
         if action == "OPEN":
 
@@ -229,21 +220,25 @@ def webhook():
                             status, opened_at, tier, data_version,
                             entry_momentum, entry_trend,
                             entry_tier, entry_subtier,
-                            peak_pnl_percent
+                            peak_pnl_percent,
+                            regime, market_condition,
+                            structure_bucket, mom_band
                         )
-                        VALUES (%s,%s,%s,'OPEN',NOW(),%s,%s,%s,%s,%s,%s,%s)
+                        VALUES (%s,%s,%s,'OPEN',NOW(),%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     """, (
                         symbol, decision, price,
                         tier, DATA_VERSION,
                         momentum, trend,
                         tier, subtier,
-                        0
+                        0,
+                        regime, market_condition,
+                        structure_bucket, mom_band
                     ))
 
-                    print(f"🚀 OPEN: {symbol} | {subtier} | {regime} | {market_condition}", flush=True)
+                    print(f"🚀 OPEN: {symbol} | {subtier} | {market_condition}", flush=True)
 
         else:
-            print(f"⛔ BLOCKED: {symbol} | {hold_reason} | {regime}", flush=True)
+            print(f"⛔ BLOCKED: {symbol} | {hold_reason} | {market_condition}", flush=True)
 
         # =========================
         # 🧠 EXIT ENGINE (unchanged)
