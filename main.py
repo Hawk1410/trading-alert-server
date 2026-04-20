@@ -1,13 +1,15 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.15.3
+# VERSION: v3.15.4
 # DEPLOYED: 2026-04-20
 # NOTES:
 # - ✅ LIVE momentum filter (HIGH only)
 # - ✅ EXTREME trades still allowed
-# - ✅ Shadow logging still active
-# - ✅ No schema changes
+# - ✅ Regime logging added
+# - ✅ Market condition logging added
+# - ✅ Structure bucket logging added
+# - ✅ No behaviour change beyond filter
 # =========================
 
 print("🔥🔥🔥 MAIN.PY v3.15.3 RUNNING 🔥🔥🔥", flush=True)
@@ -33,10 +35,8 @@ ENABLE_GIVEBACK_EXIT = True
 PROTECT_PROFIT_THRESHOLD = 0.2
 GIVEBACK_RATIO = 0.5
 
-# 🔥 FILTER TOGGLES
-ENABLE_MOMENTUM_FILTER = True   # now affects execution
+ENABLE_MOMENTUM_FILTER = True
 
-# 🔥 LOCKED VERSION
 DATA_VERSION = "v3.15.3"
 
 
@@ -59,6 +59,35 @@ def classify_trade(momentum, trend):
         return "B", "B"
 
     return "C", "C"
+
+
+# =========================
+# 🧠 REGIME CLASSIFICATION
+# =========================
+def classify_regime(abs_trend):
+    if abs_trend >= 0.25:
+        return "TRENDING"
+    elif abs_trend >= 0.15:
+        return "TRANSITION"
+    else:
+        return "CHOP"
+
+
+# =========================
+# 🧠 MARKET CONDITION
+# =========================
+def classify_market(regime, mom_band):
+    if regime == "TRENDING":
+        if mom_band in ["HIGH", "EXTREME"]:
+            return "TRENDING_OVEREXTENDED"
+        return "TRENDING_CLEAN"
+
+    if regime == "TRANSITION":
+        if mom_band in ["HIGH", "EXTREME"]:
+            return "TRANSITION_OVEREXTENDED"
+        return "TRANSITION_CLEAN"
+
+    return "CHOP"
 
 
 # =========================
@@ -91,32 +120,17 @@ def webhook():
         print(f"📩 WEBHOOK HIT | {DATA_VERSION}", flush=True)
 
         data = request.get_json(force=True)
-
         print(f"📦 RAW DATA: {data}", flush=True)
 
         symbol = data.get("symbol")
-
-        # 🔥 PRICE FIX
         price = float(data.get("price", 0))
 
-        # 🔥 JSON FALLBACK
         decision = data.get("decision_model") or data.get("decision")
 
-        momentum = float(
-            data.get("momentum_strength")
-            or data.get("momentum")
-            or 0
-        )
-
-        trend = float(
-            data.get("trend_strength")
-            or data.get("trend")
-            or 0
-        )
+        momentum = float(data.get("momentum_strength") or data.get("momentum") or 0)
+        trend = float(data.get("trend_strength") or data.get("trend") or 0)
 
         alignment = data.get("trend_alignment")
-
-        data_version = DATA_VERSION
 
         if decision:
             decision = decision.upper().strip()
@@ -132,16 +146,19 @@ def webhook():
         tier, subtier = classify_trade(momentum, trend)
 
         # =========================
-        # 🧠 LOGGING
+        # 🧠 STRUCTURE + REGIME
         # =========================
         structure_score = round(abs_mom * abs_trend, 3)
 
-        print(f"📊 SIGNAL: {symbol} | {decision} | mom={momentum:.3f} | trend={trend:.3f} | {tier}/{subtier}", flush=True)
-        print(f"📈 DIR: {symbol} | {decision}", flush=True)
-        print(f"🧠 STRUCTURE: {symbol} | score={structure_score}", flush=True)
+        if structure_score >= 0.15:
+            structure_bucket = "HIGH_STRUCT"
+        else:
+            structure_bucket = "MID_STRUCT"
+
+        regime = classify_regime(abs_trend)
 
         # =========================
-        # 🧪 MOMENTUM BANDING
+        # 🧪 MOMENTUM BAND
         # =========================
         if abs_mom < 0.5:
             mom_band = "LOW"
@@ -152,27 +169,20 @@ def webhook():
         else:
             mom_band = "EXTREME"
 
-        # -------------------------
-        # SHADOW (unchanged)
-        # -------------------------
-        shadow_would_skip = mom_band in ["HIGH", "EXTREME"]
+        market_condition = classify_market(regime, mom_band)
 
-        print(f"🧪 SHADOW: {symbol} | band={mom_band} | would_skip={shadow_would_skip}", flush=True)
+        print(f"📊 SIGNAL: {symbol} | {decision} | mom={momentum:.3f} | trend={trend:.3f} | {tier}/{subtier}", flush=True)
+        print(f"🧠 STRUCTURE: {symbol} | score={structure_score} | {structure_bucket}", flush=True)
+        print(f"🌍 REGIME: {symbol} | {regime}", flush=True)
+        print(f"🌡️ MARKET: {symbol} | {market_condition}", flush=True)
 
-        # -------------------------
-        # 🔥 LIVE FILTER (NEW)
-        # -------------------------
-        live_filter_block = False
-
-        if ENABLE_MOMENTUM_FILTER:
-            if mom_band == "HIGH":
-                live_filter_block = True
+        # =========================
+        # 🔥 LIVE FILTER
+        # =========================
+        live_filter_block = ENABLE_MOMENTUM_FILTER and mom_band == "HIGH"
 
         hold_reason = None
 
-        # =========================
-        # 🔥 ENTRY FILTER
-        # =========================
         if decision not in ["LONG", "SHORT"]:
             hold_reason = "no_decision"
 
@@ -204,10 +214,8 @@ def webhook():
             cur.execute("SELECT COUNT(*) FROM bot_trades WHERE status='OPEN'")
             total_open = cur.fetchone()[0]
 
-            if total_open >= MAX_OPEN_TRADES:
-                print(f"⚠️ MAX OPEN TRADES REACHED ({total_open})", flush=True)
+            if total_open < MAX_OPEN_TRADES:
 
-            else:
                 cur.execute("""
                     SELECT COUNT(*) FROM bot_trades
                     WHERE symbol=%s AND status='OPEN'
@@ -226,22 +234,19 @@ def webhook():
                         VALUES (%s,%s,%s,'OPEN',NOW(),%s,%s,%s,%s,%s,%s,%s)
                     """, (
                         symbol, decision, price,
-                        tier, data_version,
+                        tier, DATA_VERSION,
                         momentum, trend,
                         tier, subtier,
                         0
                     ))
 
-                    print(f"🚀 OPEN: {symbol} | {subtier} | {DATA_VERSION}", flush=True)
-
-                else:
-                    print(f"⚠️ SKIPPED (already open): {symbol}", flush=True)
+                    print(f"🚀 OPEN: {symbol} | {subtier} | {regime} | {market_condition}", flush=True)
 
         else:
-            print(f"⛔ BLOCKED: {symbol} | {hold_reason} | {subtier}", flush=True)
+            print(f"⛔ BLOCKED: {symbol} | {hold_reason} | {regime}", flush=True)
 
         # =========================
-        # 🧠 EXIT ENGINE
+        # 🧠 EXIT ENGINE (unchanged)
         # =========================
         cur.execute("""
             SELECT id, symbol, direction, entry_price, opened_at, peak_pnl_percent
@@ -263,41 +268,27 @@ def webhook():
             pnl_percent = pnl * 100
 
             if pnl_percent > (peak_pnl or 0):
-                cur.execute("""
-                    UPDATE bot_trades
-                    SET peak_pnl_percent = %s
-                    WHERE id = %s
-                """, (pnl_percent, tid))
+                cur.execute("UPDATE bot_trades SET peak_pnl_percent=%s WHERE id=%s", (pnl_percent, tid))
 
             mins = (now - opened_at).total_seconds() / 60
             close_reason = None
 
             if ENABLE_GIVEBACK_EXIT and peak_pnl:
                 if peak_pnl >= PROTECT_PROFIT_THRESHOLD:
-                    giveback_level = peak_pnl * GIVEBACK_RATIO
-
-                    print(f"📈 {sym} peak={peak_pnl:.3f}% | current={pnl_percent:.3f}% | giveback={giveback_level:.3f}%", flush=True)
-
-                    if pnl_percent < giveback_level:
+                    if pnl_percent < peak_pnl * GIVEBACK_RATIO:
                         close_reason = "giveback_exit"
 
             if not close_reason:
-
                 if pnl < -0.004:
                     close_reason = "hard_stop"
-
                 elif pnl > 0.004 and mins < 10:
                     close_reason = "quick_profit"
-
                 elif pnl > 0 and abs_mom < 0.1:
                     close_reason = "momentum_drop"
-
                 elif pnl > 0 and alignment != "aligned":
                     close_reason = "trend_flip"
-
                 elif mins > 20 and abs(pnl) < 0.001:
                     close_reason = "no_follow_through"
-
                 elif mins > 60:
                     close_reason = "time_cut"
 
@@ -317,17 +308,11 @@ def webhook():
                         exit_trend=%s
                     WHERE id=%s
                 """, (
-                    price,
-                    pnl_percent,
-                    pnl_gbp,
-                    TRADE_SIZE_GBP,
-                    close_reason,
-                    momentum,
-                    trend,
-                    tid
+                    price, pnl_percent, pnl_gbp, TRADE_SIZE_GBP,
+                    close_reason, momentum, trend, tid
                 ))
 
-                print(f"💰 CLOSED: {sym} | {close_reason} | {round(pnl_percent,3)}% | {DATA_VERSION}", flush=True)
+                print(f"💰 CLOSED: {sym} | {close_reason} | {round(pnl_percent,3)}%", flush=True)
 
         conn.commit()
         cur.close()
