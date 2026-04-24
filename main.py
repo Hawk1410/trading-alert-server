@@ -1,15 +1,15 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.15.6
-# DEPLOYED: 2026-04-21
+# VERSION: v3.16.0
+# DEPLOYED: 2026-04-XX
 # NOTES:
-# - ✅ Prime setup tracking added
-# - ✅ Scenario classification added
-# - ✅ NO behaviour change (tracking only)
+# - ✅ Shadow trades added (NO behaviour change)
+# - ✅ Logs blocked opportunities
+# - ✅ Fully compatible with v3.15.6 schema
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v3.15.6 RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v3.16.0 RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -33,8 +33,9 @@ PROTECT_PROFIT_THRESHOLD = 0.2
 GIVEBACK_RATIO = 0.5
 
 ENABLE_MOMENTUM_FILTER = True
+ENABLE_SHADOW_TRADES = True  # 🔥 NEW
 
-DATA_VERSION = "v3.15.6"
+DATA_VERSION = "v3.16.0"
 
 
 def get_db():
@@ -58,9 +59,6 @@ def classify_trade(momentum, trend):
     return "C", "C"
 
 
-# =========================
-# 🧠 REGIME
-# =========================
 def classify_regime(abs_trend):
     if abs_trend >= 0.25:
         return "TRENDING"
@@ -70,9 +68,6 @@ def classify_regime(abs_trend):
         return "CHOP"
 
 
-# =========================
-# 🧠 MARKET CONDITION
-# =========================
 def classify_market(regime, mom_band):
     if regime == "TRENDING":
         return "TRENDING_OVEREXTENDED" if mom_band in ["HIGH", "EXTREME"] else "TRENDING_CLEAN"
@@ -138,15 +133,9 @@ def webhook():
 
         tier, subtier = classify_trade(momentum, trend)
 
-        # =========================
-        # 🧠 STRUCTURE
-        # =========================
         structure_score = round(abs_mom * abs_trend, 3)
         structure_bucket = "HIGH_STRUCT" if structure_score >= 0.15 else "MID_STRUCT"
 
-        # =========================
-        # 🧠 REGIME + MOM BAND
-        # =========================
         regime = classify_regime(abs_trend)
 
         if abs_mom < 0.5:
@@ -161,7 +150,7 @@ def webhook():
         market_condition = classify_market(regime, mom_band)
 
         # =========================
-        # 🔥 PRIME SETUP (NEW)
+        # 🎯 PRIME SETUP
         # =========================
         is_prime_setup = (
             mom_band == "EXTREME"
@@ -171,13 +160,10 @@ def webhook():
         scenario = "PRIME" if is_prime_setup else "NON_PRIME"
 
         print(f"📊 SIGNAL: {symbol} | {decision} | mom={momentum:.3f} | trend={trend:.3f} | {tier}/{subtier}", flush=True)
-        print(f"🧠 STRUCTURE: {symbol} | {structure_bucket}", flush=True)
-        print(f"🌍 REGIME: {symbol} | {regime}", flush=True)
-        print(f"🌡️ MARKET: {symbol} | {market_condition}", flush=True)
         print(f"🎯 SCENARIO: {symbol} | {scenario}", flush=True)
 
         # =========================
-        # 🔥 LIVE FILTER
+        # 🔥 FILTER LOGIC
         # =========================
         live_filter_block = ENABLE_MOMENTUM_FILTER and mom_band == "HIGH"
 
@@ -185,16 +171,12 @@ def webhook():
 
         if decision not in ["LONG", "SHORT"]:
             hold_reason = "no_decision"
-
         elif alignment != "aligned":
             hold_reason = "counter_trend"
-
         elif abs_trend < MIN_TREND:
             hold_reason = "not_strong_trend"
-
         elif abs_mom < MIN_MOM:
             hold_reason = "momentum_too_weak"
-
         elif live_filter_block:
             hold_reason = "filtered_high_momentum"
 
@@ -207,7 +189,7 @@ def webhook():
         cur = conn.cursor()
 
         # =========================
-        # 🚀 ENTRY
+        # 🚀 REAL ENTRY (UNCHANGED)
         # =========================
         if action == "OPEN":
 
@@ -232,9 +214,10 @@ def webhook():
                             peak_pnl_percent,
                             regime, market_condition,
                             structure_bucket, mom_band,
-                            is_prime_setup, scenario
+                            is_prime_setup, scenario,
+                            is_shadow, hold_reason
                         )
-                        VALUES (%s,%s,%s,'OPEN',NOW(),%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        VALUES (%s,%s,%s,'OPEN',NOW(),%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,FALSE,NULL)
                     """, (
                         symbol, decision, price,
                         tier, DATA_VERSION,
@@ -246,16 +229,47 @@ def webhook():
                         is_prime_setup, scenario
                     ))
 
-                    print(f"🚀 OPEN: {symbol} | {scenario} | {market_condition}", flush=True)
+                    print(f"🚀 OPEN: {symbol} | {scenario}", flush=True)
 
         else:
             print(f"⛔ BLOCKED: {symbol} | {hold_reason} | {scenario}", flush=True)
 
+            # =========================
+            # 👻 SHADOW ENTRY (NEW)
+            # =========================
+            if ENABLE_SHADOW_TRADES:
+                cur.execute("""
+                    INSERT INTO bot_trades (
+                        symbol, direction, entry_price,
+                        status, opened_at, tier, data_version,
+                        entry_momentum, entry_trend,
+                        entry_tier, entry_subtier,
+                        peak_pnl_percent,
+                        regime, market_condition,
+                        structure_bucket, mom_band,
+                        is_prime_setup, scenario,
+                        is_shadow, hold_reason
+                    )
+                    VALUES (%s,%s,%s,'OPEN',NOW(),%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE,%s)
+                """, (
+                    symbol, decision, price,
+                    tier, DATA_VERSION,
+                    momentum, trend,
+                    tier, subtier,
+                    0,
+                    regime, market_condition,
+                    structure_bucket, mom_band,
+                    is_prime_setup, scenario,
+                    hold_reason
+                ))
+
+                print(f"👻 SHADOW OPEN: {symbol} | {hold_reason}", flush=True)
+
         # =========================
-        # 🧠 EXIT ENGINE (unchanged)
+        # 🧠 EXIT ENGINE (UNCHANGED LOGIC)
         # =========================
         cur.execute("""
-            SELECT id, symbol, direction, entry_price, opened_at, peak_pnl_percent
+            SELECT id, symbol, direction, entry_price, opened_at, peak_pnl_percent, is_shadow
             FROM bot_trades
             WHERE status='OPEN'
             AND symbol = %s
@@ -263,7 +277,7 @@ def webhook():
 
         open_trades = cur.fetchall()
 
-        for tid, sym, direction, entry_price, opened_at, peak_pnl in open_trades:
+        for tid, sym, direction, entry_price, opened_at, peak_pnl, is_shadow in open_trades:
 
             pnl = ((price - entry_price) / entry_price) if direction == "LONG" \
                   else ((entry_price - price) / entry_price)
@@ -318,7 +332,8 @@ def webhook():
                     close_reason, momentum, trend, tid
                 ))
 
-                print(f"💰 CLOSED: {sym} | {close_reason} | {round(pnl_percent,3)}%", flush=True)
+                tag = "👻 SHADOW" if is_shadow else "💰 REAL"
+                print(f"{tag} CLOSED: {sym} | {close_reason} | {round(pnl_percent,3)}%", flush=True)
 
         conn.commit()
         cur.close()
