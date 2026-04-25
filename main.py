@@ -1,15 +1,15 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.17.2
+# VERSION: v3.18.0
 # DEPLOYED: 2026-04-25
 # NOTES:
-# - ✅ FIXED: Shadow trades no longer count toward open trade limits
-# - ✅ FIXED: Symbol duplicate check ignores shadow trades
-# - ✅ No strategy changes
+# - 🔥 FIXED: Exit engine evaluates all trades (no more stranded positions)
+# - ✅ Shadow fixes retained
+# - 🔍 FULL LOGGING RESTORED
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v3.17.2 RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v3.18.0 RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -35,7 +35,7 @@ GIVEBACK_RATIO = 0.5
 ENABLE_MOMENTUM_FILTER = True
 ENABLE_SHADOW_TRADES = True
 
-DATA_VERSION = "v3.17.2"
+DATA_VERSION = "v3.18.0"
 
 
 def get_db():
@@ -82,9 +82,10 @@ def classify_market(regime, mom_band):
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
-        print(f"📩 WEBHOOK HIT | {DATA_VERSION}", flush=True)
+        print(f"\n📩 WEBHOOK HIT | {DATA_VERSION}", flush=True)
 
         data = request.get_json(force=True)
+        print(f"📦 RAW DATA: {data}", flush=True)
 
         symbol = data.get("symbol")
         price = float(data.get("price", 0))
@@ -132,6 +133,22 @@ def webhook():
 
         scenario = "PRIME" if is_prime_setup else "NON_PRIME"
 
+        # 🔍 FULL DEBUG LOGS
+        print(
+            f"📊 SIGNAL: {symbol} | {decision} | "
+            f"mom={momentum:.3f} | trend={trend:.3f} | "
+            f"align={alignment}",
+            flush=True
+        )
+
+        print(
+            f"🧠 STRUCTURE: tier={tier}/{subtier} | "
+            f"bucket={structure_bucket} | mom_band={mom_band}",
+            flush=True
+        )
+
+        print(f"🎯 SCENARIO: {symbol} | {scenario}", flush=True)
+
         # =========================
         # FILTER LOGIC
         # =========================
@@ -155,15 +172,16 @@ def webhook():
 
         action = "OPEN" if hold_reason is None else "BLOCKED"
 
+        print(f"⚖️ DECISION: {action} | reason={hold_reason}", flush=True)
+
         conn = get_db()
         cur = conn.cursor()
 
         # =========================
-        # 🚀 ENTRY (FIXED)
+        # 🚀 ENTRY
         # =========================
         if action == "OPEN":
 
-            # ✅ ONLY COUNT REAL TRADES
             cur.execute("""
                 SELECT COUNT(*) FROM bot_trades 
                 WHERE status='OPEN' AND is_shadow = FALSE
@@ -172,7 +190,6 @@ def webhook():
 
             if total_open < MAX_OPEN_TRADES:
 
-                # ✅ ONLY CHECK REAL DUPLICATES
                 cur.execute("""
                     SELECT COUNT(*) FROM bot_trades
                     WHERE symbol=%s AND status='OPEN' AND is_shadow = FALSE
@@ -234,6 +251,77 @@ def webhook():
                     is_prime_setup, scenario,
                     hold_reason
                 ))
+
+                print(f"👻 SHADOW OPEN: {symbol} | {hold_reason}", flush=True)
+
+        # =========================
+        # 🔥 EXIT ENGINE
+        # =========================
+        cur.execute("""
+            SELECT id, symbol, direction, entry_price, opened_at, peak_pnl_percent, is_shadow
+            FROM bot_trades
+            WHERE status='OPEN'
+        """)
+
+        open_trades = cur.fetchall()
+
+        for tid, sym, direction, entry_price, opened_at, peak_pnl, is_shadow in open_trades:
+
+            if sym != symbol:
+                continue
+
+            pnl = ((price - entry_price) / entry_price) if direction == "LONG" \
+                  else ((entry_price - price) / entry_price)
+
+            pnl_percent = pnl * 100
+
+            if pnl_percent > (peak_pnl or 0):
+                cur.execute("UPDATE bot_trades SET peak_pnl_percent=%s WHERE id=%s", (pnl_percent, tid))
+
+            mins = (now - opened_at).total_seconds() / 60
+            close_reason = None
+
+            if ENABLE_GIVEBACK_EXIT and peak_pnl:
+                if peak_pnl >= PROTECT_PROFIT_THRESHOLD:
+                    if pnl_percent < peak_pnl * GIVEBACK_RATIO:
+                        close_reason = "giveback_exit"
+
+            if not close_reason:
+                if pnl < -0.003:
+                    close_reason = "hard_stop"
+                elif pnl > 0.003 and mins < 15:
+                    close_reason = "quick_profit"
+                elif pnl > 0 and abs_mom < 0.1:
+                    close_reason = "momentum_drop"
+                elif pnl > 0 and alignment != "aligned":
+                    close_reason = "trend_flip"
+                elif mins > 10 and pnl <= 0:
+                    close_reason = "time_fail_fast"
+                elif mins > 60:
+                    close_reason = "time_cut"
+
+            if close_reason:
+                pnl_gbp = (pnl_percent / 100) * TRADE_SIZE_GBP
+
+                cur.execute("""
+                    UPDATE bot_trades
+                    SET status='CLOSED',
+                        closed_at=NOW(),
+                        close_price=%s,
+                        pnl_percent=%s,
+                        pnl_gbp=%s,
+                        trade_size_gbp=%s,
+                        close_reason=%s,
+                        exit_momentum=%s,
+                        exit_trend=%s
+                    WHERE id=%s
+                """, (
+                    price, pnl_percent, pnl_gbp, TRADE_SIZE_GBP,
+                    close_reason, momentum, trend, tid
+                ))
+
+                tag = "👻 SHADOW" if is_shadow else "💰 REAL"
+                print(f"{tag} CLOSED: {sym} | {close_reason} | {round(pnl_percent,3)}%", flush=True)
 
         conn.commit()
         cur.close()
