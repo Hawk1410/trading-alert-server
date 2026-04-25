@@ -25,7 +25,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 # ⚙️ CONFIG
 # =========================
 MAX_OPEN_TRADES = 7
-MIN_TREND = 0.20
+MIN_TREND = 0.10
 MIN_MOM = 0.05
 TRADE_SIZE_GBP = 100
 
