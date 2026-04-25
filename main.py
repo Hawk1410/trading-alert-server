@@ -1,15 +1,16 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.16.0
-# DEPLOYED: 2026-04-XX
+# VERSION: v3.17.0
+# DEPLOYED: 2026-04-25
 # NOTES:
-# - ✅ Shadow trades added (NO behaviour change)
-# - ✅ Logs blocked opportunities
-# - ✅ Fully compatible with v3.15.6 schema
+# - ✅ PRIME refined (requires HIGH_STRUCT)
+# - ✅ Improved exit logic (fail-fast + better profit capture)
+# - ✅ No structural/database changes
+# - ✅ Shadow system unchanged
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v3.16.0 RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v3.17.0 RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -33,9 +34,9 @@ PROTECT_PROFIT_THRESHOLD = 0.2
 GIVEBACK_RATIO = 0.5
 
 ENABLE_MOMENTUM_FILTER = True
-ENABLE_SHADOW_TRADES = True  # 🔥 NEW
+ENABLE_SHADOW_TRADES = True
 
-DATA_VERSION = "v3.16.0"
+DATA_VERSION = "v3.17.0"
 
 
 def get_db():
@@ -43,7 +44,7 @@ def get_db():
 
 
 # =========================
-# 🧠 TIER CLASSIFICATION
+# 🧠 CLASSIFIERS
 # =========================
 def classify_trade(momentum, trend):
     abs_mom = abs(momentum)
@@ -150,11 +151,12 @@ def webhook():
         market_condition = classify_market(regime, mom_band)
 
         # =========================
-        # 🎯 PRIME SETUP
+        # 🎯 REFINED PRIME
         # =========================
         is_prime_setup = (
             mom_band == "EXTREME"
             and regime == "TRANSITION"
+            and structure_bucket == "HIGH_STRUCT"
         )
 
         scenario = "PRIME" if is_prime_setup else "NON_PRIME"
@@ -189,7 +191,7 @@ def webhook():
         cur = conn.cursor()
 
         # =========================
-        # 🚀 REAL ENTRY (UNCHANGED)
+        # 🚀 ENTRY
         # =========================
         if action == "OPEN":
 
@@ -234,9 +236,6 @@ def webhook():
         else:
             print(f"⛔ BLOCKED: {symbol} | {hold_reason} | {scenario}", flush=True)
 
-            # =========================
-            # 👻 SHADOW ENTRY (NEW)
-            # =========================
             if ENABLE_SHADOW_TRADES:
                 cur.execute("""
                     INSERT INTO bot_trades (
@@ -266,7 +265,7 @@ def webhook():
                 print(f"👻 SHADOW OPEN: {symbol} | {hold_reason}", flush=True)
 
         # =========================
-        # 🧠 EXIT ENGINE (UNCHANGED LOGIC)
+        # 🧠 EXIT ENGINE (IMPROVED)
         # =========================
         cur.execute("""
             SELECT id, symbol, direction, entry_price, opened_at, peak_pnl_percent, is_shadow
@@ -299,16 +298,16 @@ def webhook():
                         close_reason = "giveback_exit"
 
             if not close_reason:
-                if pnl < -0.004:
+                if pnl < -0.003:
                     close_reason = "hard_stop"
-                elif pnl > 0.004 and mins < 10:
+                elif pnl > 0.003 and mins < 15:
                     close_reason = "quick_profit"
                 elif pnl > 0 and abs_mom < 0.1:
                     close_reason = "momentum_drop"
                 elif pnl > 0 and alignment != "aligned":
                     close_reason = "trend_flip"
-                elif mins > 20 and abs(pnl) < 0.001:
-                    close_reason = "no_follow_through"
+                elif mins > 10 and pnl <= 0:
+                    close_reason = "time_fail_fast"
                 elif mins > 60:
                     close_reason = "time_cut"
 
