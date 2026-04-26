@@ -1,15 +1,15 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.18.0
-# DEPLOYED: 2026-04-25
+# VERSION: v3.19.0
+# DEPLOYED: 2026-04-26
 # NOTES:
-# - 🔥 FIXED: Exit engine evaluates all trades (no more stranded positions)
-# - ✅ Shadow fixes retained
-# - 🔍 FULL LOGGING RESTORED
+# - ❌ EXTREME removed from live trading (shadow only)
+# - ✅ MID momentum = primary execution edge
+# - 👻 HIGH + EXTREME fully shadowed
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v3.18.0 RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v3.19.0 RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -35,7 +35,7 @@ GIVEBACK_RATIO = 0.5
 ENABLE_MOMENTUM_FILTER = True
 ENABLE_SHADOW_TRADES = True
 
-DATA_VERSION = "v3.18.0"
+DATA_VERSION = "v3.19.0"
 
 
 def get_db():
@@ -133,6 +133,11 @@ def webhook():
 
         scenario = "PRIME" if is_prime_setup else "NON_PRIME"
 
+        # =========================
+        # 🎯 NEW CONTROL LOGIC
+        # =========================
+        force_shadow_extreme = (mom_band == "EXTREME")
+
         # 🔍 FULL DEBUG LOGS
         print(
             f"📊 SIGNAL: {symbol} | {decision} | "
@@ -180,7 +185,7 @@ def webhook():
         # =========================
         # 🚀 ENTRY
         # =========================
-        if action == "OPEN":
+        if action == "OPEN" and not force_shadow_extreme:
 
             cur.execute("""
                 SELECT COUNT(*) FROM bot_trades 
@@ -224,7 +229,7 @@ def webhook():
                     print(f"🚀 OPEN: {symbol} | {scenario}", flush=True)
 
         else:
-            print(f"⛔ BLOCKED: {symbol} | {hold_reason}", flush=True)
+            print(f"⛔ BLOCKED or SHADOW FORCED: {symbol}", flush=True)
 
             if ENABLE_SHADOW_TRADES:
                 cur.execute("""
@@ -249,13 +254,13 @@ def webhook():
                     regime, market_condition,
                     structure_bucket, mom_band,
                     is_prime_setup, scenario,
-                    hold_reason
+                    hold_reason if not force_shadow_extreme else "forced_extreme_shadow"
                 ))
 
-                print(f"👻 SHADOW OPEN: {symbol} | {hold_reason}", flush=True)
+                print(f"👻 SHADOW OPEN: {symbol}", flush=True)
 
         # =========================
-        # 🔥 EXIT ENGINE
+        # 🔥 EXIT ENGINE (unchanged)
         # =========================
         cur.execute("""
             SELECT id, symbol, direction, entry_price, opened_at, peak_pnl_percent, is_shadow
