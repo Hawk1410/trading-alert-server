@@ -1,16 +1,18 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.20.0
+# VERSION: v3.21.0
 # DEPLOYED: 2026-04-26
 # NOTES:
-# - ❌ SHORTS DISABLED (core performance fix)
-# - ✅ LONG-only strategy (confirmed edge)
-# - ❌ EXTREME still shadow only
-# - ✅ MID momentum = primary execution edge
+# - ✅ HYBRID ENGINE INTRODUCED
+# - ✅ TRENDING = primary (unchanged)
+# - ✅ CHOP = LOW momentum + aligned (new controlled edge)
+# - ❌ TRANSITION = shadow only
+# - ❌ SHORTS DISABLED
+# - ❌ EXTREME = shadow only
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v3.20.0 RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v3.21.0 RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -36,7 +38,10 @@ GIVEBACK_RATIO = 0.5
 ENABLE_MOMENTUM_FILTER = True
 ENABLE_SHADOW_TRADES = True
 
-DATA_VERSION = "v3.20.0"
+# 🆕 HYBRID TOGGLES
+ENABLE_CHOP_MODE = True
+
+DATA_VERSION = "v3.21.0"
 
 
 def get_db():
@@ -126,34 +131,38 @@ def webhook():
 
         market_condition = classify_market(regime, mom_band)
 
-        is_prime_setup = (
-            mom_band == "EXTREME"
-            and regime == "TRANSITION"
-            and structure_bucket == "HIGH_STRUCT"
-        )
-
-        scenario = "PRIME" if is_prime_setup else "NON_PRIME"
+        scenario = "NON_PRIME"
 
         # =========================
-        # 🎯 CONTROL LOGIC
+        # 🎯 HYBRID CONTROL LOGIC
         # =========================
+
         force_shadow_extreme = (mom_band == "EXTREME")
 
-        # 🔍 DEBUG LOGS
+        regime_block = None
+
+        # 🔵 TRENDING → allow normal system
+        if regime == "TRENDING":
+            pass
+
+        # 🟢 CHOP → only allow LOW + aligned
+        elif regime == "CHOP":
+            if not ENABLE_CHOP_MODE:
+                regime_block = "chop_disabled"
+            elif mom_band != "LOW":
+                regime_block = "chop_momentum_block"
+            elif alignment != "aligned":
+                regime_block = "chop_alignment_block"
+
+        # 🟡 TRANSITION → shadow only
+        elif regime == "TRANSITION":
+            regime_block = "transition_shadow_only"
+
+        # 🔍 DEBUG
         print(
-            f"📊 SIGNAL: {symbol} | {decision} | "
-            f"mom={momentum:.3f} | trend={trend:.3f} | "
-            f"align={alignment}",
+            f"📊 {symbol} | {decision} | regime={regime} | mom={mom_band} | align={alignment}",
             flush=True
         )
-
-        print(
-            f"🧠 STRUCTURE: tier={tier}/{subtier} | "
-            f"bucket={structure_bucket} | mom_band={mom_band}",
-            flush=True
-        )
-
-        print(f"🎯 SCENARIO: {symbol} | {scenario}", flush=True)
 
         # =========================
         # FILTER LOGIC
@@ -165,16 +174,18 @@ def webhook():
         if decision not in ["LONG", "SHORT"]:
             hold_reason = "no_decision"
 
-        # 🔴 NEW: HARD BLOCK SHORTS
         elif decision == "SHORT":
             hold_reason = "shorts_disabled"
 
-        elif alignment != "aligned":
-            hold_reason = "counter_trend"
+        elif regime_block:
+            hold_reason = regime_block
+
         elif abs_trend < MIN_TREND:
             hold_reason = "not_strong_trend"
+
         elif abs_mom < MIN_MOM:
             hold_reason = "momentum_too_weak"
+
         elif live_filter_block:
             hold_reason = "filtered_high_momentum"
 
@@ -183,7 +194,7 @@ def webhook():
 
         action = "OPEN" if hold_reason is None else "BLOCKED"
 
-        print(f"⚖️ DECISION: {action} | reason={hold_reason}", flush=True)
+        print(f"⚖️ {action} | reason={hold_reason}", flush=True)
 
         conn = get_db()
         cur = conn.cursor()
@@ -217,10 +228,9 @@ def webhook():
                             peak_pnl_percent,
                             regime, market_condition,
                             structure_bucket, mom_band,
-                            is_prime_setup, scenario,
                             is_shadow, hold_reason
                         )
-                        VALUES (%s,%s,%s,'OPEN',NOW(),%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,FALSE,NULL)
+                        VALUES (%s,%s,%s,'OPEN',NOW(),%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,FALSE,NULL)
                     """, (
                         symbol, decision, price,
                         tier, DATA_VERSION,
@@ -228,14 +238,13 @@ def webhook():
                         tier, subtier,
                         0,
                         regime, market_condition,
-                        structure_bucket, mom_band,
-                        is_prime_setup, scenario
+                        structure_bucket, mom_band
                     ))
 
-                    print(f"🚀 OPEN: {symbol} | {scenario}", flush=True)
+                    print(f"🚀 OPEN: {symbol}", flush=True)
 
         else:
-            print(f"⛔ BLOCKED or SHADOW FORCED: {symbol}", flush=True)
+            print(f"👻 SHADOW: {symbol} | {hold_reason}", flush=True)
 
             if ENABLE_SHADOW_TRADES:
                 cur.execute("""
@@ -247,10 +256,9 @@ def webhook():
                         peak_pnl_percent,
                         regime, market_condition,
                         structure_bucket, mom_band,
-                        is_prime_setup, scenario,
                         is_shadow, hold_reason
                     )
-                    VALUES (%s,%s,%s,'OPEN',NOW(),%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE,%s)
+                    VALUES (%s,%s,%s,'OPEN',NOW(),%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE,%s)
                 """, (
                     symbol, decision, price,
                     tier, DATA_VERSION,
@@ -259,11 +267,8 @@ def webhook():
                     0,
                     regime, market_condition,
                     structure_bucket, mom_band,
-                    is_prime_setup, scenario,
                     hold_reason if not force_shadow_extreme else "forced_extreme_shadow"
                 ))
-
-                print(f"👻 SHADOW OPEN: {symbol}", flush=True)
 
         # =========================
         # 🔥 EXIT ENGINE (UNCHANGED)
