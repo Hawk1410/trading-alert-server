@@ -1,15 +1,16 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.19.0
+# VERSION: v3.20.0
 # DEPLOYED: 2026-04-26
 # NOTES:
-# - ❌ EXTREME removed from live trading (shadow only)
+# - ❌ SHORTS DISABLED (core performance fix)
+# - ✅ LONG-only strategy (confirmed edge)
+# - ❌ EXTREME still shadow only
 # - ✅ MID momentum = primary execution edge
-# - 👻 HIGH + EXTREME fully shadowed
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v3.19.0 RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v3.20.0 RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -35,7 +36,7 @@ GIVEBACK_RATIO = 0.5
 ENABLE_MOMENTUM_FILTER = True
 ENABLE_SHADOW_TRADES = True
 
-DATA_VERSION = "v3.19.0"
+DATA_VERSION = "v3.20.0"
 
 
 def get_db():
@@ -134,11 +135,11 @@ def webhook():
         scenario = "PRIME" if is_prime_setup else "NON_PRIME"
 
         # =========================
-        # 🎯 NEW CONTROL LOGIC
+        # 🎯 CONTROL LOGIC
         # =========================
         force_shadow_extreme = (mom_band == "EXTREME")
 
-        # 🔍 FULL DEBUG LOGS
+        # 🔍 DEBUG LOGS
         print(
             f"📊 SIGNAL: {symbol} | {decision} | "
             f"mom={momentum:.3f} | trend={trend:.3f} | "
@@ -163,6 +164,11 @@ def webhook():
 
         if decision not in ["LONG", "SHORT"]:
             hold_reason = "no_decision"
+
+        # 🔴 NEW: HARD BLOCK SHORTS
+        elif decision == "SHORT":
+            hold_reason = "shorts_disabled"
+
         elif alignment != "aligned":
             hold_reason = "counter_trend"
         elif abs_trend < MIN_TREND:
@@ -260,7 +266,7 @@ def webhook():
                 print(f"👻 SHADOW OPEN: {symbol}", flush=True)
 
         # =========================
-        # 🔥 EXIT ENGINE (unchanged)
+        # 🔥 EXIT ENGINE (UNCHANGED)
         # =========================
         cur.execute("""
             SELECT id, symbol, direction, entry_price, opened_at, peak_pnl_percent, is_shadow
