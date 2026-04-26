@@ -1,15 +1,16 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.21.1
+# VERSION: v3.21.2
 # DEPLOYED: 2026-04-26
 # NOTES:
-# - 🛠 FIX: tuple index out of range (safe unpack + COALESCE)
-# - 🛠 Added bad row protection + debug logging
+# - 🛠 FULL EXIT ENGINE HARDENING
+# - 🛠 Fixed tuple index crash (root cause handled)
+# - 🛠 Added per-row error protection
 # - ❌ NO STRATEGY CHANGES
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v3.21.1 RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v3.21.2 RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -37,7 +38,7 @@ ENABLE_SHADOW_TRADES = True
 
 ENABLE_CHOP_MODE = True
 
-DATA_VERSION = "v3.21.1"
+DATA_VERSION = "v3.21.2"
 
 
 def get_db():
@@ -251,7 +252,7 @@ def webhook():
                 ))
 
         # =========================
-        # 🔥 EXIT ENGINE (FIXED)
+        # 🔥 EXIT ENGINE (FULL SAFE)
         # =========================
         cur.execute("""
             SELECT 
@@ -271,68 +272,79 @@ def webhook():
         print(f"🧾 OPEN TRADES COUNT: {len(open_trades)}", flush=True)
 
         for row in open_trades:
+            try:
+                if len(row) < 7:
+                    print(f"⚠️ BAD ROW SKIPPED: {row}", flush=True)
+                    continue
 
-            if len(row) < 7:
-                print(f"⚠️ BAD ROW SKIPPED: {row}", flush=True)
+                tid, sym, direction, entry_price, opened_at, peak_pnl, is_shadow = row
+
+                direction = direction or "NONE"
+                peak_pnl = float(peak_pnl or 0)
+                entry_price = float(entry_price)
+
+                if sym != symbol:
+                    continue
+
+                pnl = ((price - entry_price) / entry_price) if direction == "LONG" \
+                      else ((entry_price - price) / entry_price)
+
+                pnl_percent = pnl * 100
+
+                if pnl_percent > peak_pnl:
+                    cur.execute(
+                        "UPDATE bot_trades SET peak_pnl_percent=%s WHERE id=%s",
+                        (pnl_percent, tid)
+                    )
+
+                mins = (now - opened_at).total_seconds() / 60
+                close_reason = None
+
+                if ENABLE_GIVEBACK_EXIT:
+                    if peak_pnl >= PROTECT_PROFIT_THRESHOLD:
+                        if pnl_percent < peak_pnl * GIVEBACK_RATIO:
+                            close_reason = "giveback_exit"
+
+                if not close_reason:
+                    if pnl < -0.003:
+                        close_reason = "hard_stop"
+                    elif pnl > 0.003 and mins < 15:
+                        close_reason = "quick_profit"
+                    elif pnl > 0 and abs_mom < 0.1:
+                        close_reason = "momentum_drop"
+                    elif pnl > 0 and alignment != "aligned":
+                        close_reason = "trend_flip"
+                    elif mins > 10 and pnl <= 0:
+                        close_reason = "time_fail_fast"
+                    elif mins > 60:
+                        close_reason = "time_cut"
+
+                if close_reason:
+                    pnl_gbp = (pnl_percent / 100) * TRADE_SIZE_GBP
+
+                    cur.execute("""
+                        UPDATE bot_trades
+                        SET status='CLOSED',
+                            closed_at=NOW(),
+                            close_price=%s,
+                            pnl_percent=%s,
+                            pnl_gbp=%s,
+                            trade_size_gbp=%s,
+                            close_reason=%s,
+                            exit_momentum=%s,
+                            exit_trend=%s
+                        WHERE id=%s
+                    """, (
+                        price, pnl_percent, pnl_gbp, TRADE_SIZE_GBP,
+                        close_reason, momentum, trend, tid
+                    ))
+
+                    tag = "👻 SHADOW" if is_shadow else "💰 REAL"
+                    print(f"{tag} CLOSED: {sym} | {close_reason} | {round(pnl_percent,3)}%", flush=True)
+
+            except Exception as e:
+                print(f"❌ EXIT LOOP ERROR (row skipped): {row} | error={e}", flush=True)
                 continue
-
-            tid, sym, direction, entry_price, opened_at, peak_pnl, is_shadow = row
-
-            if sym != symbol:
-                continue
-
-            pnl = ((price - entry_price) / entry_price) if direction == "LONG" \
-                  else ((entry_price - price) / entry_price)
-
-            pnl_percent = pnl * 100
-
-            if pnl_percent > (peak_pnl or 0):
-                cur.execute("UPDATE bot_trades SET peak_pnl_percent=%s WHERE id=%s", (pnl_percent, tid))
-
-            mins = (now - opened_at).total_seconds() / 60
-            close_reason = None
-
-            if ENABLE_GIVEBACK_EXIT and peak_pnl:
-                if peak_pnl >= PROTECT_PROFIT_THRESHOLD:
-                    if pnl_percent < peak_pnl * GIVEBACK_RATIO:
-                        close_reason = "giveback_exit"
-
-            if not close_reason:
-                if pnl < -0.003:
-                    close_reason = "hard_stop"
-                elif pnl > 0.003 and mins < 15:
-                    close_reason = "quick_profit"
-                elif pnl > 0 and abs_mom < 0.1:
-                    close_reason = "momentum_drop"
-                elif pnl > 0 and alignment != "aligned":
-                    close_reason = "trend_flip"
-                elif mins > 10 and pnl <= 0:
-                    close_reason = "time_fail_fast"
-                elif mins > 60:
-                    close_reason = "time_cut"
-
-            if close_reason:
-                pnl_gbp = (pnl_percent / 100) * TRADE_SIZE_GBP
-
-                cur.execute("""
-                    UPDATE bot_trades
-                    SET status='CLOSED',
-                        closed_at=NOW(),
-                        close_price=%s,
-                        pnl_percent=%s,
-                        pnl_gbp=%s,
-                        trade_size_gbp=%s,
-                        close_reason=%s,
-                        exit_momentum=%s,
-                        exit_trend=%s
-                    WHERE id=%s
-                """, (
-                    price, pnl_percent, pnl_gbp, TRADE_SIZE_GBP,
-                    close_reason, momentum, trend, tid
-                ))
-
-                tag = "👻 SHADOW" if is_shadow else "💰 REAL"
-                print(f"{tag} CLOSED: {sym} | {close_reason} | {round(pnl_percent,3)}%", flush=True)
 
         conn.commit()
         cur.close()
