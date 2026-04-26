@@ -1,16 +1,15 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.21.2
+# VERSION: v3.21.3
 # DEPLOYED: 2026-04-26
 # NOTES:
-# - 🛠 FULL EXIT ENGINE HARDENING
-# - 🛠 Fixed tuple index crash (root cause handled)
-# - 🛠 Added per-row error protection
-# - ❌ NO STRATEGY CHANGES
+# - 🔧 FIXED tuple index crash (safe row parsing)
+# - 🔒 Exit loop fully fault-tolerant
+# - ✅ HYBRID ENGINE ACTIVE
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v3.21.2 RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v3.21.3 RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -35,10 +34,9 @@ GIVEBACK_RATIO = 0.5
 
 ENABLE_MOMENTUM_FILTER = True
 ENABLE_SHADOW_TRADES = True
-
 ENABLE_CHOP_MODE = True
 
-DATA_VERSION = "v3.21.2"
+DATA_VERSION = "v3.21.3"
 
 
 def get_db():
@@ -128,10 +126,11 @@ def webhook():
 
         market_condition = classify_market(regime, mom_band)
 
-        # =========================
-        # 🎯 HYBRID CONTROL LOGIC
-        # =========================
         force_shadow_extreme = (mom_band == "EXTREME")
+
+        # =========================
+        # 🧠 HYBRID LOGIC
+        # =========================
         regime_block = None
 
         if regime == "TRENDING":
@@ -148,7 +147,10 @@ def webhook():
         elif regime == "TRANSITION":
             regime_block = "transition_shadow_only"
 
-        print(f"📊 {symbol} | {decision} | regime={regime} | mom={mom_band} | align={alignment}", flush=True)
+        print(
+            f"📊 {symbol} | {decision} | regime={regime} | mom={mom_band} | align={alignment}",
+            flush=True
+        )
 
         # =========================
         # FILTER LOGIC
@@ -252,24 +254,15 @@ def webhook():
                 ))
 
         # =========================
-        # 🔥 EXIT ENGINE (FULL SAFE)
+        # 🔥 EXIT ENGINE (SAFE)
         # =========================
         cur.execute("""
-            SELECT 
-                id,
-                symbol,
-                COALESCE(direction, 'NONE'),
-                entry_price,
-                opened_at,
-                COALESCE(peak_pnl_percent, 0),
-                COALESCE(is_shadow, FALSE)
+            SELECT id, symbol, direction, entry_price, opened_at, peak_pnl_percent, is_shadow
             FROM bot_trades
             WHERE status='OPEN'
         """)
 
         open_trades = cur.fetchall()
-
-        print(f"🧾 OPEN TRADES COUNT: {len(open_trades)}", flush=True)
 
         for row in open_trades:
             try:
@@ -278,10 +271,7 @@ def webhook():
                     continue
 
                 tid, sym, direction, entry_price, opened_at, peak_pnl, is_shadow = row
-
-                direction = direction or "NONE"
-                peak_pnl = float(peak_pnl or 0)
-                entry_price = float(entry_price)
+                peak_pnl = peak_pnl or 0
 
                 if sym != symbol:
                     continue
@@ -300,7 +290,7 @@ def webhook():
                 mins = (now - opened_at).total_seconds() / 60
                 close_reason = None
 
-                if ENABLE_GIVEBACK_EXIT:
+                if ENABLE_GIVEBACK_EXIT and peak_pnl:
                     if peak_pnl >= PROTECT_PROFIT_THRESHOLD:
                         if pnl_percent < peak_pnl * GIVEBACK_RATIO:
                             close_reason = "giveback_exit"
@@ -343,7 +333,7 @@ def webhook():
                     print(f"{tag} CLOSED: {sym} | {close_reason} | {round(pnl_percent,3)}%", flush=True)
 
             except Exception as e:
-                print(f"❌ EXIT LOOP ERROR (row skipped): {row} | error={e}", flush=True)
+                print(f"❌ EXIT LOOP ERROR (row skipped): {e} | row={row}", flush=True)
                 continue
 
         conn.commit()
