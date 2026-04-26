@@ -1,16 +1,16 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.22.0
+# VERSION: v3.24.0
 # DEPLOYED: 2026-04-26
 # NOTES:
-# - ✅ GLOBAL EXIT ENGINE (no stuck trades)
-# - ✅ FULL LOGGING RESTORED
-# - ✅ SAFETY TIMEOUT SYSTEM
-# - ✅ HYBRID REGIME ENGINE STABLE
+# - ✅ PRICE CACHE ENGINE (true multi-asset support)
+# - ✅ CORRECT PnL CALCULATION
+# - ✅ GLOBAL EXIT ENGINE (fixed)
+# - ✅ SAFETY TIMEOUT
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v3.22.0 RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v3.24.0 RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -40,12 +40,15 @@ ENABLE_CHOP_MODE = True
 ENABLE_SAFETY_TIMEOUT = True
 MAX_TRADE_DURATION_MIN = 90
 
-DATA_VERSION = "v3.22.0"
+DATA_VERSION = "v3.24.0"
 
+# =========================
+# 🧠 PRICE CACHE (NEW CORE)
+# =========================
+PRICE_CACHE = {}
 
 def get_db():
     return psycopg2.connect(DATABASE_URL)
-
 
 # =========================
 # 🧠 CLASSIFIERS
@@ -91,6 +94,12 @@ def webhook():
         trend = float(data.get("trend_strength") or 0)
         alignment = data.get("trend_alignment")
 
+        # =========================
+        # 🧠 UPDATE PRICE CACHE
+        # =========================
+        if symbol:
+            PRICE_CACHE[symbol] = price
+
         if decision:
             decision = decision.upper().strip()
 
@@ -115,13 +124,10 @@ def webhook():
         else:
             mom_band = "EXTREME"
 
-        # =========================
-        # 🧠 LOG CONTEXT
-        # =========================
         print(f"📊 {symbol} | {decision} | {regime} | {mom_band} | {alignment}", flush=True)
 
         # =========================
-        # 🎯 HYBRID LOGIC
+        # 🎯 ENTRY LOGIC
         # =========================
         force_shadow = False
         hold_reason = None
@@ -220,7 +226,7 @@ def webhook():
                 ))
 
         # =========================
-        # 🌍 GLOBAL EXIT ENGINE
+        # 🌍 GLOBAL EXIT ENGINE (FIXED)
         # =========================
         cur.execute("""
             SELECT id, symbol, direction, entry_price, opened_at, peak_pnl_percent, is_shadow
@@ -239,21 +245,27 @@ def webhook():
             peak_pnl = row[5] or 0
             is_shadow = row[6]
 
-            if not entry_price:
+            # 🧠 USE CORRECT SYMBOL PRICE
+            trade_price = PRICE_CACHE.get(sym)
+
+            if not trade_price:
                 continue
 
-            pnl = ((price - entry_price) / entry_price) if direction == "LONG" \
-                  else ((entry_price - price) / entry_price)
+            pnl = ((trade_price - entry_price) / entry_price) if direction == "LONG" \
+                  else ((entry_price - trade_price) / entry_price)
 
             pnl_percent = pnl * 100
 
             if pnl_percent > peak_pnl:
-                cur.execute("UPDATE bot_trades SET peak_pnl_percent=%s WHERE id=%s", (pnl_percent, tid))
+                cur.execute(
+                    "UPDATE bot_trades SET peak_pnl_percent=%s WHERE id=%s",
+                    (pnl_percent, tid)
+                )
 
             mins = (now - opened_at).total_seconds() / 60
             close_reason = None
 
-            # SAFETY TIMEOUT
+            # SAFETY
             if ENABLE_SAFETY_TIMEOUT and mins > MAX_TRADE_DURATION_MIN:
                 close_reason = "safety_timeout"
 
@@ -288,7 +300,7 @@ def webhook():
                         close_reason=%s
                     WHERE id=%s
                 """, (
-                    price, pnl_percent, pnl_gbp, TRADE_SIZE_GBP,
+                    trade_price, pnl_percent, pnl_gbp, TRADE_SIZE_GBP,
                     close_reason, tid
                 ))
 
