@@ -1,18 +1,15 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.21.0
+# VERSION: v3.21.1
 # DEPLOYED: 2026-04-26
 # NOTES:
-# - ✅ HYBRID ENGINE INTRODUCED
-# - ✅ TRENDING = primary (unchanged)
-# - ✅ CHOP = LOW momentum + aligned (new controlled edge)
-# - ❌ TRANSITION = shadow only
-# - ❌ SHORTS DISABLED
-# - ❌ EXTREME = shadow only
+# - 🛠 FIX: tuple index out of range (safe unpack + COALESCE)
+# - 🛠 Added bad row protection + debug logging
+# - ❌ NO STRATEGY CHANGES
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v3.21.0 RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v3.21.1 RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -38,10 +35,9 @@ GIVEBACK_RATIO = 0.5
 ENABLE_MOMENTUM_FILTER = True
 ENABLE_SHADOW_TRADES = True
 
-# 🆕 HYBRID TOGGLES
 ENABLE_CHOP_MODE = True
 
-DATA_VERSION = "v3.21.0"
+DATA_VERSION = "v3.21.1"
 
 
 def get_db():
@@ -131,21 +127,15 @@ def webhook():
 
         market_condition = classify_market(regime, mom_band)
 
-        scenario = "NON_PRIME"
-
         # =========================
         # 🎯 HYBRID CONTROL LOGIC
         # =========================
-
         force_shadow_extreme = (mom_band == "EXTREME")
-
         regime_block = None
 
-        # 🔵 TRENDING → allow normal system
         if regime == "TRENDING":
             pass
 
-        # 🟢 CHOP → only allow LOW + aligned
         elif regime == "CHOP":
             if not ENABLE_CHOP_MODE:
                 regime_block = "chop_disabled"
@@ -154,15 +144,10 @@ def webhook():
             elif alignment != "aligned":
                 regime_block = "chop_alignment_block"
 
-        # 🟡 TRANSITION → shadow only
         elif regime == "TRANSITION":
             regime_block = "transition_shadow_only"
 
-        # 🔍 DEBUG
-        print(
-            f"📊 {symbol} | {decision} | regime={regime} | mom={mom_band} | align={alignment}",
-            flush=True
-        )
+        print(f"📊 {symbol} | {decision} | regime={regime} | mom={mom_band} | align={alignment}", flush=True)
 
         # =========================
         # FILTER LOGIC
@@ -173,19 +158,14 @@ def webhook():
 
         if decision not in ["LONG", "SHORT"]:
             hold_reason = "no_decision"
-
         elif decision == "SHORT":
             hold_reason = "shorts_disabled"
-
         elif regime_block:
             hold_reason = regime_block
-
         elif abs_trend < MIN_TREND:
             hold_reason = "not_strong_trend"
-
         elif abs_mom < MIN_MOM:
             hold_reason = "momentum_too_weak"
-
         elif live_filter_block:
             hold_reason = "filtered_high_momentum"
 
@@ -271,17 +251,32 @@ def webhook():
                 ))
 
         # =========================
-        # 🔥 EXIT ENGINE (UNCHANGED)
+        # 🔥 EXIT ENGINE (FIXED)
         # =========================
         cur.execute("""
-            SELECT id, symbol, direction, entry_price, opened_at, peak_pnl_percent, is_shadow
+            SELECT 
+                id,
+                symbol,
+                COALESCE(direction, 'NONE'),
+                entry_price,
+                opened_at,
+                COALESCE(peak_pnl_percent, 0),
+                COALESCE(is_shadow, FALSE)
             FROM bot_trades
             WHERE status='OPEN'
         """)
 
         open_trades = cur.fetchall()
 
-        for tid, sym, direction, entry_price, opened_at, peak_pnl, is_shadow in open_trades:
+        print(f"🧾 OPEN TRADES COUNT: {len(open_trades)}", flush=True)
+
+        for row in open_trades:
+
+            if len(row) < 7:
+                print(f"⚠️ BAD ROW SKIPPED: {row}", flush=True)
+                continue
+
+            tid, sym, direction, entry_price, opened_at, peak_pnl, is_shadow = row
 
             if sym != symbol:
                 continue
