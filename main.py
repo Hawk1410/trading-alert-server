@@ -1,16 +1,13 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.24.0
-# DEPLOYED: 2026-04-26
+# VERSION: v3.25.0
 # NOTES:
-# - ✅ PRICE CACHE ENGINE (true multi-asset support)
-# - ✅ CORRECT PnL CALCULATION
-# - ✅ GLOBAL EXIT ENGINE (fixed)
-# - ✅ SAFETY TIMEOUT
+# - ✅ EXTREME-ONLY LONG SYSTEM (shadow mode)
+# - ✅ SHORTS RE-ENABLED
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v3.24.0 RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v3.25.0 RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -40,10 +37,15 @@ ENABLE_CHOP_MODE = True
 ENABLE_SAFETY_TIMEOUT = True
 MAX_TRADE_DURATION_MIN = 90
 
-DATA_VERSION = "v3.24.0"
+# 🚀 NEW LONG SYSTEM
+ENABLE_LONGS = True
+LONG_MODE = "EXTREME_ONLY"   # "OFF", "EXTREME_ONLY"
+LONGS_SHADOW_ONLY = True     # 👈 start in shadow
+
+DATA_VERSION = "v3.25.0"
 
 # =========================
-# 🧠 PRICE CACHE (NEW CORE)
+# 🧠 PRICE CACHE
 # =========================
 PRICE_CACHE = {}
 
@@ -75,7 +77,6 @@ def classify_regime(abs_trend):
     else:
         return "CHOP"
 
-
 # =========================
 # 🚀 WEBHOOK
 # =========================
@@ -94,9 +95,6 @@ def webhook():
         trend = float(data.get("trend_strength") or 0)
         alignment = data.get("trend_alignment")
 
-        # =========================
-        # 🧠 UPDATE PRICE CACHE
-        # =========================
         if symbol:
             PRICE_CACHE[symbol] = price
 
@@ -132,39 +130,60 @@ def webhook():
         force_shadow = False
         hold_reason = None
 
+        # 🚫 NO SIGNAL
         if decision not in ["LONG", "SHORT"]:
             hold_reason = "no_decision"
 
+        # =========================
+        # 🧠 LONG ENGINE
+        # =========================
+        elif decision == "LONG":
+
+            if not ENABLE_LONGS:
+                hold_reason = "longs_disabled"
+
+            elif LONG_MODE == "EXTREME_ONLY":
+                if not (regime == "TRENDING" and mom_band == "EXTREME"):
+                    hold_reason = "long_not_extreme_trending"
+                else:
+                    if LONGS_SHADOW_ONLY:
+                        hold_reason = "long_shadow_validation"
+                        force_shadow = True
+
+        # =========================
+        # 🧠 SHORT ENGINE (RESTORED)
+        # =========================
         elif decision == "SHORT":
-            hold_reason = "shorts_disabled"
+            pass  # allow full short system
 
-        elif mom_band == "EXTREME":
-            hold_reason = "forced_extreme_shadow"
-            force_shadow = True
+        # =========================
+        # EXISTING FILTERS (apply to both)
+        # =========================
+        if hold_reason is None:
 
-        elif regime == "TRANSITION":
-            hold_reason = "transition_shadow_only"
-            force_shadow = True
+            if regime == "TRANSITION":
+                hold_reason = "transition_shadow_only"
+                force_shadow = True
 
-        elif regime == "CHOP":
-            if not ENABLE_CHOP_MODE:
-                hold_reason = "chop_disabled"
-            elif mom_band != "LOW":
-                hold_reason = "chop_momentum_block"
-            elif alignment != "aligned":
-                hold_reason = "chop_alignment_block"
+            elif regime == "CHOP":
+                if not ENABLE_CHOP_MODE:
+                    hold_reason = "chop_disabled"
+                elif mom_band != "LOW":
+                    hold_reason = "chop_momentum_block"
+                elif alignment != "aligned":
+                    hold_reason = "chop_alignment_block"
 
-        elif abs_trend < MIN_TREND:
-            hold_reason = "not_strong_trend"
+            elif abs_trend < MIN_TREND:
+                hold_reason = "not_strong_trend"
 
-        elif abs_mom < MIN_MOM:
-            hold_reason = "momentum_too_weak"
+            elif abs_mom < MIN_MOM:
+                hold_reason = "momentum_too_weak"
 
-        elif ENABLE_MOMENTUM_FILTER and mom_band == "HIGH":
-            hold_reason = "filtered_high_momentum"
+            elif ENABLE_MOMENTUM_FILTER and mom_band == "HIGH":
+                hold_reason = "filtered_high_momentum"
 
-        elif tier != "A":
-            hold_reason = "low_quality"
+            elif tier != "A":
+                hold_reason = "low_quality"
 
         action = "OPEN" if hold_reason is None else "BLOCKED"
 
@@ -226,7 +245,7 @@ def webhook():
                 ))
 
         # =========================
-        # 🌍 GLOBAL EXIT ENGINE (FIXED)
+        # 🌍 EXIT ENGINE (unchanged)
         # =========================
         cur.execute("""
             SELECT id, symbol, direction, entry_price, opened_at, peak_pnl_percent, is_shadow
@@ -237,17 +256,9 @@ def webhook():
         open_trades = cur.fetchall()
 
         for row in open_trades:
-            tid = row[0]
-            sym = row[1]
-            direction = row[2]
-            entry_price = row[3]
-            opened_at = row[4]
-            peak_pnl = row[5] or 0
-            is_shadow = row[6]
+            tid, sym, direction, entry_price, opened_at, peak_pnl, is_shadow = row
 
-            # 🧠 USE CORRECT SYMBOL PRICE
             trade_price = PRICE_CACHE.get(sym)
-
             if not trade_price:
                 continue
 
@@ -256,7 +267,7 @@ def webhook():
 
             pnl_percent = pnl * 100
 
-            if pnl_percent > peak_pnl:
+            if pnl_percent > (peak_pnl or 0):
                 cur.execute(
                     "UPDATE bot_trades SET peak_pnl_percent=%s WHERE id=%s",
                     (pnl_percent, tid)
@@ -265,11 +276,10 @@ def webhook():
             mins = (now - opened_at).total_seconds() / 60
             close_reason = None
 
-            # SAFETY
             if ENABLE_SAFETY_TIMEOUT and mins > MAX_TRADE_DURATION_MIN:
                 close_reason = "safety_timeout"
 
-            elif ENABLE_GIVEBACK_EXIT and peak_pnl >= PROTECT_PROFIT_THRESHOLD:
+            elif ENABLE_GIVEBACK_EXIT and peak_pnl and peak_pnl >= PROTECT_PROFIT_THRESHOLD:
                 if pnl_percent < peak_pnl * GIVEBACK_RATIO:
                     close_reason = "giveback_exit"
 
