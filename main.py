@@ -1,13 +1,15 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.25.0
+# VERSION: v3.26.0
 # NOTES:
-# - ✅ EXTREME-ONLY LONG SYSTEM (shadow mode)
-# - ✅ SHORTS RE-ENABLED
+# - ✅ REGIME-AWARE EXIT ENGINE
+# - ✅ TREND HOLD PROTECTION
+# - ✅ EARLY FAIL CUT (faster losers)
+# - ✅ MOMENTUM-BASED TREND EXIT
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v3.25.0 RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v3.26.0 RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -37,12 +39,23 @@ ENABLE_CHOP_MODE = True
 ENABLE_SAFETY_TIMEOUT = True
 MAX_TRADE_DURATION_MIN = 90
 
-# 🚀 NEW LONG SYSTEM
+# 🚀 LONG SYSTEM
 ENABLE_LONGS = True
-LONG_MODE = "EXTREME_ONLY"   # "OFF", "EXTREME_ONLY"
-LONGS_SHADOW_ONLY = True     # 👈 start in shadow
+LONG_MODE = "EXTREME_ONLY"
+LONGS_SHADOW_ONLY = True
 
-DATA_VERSION = "v3.25.0"
+# 🚀 NEW EXIT FEATURES
+ENABLE_EARLY_FAIL = True
+EARLY_FAIL_MINUTES = 5
+EARLY_FAIL_THRESHOLD = -0.001
+
+ENABLE_TREND_HOLD = True
+MIN_HOLD_TRENDING = 10
+
+ENABLE_TREND_MOM_EXIT = True
+TREND_MOM_EXIT_THRESHOLD = 0.15
+
+DATA_VERSION = "v3.26.0"
 
 # =========================
 # 🧠 PRICE CACHE
@@ -125,18 +138,14 @@ def webhook():
         print(f"📊 {symbol} | {decision} | {regime} | {mom_band} | {alignment}", flush=True)
 
         # =========================
-        # 🎯 ENTRY LOGIC
+        # 🎯 ENTRY LOGIC (UNCHANGED)
         # =========================
         force_shadow = False
         hold_reason = None
 
-        # 🚫 NO SIGNAL
         if decision not in ["LONG", "SHORT"]:
             hold_reason = "no_decision"
 
-        # =========================
-        # 🧠 LONG ENGINE
-        # =========================
         elif decision == "LONG":
 
             if not ENABLE_LONGS:
@@ -150,15 +159,9 @@ def webhook():
                         hold_reason = "long_shadow_validation"
                         force_shadow = True
 
-        # =========================
-        # 🧠 SHORT ENGINE (RESTORED)
-        # =========================
         elif decision == "SHORT":
-            pass  # allow full short system
+            pass
 
-        # =========================
-        # EXISTING FILTERS (apply to both)
-        # =========================
         if hold_reason is None:
 
             if regime == "TRANSITION":
@@ -220,11 +223,9 @@ def webhook():
                     regime, mom_band
                 ))
 
-                print(f"🚀 OPEN | {symbol} | {decision} | {regime} | {mom_band}", flush=True)
+                print(f"🚀 OPEN | {symbol}", flush=True)
 
         else:
-            print(f"👻 SHADOW | {symbol} | reason={hold_reason}", flush=True)
-
             if ENABLE_SHADOW_TRADES:
                 cur.execute("""
                     INSERT INTO bot_trades (
@@ -245,10 +246,10 @@ def webhook():
                 ))
 
         # =========================
-        # 🌍 EXIT ENGINE (unchanged)
+        # 🌍 EXIT ENGINE (UPGRADED)
         # =========================
         cur.execute("""
-            SELECT id, symbol, direction, entry_price, opened_at, peak_pnl_percent, is_shadow
+            SELECT id, symbol, direction, entry_price, opened_at, peak_pnl_percent, is_shadow, regime
             FROM bot_trades
             WHERE status='OPEN'
         """)
@@ -256,7 +257,7 @@ def webhook():
         open_trades = cur.fetchall()
 
         for row in open_trades:
-            tid, sym, direction, entry_price, opened_at, peak_pnl, is_shadow = row
+            tid, sym, direction, entry_price, opened_at, peak_pnl, is_shadow, trade_regime = row
 
             trade_price = PRICE_CACHE.get(sym)
             if not trade_price:
@@ -276,23 +277,41 @@ def webhook():
             mins = (now - opened_at).total_seconds() / 60
             close_reason = None
 
+            # SAFETY
             if ENABLE_SAFETY_TIMEOUT and mins > MAX_TRADE_DURATION_MIN:
                 close_reason = "safety_timeout"
 
+            # EARLY FAIL (new)
+            elif ENABLE_EARLY_FAIL and mins > EARLY_FAIL_MINUTES and pnl < EARLY_FAIL_THRESHOLD:
+                close_reason = "early_fail"
+
+            # TREND HOLD PROTECTION
+            elif ENABLE_TREND_HOLD and trade_regime == "TRENDING" and mins < MIN_HOLD_TRENDING:
+                close_reason = None
+
+            # GIVEBACK
             elif ENABLE_GIVEBACK_EXIT and peak_pnl and peak_pnl >= PROTECT_PROFIT_THRESHOLD:
                 if pnl_percent < peak_pnl * GIVEBACK_RATIO:
                     close_reason = "giveback_exit"
 
-            elif pnl < -0.003:
+            # HARD STOP (slightly relaxed)
+            elif pnl < -0.004:
                 close_reason = "hard_stop"
-            elif pnl > 0.003 and mins < 15:
+
+            # QUICK PROFIT (DISABLED IN TRENDING)
+            elif trade_regime != "TRENDING" and pnl > 0.003 and mins < 15:
                 close_reason = "quick_profit"
-            elif pnl > 0 and abs_mom < 0.1:
-                close_reason = "momentum_drop"
+
+            # TREND MOMENTUM EXIT
+            elif ENABLE_TREND_MOM_EXIT and trade_regime == "TRENDING" and pnl > 0 and abs_mom < TREND_MOM_EXIT_THRESHOLD:
+                close_reason = "trend_exhaustion"
+
             elif pnl > 0 and alignment != "aligned":
                 close_reason = "trend_flip"
+
             elif mins > 10 and pnl <= 0:
                 close_reason = "time_fail_fast"
+
             elif mins > 60:
                 close_reason = "time_cut"
 
