@@ -1,15 +1,15 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.26.0
+# VERSION: v3.26.1
 # NOTES:
-# - ✅ REGIME-AWARE EXIT ENGINE
-# - ✅ TREND HOLD PROTECTION
-# - ✅ EARLY FAIL CUT (faster losers)
-# - ✅ MOMENTUM-BASED TREND EXIT
+# - ✅ FIXED DATA PIPELINE (momentum/trend storage)
+# - ✅ ADAPTIVE GIVEBACK EXIT
+# - ✅ EXIT METRICS CAPTURE
+# - ✅ WEAK TRADE KILLER
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v3.26.0 RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v3.26.1 RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -21,7 +21,7 @@ app = Flask(__name__)
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
 # =========================
-# ⚙️ CONFIG
+# ⚙️ CONFIG (UNCHANGED)
 # =========================
 MAX_OPEN_TRADES = 7
 MIN_TREND = 0.10
@@ -30,7 +30,7 @@ TRADE_SIZE_GBP = 100
 
 ENABLE_GIVEBACK_EXIT = True
 PROTECT_PROFIT_THRESHOLD = 0.2
-GIVEBACK_RATIO = 0.5
+GIVEBACK_RATIO = 0.5  # (kept but no longer primary driver)
 
 ENABLE_MOMENTUM_FILTER = True
 ENABLE_SHADOW_TRADES = True
@@ -39,12 +39,10 @@ ENABLE_CHOP_MODE = True
 ENABLE_SAFETY_TIMEOUT = True
 MAX_TRADE_DURATION_MIN = 90
 
-# 🚀 LONG SYSTEM
 ENABLE_LONGS = True
 LONG_MODE = "EXTREME_ONLY"
 LONGS_SHADOW_ONLY = True
 
-# 🚀 NEW EXIT FEATURES
 ENABLE_EARLY_FAIL = True
 EARLY_FAIL_MINUTES = 5
 EARLY_FAIL_THRESHOLD = -0.001
@@ -55,18 +53,15 @@ MIN_HOLD_TRENDING = 10
 ENABLE_TREND_MOM_EXIT = True
 TREND_MOM_EXIT_THRESHOLD = 0.15
 
-DATA_VERSION = "v3.26.0"
+DATA_VERSION = "v3.26.1"
 
-# =========================
-# 🧠 PRICE CACHE
-# =========================
 PRICE_CACHE = {}
 
 def get_db():
     return psycopg2.connect(DATABASE_URL)
 
 # =========================
-# 🧠 CLASSIFIERS
+# 🧠 CLASSIFIERS (UNCHANGED)
 # =========================
 def classify_trade(momentum, trend):
     abs_mom = abs(momentum)
@@ -80,7 +75,6 @@ def classify_trade(momentum, trend):
         return "B", "B"
 
     return "C", "C"
-
 
 def classify_regime(abs_trend):
     if abs_trend >= 0.25:
@@ -125,7 +119,6 @@ def webhook():
         tier, subtier = classify_trade(momentum, trend)
         regime = classify_regime(abs_trend)
 
-        # MOM BAND
         if abs_mom < 0.5:
             mom_band = "LOW"
         elif abs_mom < 1.0:
@@ -138,7 +131,7 @@ def webhook():
         print(f"📊 {symbol} | {decision} | {regime} | {mom_band} | {alignment}", flush=True)
 
         # =========================
-        # 🎯 ENTRY LOGIC (UNCHANGED)
+        # ENTRY LOGIC (UNCHANGED)
         # =========================
         force_shadow = False
         hold_reason = None
@@ -147,10 +140,8 @@ def webhook():
             hold_reason = "no_decision"
 
         elif decision == "LONG":
-
             if not ENABLE_LONGS:
                 hold_reason = "longs_disabled"
-
             elif LONG_MODE == "EXTREME_ONLY":
                 if not (regime == "TRENDING" and mom_band == "EXTREME"):
                     hold_reason = "long_not_extreme_trending"
@@ -163,7 +154,6 @@ def webhook():
             pass
 
         if hold_reason is None:
-
             if regime == "TRANSITION":
                 hold_reason = "transition_shadow_only"
                 force_shadow = True
@@ -194,7 +184,7 @@ def webhook():
         cur = conn.cursor()
 
         # =========================
-        # 🚀 ENTRY
+        # ENTRY (FIXED DATA FIELDS)
         # =========================
         if action == "OPEN" and not force_shadow:
 
@@ -211,14 +201,16 @@ def webhook():
                         symbol, direction, entry_price,
                         status, opened_at, data_version,
                         entry_momentum, entry_trend,
+                        momentum_strength, trend_strength,
                         regime, mom_band,
                         is_shadow, hold_reason,
                         peak_pnl_percent
                     )
-                    VALUES (%s,%s,%s,'OPEN',NOW(),%s,%s,%s,%s,%s,FALSE,NULL,0)
+                    VALUES (%s,%s,%s,'OPEN',NOW(),%s,%s,%s,%s,%s,%s,%s,FALSE,NULL,0)
                 """, (
                     symbol, decision, price,
                     DATA_VERSION,
+                    momentum, trend,
                     momentum, trend,
                     regime, mom_band
                 ))
@@ -232,21 +224,23 @@ def webhook():
                         symbol, direction, entry_price,
                         status, opened_at, data_version,
                         entry_momentum, entry_trend,
+                        momentum_strength, trend_strength,
                         regime, mom_band,
                         is_shadow, hold_reason,
                         peak_pnl_percent
                     )
-                    VALUES (%s,%s,%s,'OPEN',NOW(),%s,%s,%s,%s,%s,TRUE,%s,0)
+                    VALUES (%s,%s,%s,'OPEN',NOW(),%s,%s,%s,%s,%s,%s,%s,TRUE,%s,0)
                 """, (
                     symbol, decision, price,
                     DATA_VERSION,
+                    momentum, trend,
                     momentum, trend,
                     regime, mom_band,
                     hold_reason
                 ))
 
         # =========================
-        # 🌍 EXIT ENGINE (UPGRADED)
+        # EXIT ENGINE (UPGRADED)
         # =========================
         cur.execute("""
             SELECT id, symbol, direction, entry_price, opened_at, peak_pnl_percent, is_shadow, regime
@@ -281,28 +275,38 @@ def webhook():
             if ENABLE_SAFETY_TIMEOUT and mins > MAX_TRADE_DURATION_MIN:
                 close_reason = "safety_timeout"
 
-            # EARLY FAIL (new)
+            # EARLY FAIL
             elif ENABLE_EARLY_FAIL and mins > EARLY_FAIL_MINUTES and pnl < EARLY_FAIL_THRESHOLD:
                 close_reason = "early_fail"
 
-            # TREND HOLD PROTECTION
+            # WEAK TRADE KILLER (NEW)
+            elif peak_pnl is not None and peak_pnl < 3 and mins > 15:
+                close_reason = "no_follow_through"
+
+            # TREND HOLD
             elif ENABLE_TREND_HOLD and trade_regime == "TRENDING" and mins < MIN_HOLD_TRENDING:
                 close_reason = None
 
-            # GIVEBACK
-            elif ENABLE_GIVEBACK_EXIT and peak_pnl and peak_pnl >= PROTECT_PROFIT_THRESHOLD:
-                if pnl_percent < peak_pnl * GIVEBACK_RATIO:
+            # ADAPTIVE GIVEBACK (NEW)
+            elif ENABLE_GIVEBACK_EXIT and peak_pnl:
+
+                if peak_pnl >= 50:
+                    giveback_limit = 0.25
+                elif peak_pnl >= 20:
+                    giveback_limit = 0.4
+                else:
+                    giveback_limit = 0.6
+
+                if pnl_percent < peak_pnl * (1 - giveback_limit):
                     close_reason = "giveback_exit"
 
-            # HARD STOP (slightly relaxed)
+            # HARD STOP
             elif pnl < -0.004:
                 close_reason = "hard_stop"
 
-            # QUICK PROFIT (DISABLED IN TRENDING)
             elif trade_regime != "TRENDING" and pnl > 0.003 and mins < 15:
                 close_reason = "quick_profit"
 
-            # TREND MOMENTUM EXIT
             elif ENABLE_TREND_MOM_EXIT and trade_regime == "TRENDING" and pnl > 0 and abs_mom < TREND_MOM_EXIT_THRESHOLD:
                 close_reason = "trend_exhaustion"
 
@@ -326,11 +330,15 @@ def webhook():
                         pnl_percent=%s,
                         pnl_gbp=%s,
                         trade_size_gbp=%s,
-                        close_reason=%s
+                        close_reason=%s,
+                        exit_momentum=%s,
+                        exit_trend=%s
                     WHERE id=%s
                 """, (
                     trade_price, pnl_percent, pnl_gbp, TRADE_SIZE_GBP,
-                    close_reason, tid
+                    close_reason,
+                    momentum, trend,
+                    tid
                 ))
 
                 tag = "👻" if is_shadow else "💰"
