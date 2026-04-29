@@ -1,15 +1,14 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.26.1
+# VERSION: v3.26.2
 # NOTES:
-# - ✅ FIXED DATA PIPELINE (momentum/trend storage)
-# - ✅ ADAPTIVE GIVEBACK EXIT
-# - ✅ EXIT METRICS CAPTURE
-# - ✅ WEAK TRADE KILLER
+# - ✅ TRENDING EXIT FIX (removed premature exits)
+# - ✅ PRESERVE TREND RUNNERS
+# - ✅ CHOP LOGIC UNCHANGED
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v3.26.1 RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v3.26.2 RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -30,7 +29,7 @@ TRADE_SIZE_GBP = 100
 
 ENABLE_GIVEBACK_EXIT = True
 PROTECT_PROFIT_THRESHOLD = 0.2
-GIVEBACK_RATIO = 0.5  # (kept but no longer primary driver)
+GIVEBACK_RATIO = 0.5
 
 ENABLE_MOMENTUM_FILTER = True
 ENABLE_SHADOW_TRADES = True
@@ -53,7 +52,7 @@ MIN_HOLD_TRENDING = 10
 ENABLE_TREND_MOM_EXIT = True
 TREND_MOM_EXIT_THRESHOLD = 0.15
 
-DATA_VERSION = "v3.26.1"
+DATA_VERSION = "v3.26.2"
 
 PRICE_CACHE = {}
 
@@ -184,7 +183,7 @@ def webhook():
         cur = conn.cursor()
 
         # =========================
-        # ENTRY (FIXED DATA FIELDS)
+        # ENTRY (UNCHANGED)
         # =========================
         if action == "OPEN" and not force_shadow:
 
@@ -240,7 +239,7 @@ def webhook():
                 ))
 
         # =========================
-        # EXIT ENGINE (UPGRADED)
+        # 🌍 EXIT ENGINE (FIXED)
         # =========================
         cur.execute("""
             SELECT id, symbol, direction, entry_price, opened_at, peak_pnl_percent, is_shadow, regime
@@ -271,24 +270,20 @@ def webhook():
             mins = (now - opened_at).total_seconds() / 60
             close_reason = None
 
-            # SAFETY
             if ENABLE_SAFETY_TIMEOUT and mins > MAX_TRADE_DURATION_MIN:
                 close_reason = "safety_timeout"
 
-            # EARLY FAIL
             elif ENABLE_EARLY_FAIL and mins > EARLY_FAIL_MINUTES and pnl < EARLY_FAIL_THRESHOLD:
                 close_reason = "early_fail"
 
-            # WEAK TRADE KILLER (NEW)
             elif peak_pnl is not None and peak_pnl < 3 and mins > 15:
                 close_reason = "no_follow_through"
 
-            # TREND HOLD
             elif ENABLE_TREND_HOLD and trade_regime == "TRENDING" and mins < MIN_HOLD_TRENDING:
                 close_reason = None
 
-            # ADAPTIVE GIVEBACK (NEW)
-            elif ENABLE_GIVEBACK_EXIT and peak_pnl:
+            # ✅ FIX 1: GIVEBACK disabled in TRENDING
+            elif trade_regime != "TRENDING" and ENABLE_GIVEBACK_EXIT and peak_pnl:
 
                 if peak_pnl >= 50:
                     giveback_limit = 0.25
@@ -300,7 +295,6 @@ def webhook():
                 if pnl_percent < peak_pnl * (1 - giveback_limit):
                     close_reason = "giveback_exit"
 
-            # HARD STOP
             elif pnl < -0.004:
                 close_reason = "hard_stop"
 
@@ -310,10 +304,12 @@ def webhook():
             elif ENABLE_TREND_MOM_EXIT and trade_regime == "TRENDING" and pnl > 0 and abs_mom < TREND_MOM_EXIT_THRESHOLD:
                 close_reason = "trend_exhaustion"
 
-            elif pnl > 0 and alignment != "aligned":
+            # ✅ FIX 2: trend_flip disabled in TRENDING
+            elif trade_regime != "TRENDING" and pnl > 0 and alignment != "aligned":
                 close_reason = "trend_flip"
 
-            elif mins > 10 and pnl <= 0:
+            # ✅ FIX 3: time_fail_fast disabled in TRENDING
+            elif trade_regime != "TRENDING" and mins > 10 and pnl <= 0:
                 close_reason = "time_fail_fast"
 
             elif mins > 60:
