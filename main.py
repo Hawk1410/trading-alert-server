@@ -1,14 +1,17 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.27.0
+# VERSION: v3.27.1
 # NOTES:
-# - ✅ ENABLE CHOP TRADES WITHOUT DECISION
-# - ✅ MOMENTUM-DERIVED DIRECTION IN CHOP
-# - ✅ ALL OTHER LOGIC IDENTICAL TO v3.26.2
+# - ✅ CHOP AUTO-DIRECTION (momentum-based)
+# - ✅ EARLY FAIL OPTIMISED BY REGIME
+#     - TRENDING: disabled
+#     - TRANSITION: 5 min / -0.1%
+#     - CHOP: 3 min / -0.1%
+# - ✅ ALL OTHER LOGIC PRESERVED
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v3.27.0 RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v3.27.1 RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -20,7 +23,7 @@ app = Flask(__name__)
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
 # =========================
-# ⚙️ CONFIG (UNCHANGED)
+# ⚙️ CONFIG
 # =========================
 MAX_OPEN_TRADES = 7
 MIN_TREND = 0.10
@@ -43,8 +46,6 @@ LONG_MODE = "EXTREME_ONLY"
 LONGS_SHADOW_ONLY = True
 
 ENABLE_EARLY_FAIL = True
-EARLY_FAIL_MINUTES = 5
-EARLY_FAIL_THRESHOLD = -0.001
 
 ENABLE_TREND_HOLD = True
 MIN_HOLD_TRENDING = 10
@@ -52,7 +53,7 @@ MIN_HOLD_TRENDING = 10
 ENABLE_TREND_MOM_EXIT = True
 TREND_MOM_EXIT_THRESHOLD = 0.15
 
-DATA_VERSION = "v3.27.0"
+DATA_VERSION = "v3.27.1"
 
 PRICE_CACHE = {}
 
@@ -60,7 +61,7 @@ def get_db():
     return psycopg2.connect(DATABASE_URL)
 
 # =========================
-# 🧠 CLASSIFIERS (UNCHANGED)
+# 🧠 CLASSIFIERS
 # =========================
 def classify_trade(momentum, trend):
     abs_mom = abs(momentum)
@@ -130,12 +131,12 @@ def webhook():
         print(f"📊 {symbol} | {decision} | {regime} | {mom_band} | {alignment}", flush=True)
 
         # =========================
-        # ENTRY LOGIC (UPDATED)
+        # ENTRY LOGIC
         # =========================
         force_shadow = False
         hold_reason = None
 
-        # 🔥 ONLY CHANGE — CHOP DECISION OVERRIDE
+        # CHOP AUTO-DIRECTION
         if regime == "CHOP" and decision is None:
             if momentum > 0:
                 decision = "LONG"
@@ -192,7 +193,7 @@ def webhook():
         cur = conn.cursor()
 
         # =========================
-        # ENTRY (UNCHANGED)
+        # ENTRY
         # =========================
         if action == "OPEN" and not force_shadow:
 
@@ -248,7 +249,7 @@ def webhook():
                 ))
 
         # =========================
-        # EXIT ENGINE (IDENTICAL TO v3.26.2)
+        # EXIT ENGINE (UPDATED)
         # =========================
         cur.execute("""
             SELECT id, symbol, direction, entry_price, opened_at, peak_pnl_percent, is_shadow, regime
@@ -279,11 +280,22 @@ def webhook():
             mins = (now - opened_at).total_seconds() / 60
             close_reason = None
 
+            # SAFETY
             if ENABLE_SAFETY_TIMEOUT and mins > MAX_TRADE_DURATION_MIN:
                 close_reason = "safety_timeout"
 
-            elif ENABLE_EARLY_FAIL and mins > EARLY_FAIL_MINUTES and pnl < EARLY_FAIL_THRESHOLD:
-                close_reason = "early_fail"
+            # 🔥 EARLY FAIL (REGIME OPTIMISED)
+            elif ENABLE_EARLY_FAIL:
+
+                if trade_regime == "TRANSITION":
+                    if mins > 5 and pnl < -0.001:
+                        close_reason = "early_fail"
+
+                elif trade_regime == "CHOP":
+                    if mins > 3 and pnl < -0.001:
+                        close_reason = "early_fail"
+
+                # TRENDING → disabled
 
             elif peak_pnl is not None and peak_pnl < 3 and mins > 15:
                 close_reason = "no_follow_through"
