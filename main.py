@@ -1,14 +1,14 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.26.2
+# VERSION: v3.27.0
 # NOTES:
-# - ✅ TRENDING EXIT FIX (removed premature exits)
-# - ✅ PRESERVE TREND RUNNERS
-# - ✅ CHOP LOGIC UNCHANGED
+# - ✅ ENABLE CHOP TRADES WITHOUT DECISION
+# - ✅ MOMENTUM-DERIVED DIRECTION IN CHOP
+# - ✅ ALL OTHER LOGIC IDENTICAL TO v3.26.2
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v3.26.2 RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v3.27.0 RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -52,7 +52,7 @@ MIN_HOLD_TRENDING = 10
 ENABLE_TREND_MOM_EXIT = True
 TREND_MOM_EXIT_THRESHOLD = 0.15
 
-DATA_VERSION = "v3.26.2"
+DATA_VERSION = "v3.27.0"
 
 PRICE_CACHE = {}
 
@@ -130,12 +130,21 @@ def webhook():
         print(f"📊 {symbol} | {decision} | {regime} | {mom_band} | {alignment}", flush=True)
 
         # =========================
-        # ENTRY LOGIC (UNCHANGED)
+        # ENTRY LOGIC (UPDATED)
         # =========================
         force_shadow = False
         hold_reason = None
 
-        if decision not in ["LONG", "SHORT"]:
+        # 🔥 ONLY CHANGE — CHOP DECISION OVERRIDE
+        if regime == "CHOP" and decision is None:
+            if momentum > 0:
+                decision = "LONG"
+            elif momentum < 0:
+                decision = "SHORT"
+            else:
+                hold_reason = "no_momentum"
+
+        if decision not in ["LONG", "SHORT"] and hold_reason is None:
             hold_reason = "no_decision"
 
         elif decision == "LONG":
@@ -239,7 +248,7 @@ def webhook():
                 ))
 
         # =========================
-        # 🌍 EXIT ENGINE (FIXED)
+        # EXIT ENGINE (IDENTICAL TO v3.26.2)
         # =========================
         cur.execute("""
             SELECT id, symbol, direction, entry_price, opened_at, peak_pnl_percent, is_shadow, regime
@@ -282,7 +291,6 @@ def webhook():
             elif ENABLE_TREND_HOLD and trade_regime == "TRENDING" and mins < MIN_HOLD_TRENDING:
                 close_reason = None
 
-            # ✅ FIX 1: GIVEBACK disabled in TRENDING
             elif trade_regime != "TRENDING" and ENABLE_GIVEBACK_EXIT and peak_pnl:
 
                 if peak_pnl >= 50:
@@ -304,11 +312,9 @@ def webhook():
             elif ENABLE_TREND_MOM_EXIT and trade_regime == "TRENDING" and pnl > 0 and abs_mom < TREND_MOM_EXIT_THRESHOLD:
                 close_reason = "trend_exhaustion"
 
-            # ✅ FIX 2: trend_flip disabled in TRENDING
             elif trade_regime != "TRENDING" and pnl > 0 and alignment != "aligned":
                 close_reason = "trend_flip"
 
-            # ✅ FIX 3: time_fail_fast disabled in TRENDING
             elif trade_regime != "TRENDING" and mins > 10 and pnl <= 0:
                 close_reason = "time_fail_fast"
 
