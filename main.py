@@ -1,17 +1,15 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.27.1
+# VERSION: v3.28
 # NOTES:
-# - ✅ CHOP AUTO-DIRECTION (momentum-based)
-# - ✅ EARLY FAIL OPTIMISED BY REGIME
-#     - TRENDING: disabled
-#     - TRANSITION: 5 min / -0.1%
-#     - CHOP: 3 min / -0.1%
-# - ✅ ALL OTHER LOGIC PRESERVED
+# - ✅ GLOBAL REGIME DETECTION (avg_peak based)
+# - ✅ SHADOW-ONLY MODE IN BAD MARKET
+# - ✅ AGGRESSIVE MODE FLAG (future stacking hook)
+# - ✅ NO CHANGES to existing entry/exit logic
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v3.27.1 RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v3.28 RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -53,12 +51,47 @@ MIN_HOLD_TRENDING = 10
 ENABLE_TREND_MOM_EXIT = True
 TREND_MOM_EXIT_THRESHOLD = 0.15
 
-DATA_VERSION = "v3.27.1"
+# 🧠 NEW: REGIME SYSTEM
+ENABLE_GLOBAL_REGIME = True
+REGIME_LOOKBACK_TRADES = 30
+BAD_MARKET_THRESHOLD = 0.20
+GOOD_MARKET_THRESHOLD = 0.30
+
+DATA_VERSION = "v3.28"
 
 PRICE_CACHE = {}
 
 def get_db():
     return psycopg2.connect(DATABASE_URL)
+
+# =========================
+# 🧠 GLOBAL REGIME DETECTOR
+# =========================
+def get_global_regime(cur):
+    if not ENABLE_GLOBAL_REGIME:
+        return "NEUTRAL", 0.0
+
+    cur.execute(f"""
+        SELECT AVG(peak_pnl_percent)
+        FROM (
+            SELECT peak_pnl_percent
+            FROM bot_trades
+            WHERE status = 'CLOSED'
+            AND is_shadow = FALSE
+            ORDER BY closed_at DESC
+            LIMIT {REGIME_LOOKBACK_TRADES}
+        ) sub
+    """)
+
+    result = cur.fetchone()
+    avg_peak = float(result[0]) if result and result[0] else 0.0
+
+    if avg_peak < BAD_MARKET_THRESHOLD:
+        return "BAD", avg_peak
+    elif avg_peak > GOOD_MARKET_THRESHOLD:
+        return "GOOD", avg_peak
+    else:
+        return "NEUTRAL", avg_peak
 
 # =========================
 # 🧠 CLASSIFIERS
@@ -128,6 +161,18 @@ def webhook():
         else:
             mom_band = "EXTREME"
 
+        conn = get_db()
+        cur = conn.cursor()
+
+        # =========================
+        # 🌍 GLOBAL REGIME CHECK
+        # =========================
+        global_regime, global_avg_peak = get_global_regime(cur)
+
+        AGGRESSIVE_MODE = global_regime == "GOOD"
+        SHADOW_ONLY_MODE = global_regime == "BAD"
+
+        print(f"🌍 GLOBAL: {global_regime} | avg_peak={round(global_avg_peak,4)}", flush=True)
         print(f"📊 {symbol} | {decision} | {regime} | {mom_band} | {alignment}", flush=True)
 
         # =========================
@@ -136,6 +181,11 @@ def webhook():
         force_shadow = False
         hold_reason = None
 
+        # 🔥 GLOBAL SHADOW MODE
+        if SHADOW_ONLY_MODE:
+            force_shadow = True
+            hold_reason = "global_bad_market"
+
         # CHOP AUTO-DIRECTION
         if regime == "CHOP" and decision is None:
             if momentum > 0:
@@ -143,7 +193,7 @@ def webhook():
             elif momentum < 0:
                 decision = "SHORT"
             else:
-                hold_reason = "no_momentum"
+                hold_reason = hold_reason or "no_momentum"
 
         if decision not in ["LONG", "SHORT"] and hold_reason is None:
             hold_reason = "no_decision"
@@ -189,11 +239,8 @@ def webhook():
 
         action = "OPEN" if hold_reason is None else "BLOCKED"
 
-        conn = get_db()
-        cur = conn.cursor()
-
         # =========================
-        # ENTRY
+        # ENTRY EXECUTION
         # =========================
         if action == "OPEN" and not force_shadow:
 
@@ -249,7 +296,7 @@ def webhook():
                 ))
 
         # =========================
-        # EXIT ENGINE (UPDATED)
+        # EXIT ENGINE (UNCHANGED)
         # =========================
         cur.execute("""
             SELECT id, symbol, direction, entry_price, opened_at, peak_pnl_percent, is_shadow, regime
@@ -280,22 +327,16 @@ def webhook():
             mins = (now - opened_at).total_seconds() / 60
             close_reason = None
 
-            # SAFETY
             if ENABLE_SAFETY_TIMEOUT and mins > MAX_TRADE_DURATION_MIN:
                 close_reason = "safety_timeout"
 
-            # 🔥 EARLY FAIL (REGIME OPTIMISED)
             elif ENABLE_EARLY_FAIL:
-
                 if trade_regime == "TRANSITION":
                     if mins > 5 and pnl < -0.001:
                         close_reason = "early_fail"
-
                 elif trade_regime == "CHOP":
                     if mins > 3 and pnl < -0.001:
                         close_reason = "early_fail"
-
-                # TRENDING → disabled
 
             elif peak_pnl is not None and peak_pnl < 3 and mins > 15:
                 close_reason = "no_follow_through"
