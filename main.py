@@ -1,15 +1,14 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.28
+# VERSION: v3.29
 # NOTES:
-# - ✅ GLOBAL REGIME DETECTION (avg_peak based)
-# - ✅ SHADOW-ONLY MODE IN BAD MARKET
-# - ✅ AGGRESSIVE MODE FLAG (future stacking hook)
-# - ✅ NO CHANGES to existing entry/exit logic
+# - ✅ FIXED EARLY FAIL LOGIC
+#     - Only exits if trade NEVER went green (peak_pnl <= 0)
+# - ✅ ALL OTHER LOGIC UNCHANGED FROM v3.28
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v3.28 RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v3.29 RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -51,13 +50,13 @@ MIN_HOLD_TRENDING = 10
 ENABLE_TREND_MOM_EXIT = True
 TREND_MOM_EXIT_THRESHOLD = 0.15
 
-# 🧠 NEW: REGIME SYSTEM
+# 🧠 REGIME SYSTEM
 ENABLE_GLOBAL_REGIME = True
 REGIME_LOOKBACK_TRADES = 30
 BAD_MARKET_THRESHOLD = 0.20
 GOOD_MARKET_THRESHOLD = 0.30
 
-DATA_VERSION = "v3.28"
+DATA_VERSION = "v3.29"
 
 PRICE_CACHE = {}
 
@@ -181,12 +180,10 @@ def webhook():
         force_shadow = False
         hold_reason = None
 
-        # 🔥 GLOBAL SHADOW MODE
         if SHADOW_ONLY_MODE:
             force_shadow = True
             hold_reason = "global_bad_market"
 
-        # CHOP AUTO-DIRECTION
         if regime == "CHOP" and decision is None:
             if momentum > 0:
                 decision = "LONG"
@@ -296,7 +293,7 @@ def webhook():
                 ))
 
         # =========================
-        # EXIT ENGINE (UNCHANGED)
+        # EXIT ENGINE (EARLY FAIL FIXED)
         # =========================
         cur.execute("""
             SELECT id, symbol, direction, entry_price, opened_at, peak_pnl_percent, is_shadow, regime
@@ -332,10 +329,10 @@ def webhook():
 
             elif ENABLE_EARLY_FAIL:
                 if trade_regime == "TRANSITION":
-                    if mins > 5 and pnl < -0.001:
+                    if mins > 5 and pnl < -0.001 and (peak_pnl or 0) <= 0:
                         close_reason = "early_fail"
                 elif trade_regime == "CHOP":
-                    if mins > 3 and pnl < -0.001:
+                    if mins > 3 and pnl < -0.001 and (peak_pnl or 0) <= 0:
                         close_reason = "early_fail"
 
             elif peak_pnl is not None and peak_pnl < 3 and mins > 15:
@@ -408,3 +405,4 @@ def webhook():
     except Exception as e:
         print("❌ ERROR:", e, flush=True)
         return jsonify({"error": str(e)}), 400
+    
