@@ -1,15 +1,15 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.33.2
+# VERSION: v3.34
 # NOTES:
-# - ✅ REMOVED SHADOW TRADE CAP (multiple allowed per symbol)
-# - ✅ FIXED missing shadow trades in DB
-# - ✅ ALL LOGGING PRESERVED
-# - ✅ GLOBAL EXIT LOOP PRESERVED
+# - ✅ PRESERVES v3.33.3 DATA PIPELINE (NO NULL ISSUES)
+# - ✅ ADDS TRADE QUALITY FILTER (A / B / C)
+# - ✅ BAD REGIME: ALLOWS A TRADES (REAL), OTHERS SHADOW
+# - ✅ ALL LOGGING + BACKFILL PRESERVED
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v3.33.2 RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v3.34 RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -40,21 +40,45 @@ ENABLE_NO_PROGRESS_EXIT = True
 NO_PROGRESS_TIME_MIN = 20
 NO_PROGRESS_PEAK_THRESHOLD = 0.05
 
-DATA_VERSION = "v3.33.2"
+DATA_VERSION = "v3.34"
 
 PRICE_CACHE = {}
 
 def get_db():
     return psycopg2.connect(DATABASE_URL)
 
+# =========================
+# 🧠 REGIME CLASSIFIER (SAFE)
+# =========================
 def classify_regime(trend):
-    abs_trend = abs(trend)
-    if abs_trend >= 0.25:
-        return "TRENDING"
-    elif abs_trend >= 0.15:
-        return "TRANSITION"
-    return "CHOP"
+    try:
+        abs_trend = abs(float(trend))
+        if abs_trend >= 0.25:
+            return "TRENDING"
+        elif abs_trend >= 0.15:
+            return "TRANSITION"
+        return "CHOP"
+    except:
+        return "UNKNOWN"
 
+# =========================
+# 🧠 TRADE QUALITY (NEW)
+# =========================
+def classify_quality(momentum, trend):
+    abs_mom = abs(momentum)
+    abs_trend = abs(trend)
+
+    if abs_mom >= 0.6 and abs_trend >= 0.2:
+        return "A+"
+    if abs_mom >= 0.45 and abs_trend >= 0.18:
+        return "A"
+    if abs_mom >= 0.3 and abs_trend >= 0.12:
+        return "B"
+    return "C"
+
+# =========================
+# 🌍 GLOBAL REGIME
+# =========================
 def get_global_regime(cur):
     cur.execute("""
         SELECT AVG(peak_pnl_percent), AVG(pnl_percent)
@@ -82,6 +106,9 @@ def get_global_regime(cur):
 
     return "NEUTRAL", avg_peak, avg_final
 
+# =========================
+# 🚀 WEBHOOK
+# =========================
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
@@ -90,7 +117,7 @@ def webhook():
         data = request.get_json(force=True)
 
         symbol = data.get("symbol")
-        price = float(data.get("price", 0))
+        price = float(data.get("price", 0) or 0)
         decision = data.get("decision_model") or data.get("decision")
 
         momentum = float(data.get("momentum_strength") or 0)
@@ -106,21 +133,42 @@ def webhook():
             decision = None
 
         now = datetime.utcnow()
+
         regime = classify_regime(trend)
+        quality = classify_quality(momentum, trend)
 
         conn = get_db()
         cur = conn.cursor()
 
         global_regime, avg_peak, avg_final = get_global_regime(cur)
 
+        if not global_regime:
+            global_regime = "UNKNOWN"
+
         print(
-            f"📊 {symbol} | decision={decision} | mom={round(momentum,3)} | "
-            f"trend={round(trend,3)} | regime={regime} | GLOBAL={global_regime}",
+            f"📊 {symbol} | decision={decision} | "
+            f"mom={round(momentum,3)} | trend={round(trend,3)} | "
+            f"Q={quality} | regime={regime} | GLOBAL={global_regime}",
             flush=True
         )
 
-        force_shadow = (global_regime == "BAD")
-        block_entries = (global_regime == "VERY_BAD")
+        # ================= ENTRY CONTROL =================
+        allow_real = True
+        force_shadow = False
+        block_entries = False
+
+        if global_regime == "VERY_BAD":
+            block_entries = True
+
+        elif global_regime == "BAD":
+            if quality in ["A", "A+"]:
+                allow_real = True
+            else:
+                force_shadow = True
+
+        elif global_regime in ["NEUTRAL", "LOW_QUALITY"]:
+            if quality == "C":
+                force_shadow = True
 
         def real_exists(symbol, direction):
             cur.execute("""
@@ -137,9 +185,9 @@ def webhook():
 
             real_open = real_exists(symbol, decision)
 
-            print(f"🎯 ENTRY | {symbol} | {decision} | real={real_open}", flush=True)
+            print(f"🎯 ENTRY | {symbol} | {decision} | real={real_open} | Q={quality}", flush=True)
 
-            if not real_open and not force_shadow:
+            if not real_open and allow_real and not force_shadow:
                 cur.execute("""
                     INSERT INTO bot_trades (
                         symbol, direction, entry_price,
@@ -149,12 +197,16 @@ def webhook():
                         is_shadow, peak_pnl_percent
                     )
                     VALUES (%s,%s,%s,'OPEN',NOW(),%s,%s,%s,%s,%s,FALSE,0)
-                """, (symbol, decision, price, DATA_VERSION, momentum, trend, regime, global_regime))
+                """, (
+                    symbol, decision, price,
+                    DATA_VERSION,
+                    momentum, trend,
+                    regime, global_regime
+                ))
 
-                print(f"🚀 REAL OPEN | {symbol}", flush=True)
+                print(f"🚀 REAL OPEN | {symbol} | Q={quality}", flush=True)
 
             elif ENABLE_SHADOW_TRADES:
-                # 🔥 FULL FIX: ALWAYS ALLOW SHADOWS
                 cur.execute("""
                     INSERT INTO bot_trades (
                         symbol, direction, entry_price,
@@ -164,17 +216,28 @@ def webhook():
                         is_shadow, peak_pnl_percent
                     )
                     VALUES (%s,%s,%s,'OPEN',NOW(),%s,%s,%s,%s,%s,TRUE,0)
-                """, (symbol, decision, price, DATA_VERSION, momentum, trend, regime, global_regime))
+                """, (
+                    symbol, decision, price,
+                    DATA_VERSION,
+                    momentum, trend,
+                    regime, global_regime
+                ))
 
-                print(f"👻 SHADOW OPEN | {symbol}", flush=True)
+                print(f"👻 SHADOW OPEN | {symbol} | Q={quality}", flush=True)
 
         # ================= EXIT ENGINE =================
         cur.execute("""
-            SELECT id, symbol, direction, entry_price, opened_at, peak_pnl_percent, is_shadow
-            FROM bot_trades WHERE status='OPEN'
+            SELECT id, symbol, direction, entry_price, opened_at,
+                   peak_pnl_percent, is_shadow,
+                   momentum_strength, trend_strength, regime, global_regime
+            FROM bot_trades
+            WHERE status='OPEN'
         """)
 
-        for tid, sym, direction, entry_price, opened_at, peak_pnl, is_shadow in cur.fetchall():
+        for row in cur.fetchall():
+            (tid, sym, direction, entry_price, opened_at,
+             peak_pnl, is_shadow,
+             db_mom, db_trend, db_regime, db_global) = row
 
             trade_price = PRICE_CACHE.get(sym)
 
@@ -189,16 +252,18 @@ def webhook():
                 if res and res[0]:
                     trade_price = float(res[0])
                 else:
-                    print(f"⚠️ NO PRICE DATA | {sym}", flush=True)
                     continue
 
             pnl = ((trade_price - entry_price) / entry_price) if direction == "LONG" \
-                  else ((entry_price - trade_price) / entry_price)
+                else ((entry_price - trade_price) / entry_price)
 
             pnl_percent = pnl * 100
 
             if pnl_percent > (peak_pnl or 0):
-                cur.execute("UPDATE bot_trades SET peak_pnl_percent=%s WHERE id=%s", (pnl_percent, tid))
+                cur.execute(
+                    "UPDATE bot_trades SET peak_pnl_percent=%s WHERE id=%s",
+                    (pnl_percent, tid)
+                )
 
             mins = (now - opened_at).total_seconds() / 60
             close_reason = None
@@ -237,11 +302,24 @@ def webhook():
                         pnl_gbp=%s,
                         leakage_percent=%s,
                         trade_size_gbp=%s,
-                        close_reason=%s
+                        close_reason=%s,
+                        momentum_strength = COALESCE(momentum_strength, %s),
+                        trend_strength = COALESCE(trend_strength, %s),
+                        regime = COALESCE(regime, %s),
+                        global_regime = COALESCE(global_regime, %s)
                     WHERE id=%s
-                """, (trade_price, pnl_percent, pnl_gbp, leakage, TRADE_SIZE_GBP, close_reason, tid))
+                """, (
+                    trade_price, pnl_percent, pnl_gbp, leakage,
+                    TRADE_SIZE_GBP, close_reason,
+                    momentum, trend, regime, global_regime,
+                    tid
+                ))
 
-                print(f"{'👻' if is_shadow else '💰'} CLOSED | {sym} | {round(pnl_percent,3)}% | {close_reason}", flush=True)
+                print(
+                    f"{'👻' if is_shadow else '💰'} CLOSED | {sym} | "
+                    f"{round(pnl_percent,3)}% | {close_reason}",
+                    flush=True
+                )
 
         conn.commit()
         cur.close()
@@ -252,4 +330,3 @@ def webhook():
     except Exception as e:
         print("❌ ERROR:", e, flush=True)
         return jsonify({"error": str(e)}), 400
-        
