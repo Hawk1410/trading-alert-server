@@ -1,15 +1,15 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.32
+# VERSION: v3.33
 # NOTES:
-# - ✅ REGIME V2 IMPLEMENTED (VERY_BAD / BAD / NEUTRAL / LOW_QUALITY / GOOD)
-# - ✅ ADAPTIVE ENTRY BEHAVIOUR
-# - ✅ LOW_QUALITY EXIT TIGHTENING
-# - ✅ ALL DATA LOGGING PRESERVED
+# - ✅ GLOBAL EXIT LOOP FIX (price fallback added)
+# - ✅ NO MORE STUCK TRADES (DB fallback pricing)
+# - ✅ ADDED EVAL LOGGING (🔄 EVAL + ⚠️ NO PRICE)
+# - ✅ ALL EXISTING LOGIC PRESERVED
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v3.32 RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v3.33 RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -45,7 +45,7 @@ ENABLE_NO_PROGRESS_EXIT = True
 NO_PROGRESS_TIME_MIN = 20
 NO_PROGRESS_PEAK_THRESHOLD = 0.05
 
-DATA_VERSION = "v3.32"
+DATA_VERSION = "v3.33"
 
 PRICE_CACHE = {}
 
@@ -225,7 +225,7 @@ def webhook():
                 print(f"👻 SHADOW OPEN | {symbol}", flush=True)
 
         # =========================
-        # EXIT ENGINE
+        # EXIT ENGINE (🔥 FIXED)
         # =========================
         cur.execute("""
             SELECT id, symbol, direction, entry_price, opened_at, peak_pnl_percent, is_shadow
@@ -236,8 +236,25 @@ def webhook():
         for tid, sym, direction, entry_price, opened_at, peak_pnl, is_shadow in cur.fetchall():
 
             trade_price = PRICE_CACHE.get(sym)
+
+            # 🔥 NEW: DB FALLBACK
             if not trade_price:
-                continue
+                cur.execute("""
+                    SELECT close_price FROM bot_trades
+                    WHERE symbol=%s AND close_price IS NOT NULL
+                    ORDER BY closed_at DESC
+                    LIMIT 1
+                """, (sym,))
+                result = cur.fetchone()
+
+                if result and result[0]:
+                    trade_price = float(result[0])
+                else:
+                    print(f"⚠️ NO PRICE DATA | {sym} — skipping", flush=True)
+                    continue
+
+            # 🔄 NEW: EVAL LOG
+            print(f"🔄 EVAL | {sym} | using_price={round(trade_price,5)}", flush=True)
 
             pnl = ((trade_price - entry_price) / entry_price) if direction == "LONG" \
                   else ((entry_price - trade_price) / entry_price)
@@ -253,7 +270,6 @@ def webhook():
             mins = (now - opened_at).total_seconds() / 60
             close_reason = None
 
-            # 🔥 LOW QUALITY MODE → tighter exits
             early_factor = 0.8 if global_regime == "LOW_QUALITY" else 1.0
 
             if ENABLE_STRONG_TRAIL and peak_pnl and peak_pnl >= STRONG_TRAIL_THRESHOLD:
