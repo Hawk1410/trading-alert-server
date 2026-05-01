@@ -1,16 +1,15 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.31.1
+# VERSION: v3.32
 # NOTES:
-# - ✅ FIXED shadow trade duplication (1 per symbol+direction)
-# - ✅ ADDED profit lock system (fixes leakage)
-# - ✅ ADDED early trail + strong trail exits
-# - ✅ CLEAN LOGGING (removed spam, improved close logs)
-# - ✅ FIXED no_progress_exit threshold (0.05)
+# - ✅ REGIME V2 IMPLEMENTED (VERY_BAD / BAD / NEUTRAL / LOW_QUALITY / GOOD)
+# - ✅ ADAPTIVE ENTRY BEHAVIOUR
+# - ✅ LOW_QUALITY EXIT TIGHTENING
+# - ✅ ALL DATA LOGGING PRESERVED
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v3.31.1 RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v3.32 RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -25,13 +24,11 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 # ⚙️ CONFIG
 # =========================
 MAX_OPEN_TRADES = 7
-MIN_TREND = 0.10
-MIN_MOM = 0.05
 TRADE_SIZE_GBP = 100
 
 ENABLE_SHADOW_TRADES = True
 
-# 🚀 NEW EXIT SYSTEM
+# EXIT SYSTEM
 ENABLE_PROFIT_LOCK = True
 PROFIT_LOCK_THRESHOLD = 25
 PROFIT_LOCK_RATIO = 0.5
@@ -48,12 +45,59 @@ ENABLE_NO_PROGRESS_EXIT = True
 NO_PROGRESS_TIME_MIN = 20
 NO_PROGRESS_PEAK_THRESHOLD = 0.05
 
-DATA_VERSION = "v3.31"
+DATA_VERSION = "v3.32"
 
 PRICE_CACHE = {}
 
 def get_db():
     return psycopg2.connect(DATABASE_URL)
+
+# =========================
+# 🧠 REGIME CLASSIFIER
+# =========================
+def classify_regime(trend):
+    abs_trend = abs(trend)
+    if abs_trend >= 0.25:
+        return "TRENDING"
+    elif abs_trend >= 0.15:
+        return "TRANSITION"
+    return "CHOP"
+
+# =========================
+# 🌍 GLOBAL REGIME V2
+# =========================
+def get_global_regime(cur):
+    cur.execute("""
+        SELECT 
+            AVG(peak_pnl_percent),
+            AVG(pnl_percent)
+        FROM (
+            SELECT peak_pnl_percent, pnl_percent
+            FROM bot_trades
+            WHERE status='CLOSED'
+            AND is_shadow = FALSE
+            ORDER BY closed_at DESC
+            LIMIT 40
+        ) t
+    """)
+
+    result = cur.fetchone()
+    avg_peak = float(result[0]) if result[0] else 0
+    avg_final = float(result[1]) if result[1] else 0
+
+    if avg_peak < 0.15:
+        return "VERY_BAD", avg_peak, avg_final
+
+    if avg_peak < 0.25:
+        return "BAD", avg_peak, avg_final
+
+    if avg_peak > 0.30 and avg_final < 0.05:
+        return "LOW_QUALITY", avg_peak, avg_final
+
+    if avg_peak > 0.30:
+        return "GOOD", avg_peak, avg_final
+
+    return "NEUTRAL", avg_peak, avg_final
 
 # =========================
 # 🚀 WEBHOOK
@@ -83,18 +127,34 @@ def webhook():
 
         now = datetime.utcnow()
 
-        # 🔥 CONTEXT LOG (KEEP)
-        print(
-            f"📊 {symbol} | decision={decision} | "
-            f"mom={round(momentum,3)} | trend={round(trend,3)}",
-            flush=True
-        )
+        regime = classify_regime(trend)
 
         conn = get_db()
         cur = conn.cursor()
 
+        global_regime, avg_peak, avg_final = get_global_regime(cur)
+
+        print(
+            f"📊 {symbol} | decision={decision} | mom={round(momentum,3)} | "
+            f"trend={round(trend,3)} | regime={regime} | GLOBAL={global_regime} "
+            f"| peak={round(avg_peak,3)} | final={round(avg_final,3)}",
+            flush=True
+        )
+
         # =========================
-        # 🚨 SHADOW FIX
+        # REGIME CONTROL
+        # =========================
+        force_shadow = False
+        block_entries = False
+
+        if global_regime == "VERY_BAD":
+            block_entries = True
+
+        elif global_regime == "BAD":
+            force_shadow = True
+
+        # =========================
+        # EXISTING CHECKS
         # =========================
         def shadow_exists(symbol, direction):
             cur.execute("""
@@ -121,26 +181,27 @@ def webhook():
         # =========================
         # ENTRY
         # =========================
-        if decision in ["LONG", "SHORT"]:
+        if decision in ["LONG", "SHORT"] and not block_entries:
 
             real_open = real_exists(symbol, decision)
             shadow_open = shadow_exists(symbol, decision)
 
-            print(
-                f"🎯 ENTRY CHECK | {symbol} | {decision} | "
-                f"real={real_open} | shadow={shadow_open}",
-                flush=True
-            )
-
-            if not real_open:
+            if not real_open and not force_shadow:
                 cur.execute("""
                     INSERT INTO bot_trades (
                         symbol, direction, entry_price,
                         status, opened_at, data_version,
+                        momentum_strength, trend_strength,
+                        regime, global_regime,
                         is_shadow, peak_pnl_percent
                     )
-                    VALUES (%s,%s,%s,'OPEN',NOW(),%s,FALSE,0)
-                """, (symbol, decision, price, DATA_VERSION))
+                    VALUES (%s,%s,%s,'OPEN',NOW(),%s,%s,%s,%s,%s,FALSE,0)
+                """, (
+                    symbol, decision, price,
+                    DATA_VERSION,
+                    momentum, trend,
+                    regime, global_regime
+                ))
 
                 print(f"🚀 REAL OPEN | {symbol}", flush=True)
 
@@ -149,10 +210,17 @@ def webhook():
                     INSERT INTO bot_trades (
                         symbol, direction, entry_price,
                         status, opened_at, data_version,
+                        momentum_strength, trend_strength,
+                        regime, global_regime,
                         is_shadow, peak_pnl_percent
                     )
-                    VALUES (%s,%s,%s,'OPEN',NOW(),%s,TRUE,0)
-                """, (symbol, decision, price, DATA_VERSION))
+                    VALUES (%s,%s,%s,'OPEN',NOW(),%s,%s,%s,%s,%s,TRUE,0)
+                """, (
+                    symbol, decision, price,
+                    DATA_VERSION,
+                    momentum, trend,
+                    regime, global_regime
+                ))
 
                 print(f"👻 SHADOW OPEN | {symbol}", flush=True)
 
@@ -165,10 +233,7 @@ def webhook():
             WHERE status='OPEN'
         """)
 
-        open_trades = cur.fetchall()
-
-        for row in open_trades:
-            tid, sym, direction, entry_price, opened_at, peak_pnl, is_shadow = row
+        for tid, sym, direction, entry_price, opened_at, peak_pnl, is_shadow in cur.fetchall():
 
             trade_price = PRICE_CACHE.get(sym)
             if not trade_price:
@@ -188,27 +253,25 @@ def webhook():
             mins = (now - opened_at).total_seconds() / 60
             close_reason = None
 
-            # 🚀 STRONG TRAIL
+            # 🔥 LOW QUALITY MODE → tighter exits
+            early_factor = 0.8 if global_regime == "LOW_QUALITY" else 1.0
+
             if ENABLE_STRONG_TRAIL and peak_pnl and peak_pnl >= STRONG_TRAIL_THRESHOLD:
-                if pnl_percent <= peak_pnl * STRONG_TRAIL_RATIO:
+                if pnl_percent <= peak_pnl * (STRONG_TRAIL_RATIO * early_factor):
                     close_reason = "strong_trail_exit"
 
-            # 🚀 PROFIT LOCK
             elif ENABLE_PROFIT_LOCK and peak_pnl and peak_pnl >= PROFIT_LOCK_THRESHOLD:
-                if pnl_percent <= peak_pnl * PROFIT_LOCK_RATIO:
+                if pnl_percent <= peak_pnl * (PROFIT_LOCK_RATIO * early_factor):
                     close_reason = "profit_lock_exit"
 
-            # 🚀 EARLY TRAIL
             elif ENABLE_EARLY_TRAIL and peak_pnl and peak_pnl >= EARLY_TRAIL_THRESHOLD:
-                if pnl_percent <= peak_pnl - EARLY_TRAIL_GIVEBACK:
+                if pnl_percent <= peak_pnl - (EARLY_TRAIL_GIVEBACK * early_factor):
                     close_reason = "early_trail_exit"
 
-            # 🧠 NO PROGRESS
             elif ENABLE_NO_PROGRESS_EXIT:
                 if mins > NO_PROGRESS_TIME_MIN and (peak_pnl or 0) < NO_PROGRESS_PEAK_THRESHOLD:
                     close_reason = "no_progress_exit"
 
-            # 🧱 HARD STOP
             elif pnl < -0.004:
                 close_reason = "hard_stop"
 
