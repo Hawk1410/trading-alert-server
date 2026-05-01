@@ -6,7 +6,8 @@
 # - ✅ FIXED shadow trade duplication (1 per symbol+direction)
 # - ✅ ADDED profit lock system (fixes leakage)
 # - ✅ ADDED early trail + strong trail exits
-# - ✅ NO ENTRY LOGIC CHANGED
+# - ✅ RESTORED LOGGING (entry + exit visibility)
+# - ✅ FIXED no_progress_exit threshold (0.05)
 # =========================
 
 print("🔥🔥🔥 MAIN.PY v3.31 RUNNING 🔥🔥🔥", flush=True)
@@ -45,7 +46,7 @@ STRONG_TRAIL_RATIO = 0.65
 
 ENABLE_NO_PROGRESS_EXIT = True
 NO_PROGRESS_TIME_MIN = 20
-NO_PROGRESS_PEAK_THRESHOLD = 0.15
+NO_PROGRESS_PEAK_THRESHOLD = 0.05   # 🔥 FIXED
 
 DATA_VERSION = "v3.31"
 
@@ -82,6 +83,13 @@ def webhook():
 
         now = datetime.utcnow()
 
+        # 🔥 RESTORED CONTEXT LOG
+        print(
+            f"📊 {symbol} | decision={decision} | "
+            f"mom={round(momentum,3)} | trend={round(trend,3)}",
+            flush=True
+        )
+
         conn = get_db()
         cur = conn.cursor()
 
@@ -115,6 +123,14 @@ def webhook():
         # =========================
         if decision in ["LONG", "SHORT"]:
 
+            # 🔥 ENTRY DEBUG LOG
+            print(
+                f"🎯 ENTRY CHECK | {symbol} | {decision} | "
+                f"real={real_exists(symbol, decision)} | "
+                f"shadow={shadow_exists(symbol, decision)}",
+                flush=True
+            )
+
             if not real_exists(symbol, decision):
                 cur.execute("""
                     INSERT INTO bot_trades (
@@ -125,6 +141,8 @@ def webhook():
                     VALUES (%s,%s,%s,'OPEN',NOW(),%s,FALSE,0)
                 """, (symbol, decision, price, DATA_VERSION))
 
+                print(f"🚀 REAL OPEN | {symbol}", flush=True)
+
             elif ENABLE_SHADOW_TRADES and not shadow_exists(symbol, decision):
                 cur.execute("""
                     INSERT INTO bot_trades (
@@ -134,6 +152,8 @@ def webhook():
                     )
                     VALUES (%s,%s,%s,'OPEN',NOW(),%s,TRUE,0)
                 """, (symbol, decision, price, DATA_VERSION))
+
+                print(f"👻 SHADOW OPEN | {symbol}", flush=True)
 
         # =========================
         # EXIT ENGINE (UPGRADED)
@@ -167,6 +187,13 @@ def webhook():
             mins = (now - opened_at).total_seconds() / 60
             close_reason = None
 
+            # 🔥 EXIT DEBUG LOG
+            print(
+                f"🔍 {sym} | pnl={round(pnl_percent,2)}% | "
+                f"peak={round((peak_pnl or 0),2)}% | mins={round(mins,1)}",
+                flush=True
+            )
+
             # 🚀 1. STRONG TRAIL
             if ENABLE_STRONG_TRAIL and peak_pnl and peak_pnl >= STRONG_TRAIL_THRESHOLD:
                 if pnl_percent <= peak_pnl * STRONG_TRAIL_RATIO:
@@ -182,7 +209,7 @@ def webhook():
                 if pnl_percent <= peak_pnl - EARLY_TRAIL_GIVEBACK:
                     close_reason = "early_trail_exit"
 
-            # 🧠 4. NO PROGRESS
+            # 🧠 4. NO PROGRESS (FIXED)
             elif ENABLE_NO_PROGRESS_EXIT:
                 if mins > NO_PROGRESS_TIME_MIN and (peak_pnl or 0) < NO_PROGRESS_PEAK_THRESHOLD:
                     close_reason = "no_progress_exit"
