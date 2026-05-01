@@ -1,15 +1,15 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.33.1
+# VERSION: v3.33.2
 # NOTES:
-# - ✅ FIXED LOG SPAM (removed EVAL flood)
-# - ✅ FIXED SHADOW TRADE STARVATION (allows new after close)
+# - ✅ REMOVED SHADOW TRADE CAP (multiple allowed per symbol)
+# - ✅ FIXED missing shadow trades in DB
+# - ✅ ALL LOGGING PRESERVED
 # - ✅ GLOBAL EXIT LOOP PRESERVED
-# - ✅ ALL DATA LOGGING PRESERVED
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v3.33.1 RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v3.33.2 RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -40,7 +40,7 @@ ENABLE_NO_PROGRESS_EXIT = True
 NO_PROGRESS_TIME_MIN = 20
 NO_PROGRESS_PEAK_THRESHOLD = 0.05
 
-DATA_VERSION = "v3.33.1"
+DATA_VERSION = "v3.33.2"
 
 PRICE_CACHE = {}
 
@@ -122,16 +122,6 @@ def webhook():
         force_shadow = (global_regime == "BAD")
         block_entries = (global_regime == "VERY_BAD")
 
-        def shadow_exists(symbol, direction):
-            cur.execute("""
-                SELECT 1 FROM bot_trades
-                WHERE status='OPEN'
-                AND is_shadow = TRUE
-                AND symbol=%s AND direction=%s
-                LIMIT 1
-            """, (symbol, direction))
-            return cur.fetchone() is not None
-
         def real_exists(symbol, direction):
             cur.execute("""
                 SELECT 1 FROM bot_trades
@@ -146,9 +136,8 @@ def webhook():
         if decision in ["LONG", "SHORT"] and not block_entries:
 
             real_open = real_exists(symbol, decision)
-            shadow_open = shadow_exists(symbol, decision)
 
-            print(f"🎯 ENTRY | {symbol} | {decision} | real={real_open} | shadow={shadow_open}", flush=True)
+            print(f"🎯 ENTRY | {symbol} | {decision} | real={real_open}", flush=True)
 
             if not real_open and not force_shadow:
                 cur.execute("""
@@ -165,20 +154,19 @@ def webhook():
                 print(f"🚀 REAL OPEN | {symbol}", flush=True)
 
             elif ENABLE_SHADOW_TRADES:
-                # 🔥 FIX: allow shadow even if previous existed but CLOSED
-                if not shadow_open:
-                    cur.execute("""
-                        INSERT INTO bot_trades (
-                            symbol, direction, entry_price,
-                            status, opened_at, data_version,
-                            momentum_strength, trend_strength,
-                            regime, global_regime,
-                            is_shadow, peak_pnl_percent
-                        )
-                        VALUES (%s,%s,%s,'OPEN',NOW(),%s,%s,%s,%s,%s,TRUE,0)
-                    """, (symbol, decision, price, DATA_VERSION, momentum, trend, regime, global_regime))
+                # 🔥 FULL FIX: ALWAYS ALLOW SHADOWS
+                cur.execute("""
+                    INSERT INTO bot_trades (
+                        symbol, direction, entry_price,
+                        status, opened_at, data_version,
+                        momentum_strength, trend_strength,
+                        regime, global_regime,
+                        is_shadow, peak_pnl_percent
+                    )
+                    VALUES (%s,%s,%s,'OPEN',NOW(),%s,%s,%s,%s,%s,TRUE,0)
+                """, (symbol, decision, price, DATA_VERSION, momentum, trend, regime, global_regime))
 
-                    print(f"👻 SHADOW OPEN | {symbol}", flush=True)
+                print(f"👻 SHADOW OPEN | {symbol}", flush=True)
 
         # ================= EXIT ENGINE =================
         cur.execute("""
@@ -264,3 +252,4 @@ def webhook():
     except Exception as e:
         print("❌ ERROR:", e, flush=True)
         return jsonify({"error": str(e)}), 400
+        
