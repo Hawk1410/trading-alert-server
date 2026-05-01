@@ -6,6 +6,7 @@
 # - ✅ PRESERVES v3.33.3 DATA PIPELINE (NO NULL ISSUES)
 # - ✅ ADDS TRADE QUALITY FILTER (A / B / C)
 # - ✅ BAD REGIME: ALLOWS A TRADES (REAL), OTHERS SHADOW
+# - ✅ VERY_BAD NOW SHADOW ONLY (NO DATA BLACKOUT)
 # - ✅ ALL LOGGING + BACKFILL PRESERVED
 # =========================
 
@@ -62,7 +63,7 @@ def classify_regime(trend):
         return "UNKNOWN"
 
 # =========================
-# 🧠 TRADE QUALITY (NEW)
+# 🧠 TRADE QUALITY
 # =========================
 def classify_quality(momentum, trend):
     abs_mom = abs(momentum)
@@ -157,8 +158,10 @@ def webhook():
         force_shadow = False
         block_entries = False
 
+        # 🔥 FIXED: VERY_BAD now shadow-only
         if global_regime == "VERY_BAD":
-            block_entries = True
+            allow_real = False
+            force_shadow = True
 
         elif global_regime == "BAD":
             if quality in ["A", "A+"]:
