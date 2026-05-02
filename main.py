@@ -1,7 +1,7 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.38 (EXIT + PRICE STABILITY FIX)
+# VERSION: v3.38 (ANTI-DEAD-MARKET FILTER)
 # =========================
 
 print("🔥🔥🔥 MAIN.PY v3.38 RUNNING 🔥🔥🔥", flush=True)
@@ -34,6 +34,11 @@ STRONG_TRAIL_RATIO = 0.65
 ENABLE_NO_PROGRESS_EXIT = True
 NO_PROGRESS_TIME_MIN = 12
 NO_PROGRESS_PEAK_THRESHOLD = 0.06
+
+# 🔥 NEW
+ENABLE_INITIAL_MOVE_FILTER = True
+INITIAL_MOVE_WINDOW = 5       # minutes
+MIN_INITIAL_MOVE = 0.03       # %
 
 DATA_VERSION = "v3.38"
 
@@ -173,10 +178,9 @@ def webhook():
                     entry_momentum_abs, entry_trend_abs,
                     entry_quality, entry_block_reason,
                     regime, global_regime,
-                    is_shadow, peak_pnl_percent,
-                    last_price
+                    is_shadow, peak_pnl_percent
                 )
-                VALUES (%s,%s,%s,'OPEN',NOW(),%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,0,%s)
+                VALUES (%s,%s,%s,'OPEN',NOW(),%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,0)
             """, (
                 symbol, decision, price,
                 DATA_VERSION,
@@ -184,8 +188,7 @@ def webhook():
                 abs_mom, abs_trend,
                 quality, entry_block_reason,
                 regime, global_regime,
-                is_shadow,
-                price
+                is_shadow
             ))
 
             print(f"{'👻' if is_shadow else '🚀'} OPEN | {symbol} | Q={quality}", flush=True)
@@ -193,21 +196,16 @@ def webhook():
         # ================= EXIT ENGINE =================
         cur.execute("""
             SELECT id, symbol, direction, entry_price, opened_at,
-                   peak_pnl_percent, is_shadow, last_price
+                   peak_pnl_percent, is_shadow
             FROM bot_trades
             WHERE status='OPEN'
         """)
 
-        for (tid, sym, direction, entry_price, opened_at, peak_pnl, is_shadow, last_price) in cur.fetchall():
+        for (tid, sym, direction, entry_price, opened_at, peak_pnl, is_shadow) in cur.fetchall():
 
-            # 🔥 FIX: use latest known price
-            trade_price = PRICE_CACHE.get(sym, last_price or entry_price)
-
-            # update last seen price
-            cur.execute(
-                "UPDATE bot_trades SET last_price=%s WHERE id=%s",
-                (trade_price, tid)
-            )
+            trade_price = PRICE_CACHE.get(sym)
+            if not trade_price:
+                trade_price = entry_price
 
             pnl = ((trade_price - entry_price) / entry_price) if direction == "LONG" \
                 else ((entry_price - trade_price) / entry_price)
@@ -225,8 +223,12 @@ def webhook():
             mins = (now - opened_at).total_seconds() / 60
             close_reason = None
 
-            # ✅ FIXED EXIT STRUCTURE
-            if ENABLE_STRONG_TRAIL and current_peak >= STRONG_TRAIL_THRESHOLD:
+            # 🔥 NEW: kill dead trades early
+            if ENABLE_INITIAL_MOVE_FILTER:
+                if mins > INITIAL_MOVE_WINDOW and current_peak < MIN_INITIAL_MOVE:
+                    close_reason = "no_initial_momentum"
+
+            if not close_reason and ENABLE_STRONG_TRAIL and current_peak >= STRONG_TRAIL_THRESHOLD:
                 if pnl_percent <= current_peak * STRONG_TRAIL_RATIO:
                     close_reason = "strong_trail_exit"
 
