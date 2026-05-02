@@ -1,7 +1,7 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.38 (ANTI-DEAD-MARKET FILTER)
+# VERSION: v3.38 (ANTI-DEAD-MARKET FILTER + HAS_MOVED FIX)
 # =========================
 
 print("🔥🔥🔥 MAIN.PY v3.38 RUNNING 🔥🔥🔥", flush=True)
@@ -203,9 +203,7 @@ def webhook():
 
         for (tid, sym, direction, entry_price, opened_at, peak_pnl, is_shadow) in cur.fetchall():
 
-            trade_price = PRICE_CACHE.get(sym)
-            if not trade_price:
-                trade_price = entry_price
+            trade_price = PRICE_CACHE.get(sym, entry_price)
 
             pnl = ((trade_price - entry_price) / entry_price) if direction == "LONG" \
                 else ((entry_price - trade_price) / entry_price)
@@ -223,29 +221,35 @@ def webhook():
             mins = (now - opened_at).total_seconds() / 60
             close_reason = None
 
-            # 🔥 NEW: kill dead trades early
-            if ENABLE_INITIAL_MOVE_FILTER:
+            # 🔥 NEW: has price actually moved?
+            has_moved = abs(trade_price - entry_price) > 0
+
+            # 🔥 INITIAL MOVE FILTER (only if trade actually moved)
+            if ENABLE_INITIAL_MOVE_FILTER and has_moved:
                 if mins > INITIAL_MOVE_WINDOW and current_peak < MIN_INITIAL_MOVE:
                     close_reason = "no_initial_momentum"
 
-            if not close_reason and ENABLE_STRONG_TRAIL and current_peak >= STRONG_TRAIL_THRESHOLD:
-                if pnl_percent <= current_peak * STRONG_TRAIL_RATIO:
-                    close_reason = "strong_trail_exit"
+            # 🚀 MAIN EXIT STACK (only evaluate if trade has moved)
+            if has_moved:
 
-            if not close_reason and ENABLE_PROFIT_LOCK and current_peak >= PROFIT_LOCK_THRESHOLD:
-                if pnl_percent <= current_peak * PROFIT_LOCK_RATIO:
-                    close_reason = "profit_lock_exit"
+                if not close_reason and ENABLE_STRONG_TRAIL and current_peak >= STRONG_TRAIL_THRESHOLD:
+                    if pnl_percent <= current_peak * STRONG_TRAIL_RATIO:
+                        close_reason = "strong_trail_exit"
 
-            if not close_reason and ENABLE_EARLY_TRAIL and current_peak >= EARLY_TRAIL_THRESHOLD:
-                if pnl_percent <= current_peak - EARLY_TRAIL_GIVEBACK:
-                    close_reason = "early_trail_exit"
+                if not close_reason and ENABLE_PROFIT_LOCK and current_peak >= PROFIT_LOCK_THRESHOLD:
+                    if pnl_percent <= current_peak * PROFIT_LOCK_RATIO:
+                        close_reason = "profit_lock_exit"
 
-            if not close_reason and ENABLE_NO_PROGRESS_EXIT:
-                if mins > NO_PROGRESS_TIME_MIN and current_peak < NO_PROGRESS_PEAK_THRESHOLD:
-                    close_reason = "no_progress_exit"
+                if not close_reason and ENABLE_EARLY_TRAIL and current_peak >= EARLY_TRAIL_THRESHOLD:
+                    if pnl_percent <= current_peak - EARLY_TRAIL_GIVEBACK:
+                        close_reason = "early_trail_exit"
 
-            if not close_reason and pnl < -0.004:
-                close_reason = "hard_stop"
+                if not close_reason and ENABLE_NO_PROGRESS_EXIT:
+                    if mins > NO_PROGRESS_TIME_MIN and current_peak < NO_PROGRESS_PEAK_THRESHOLD:
+                        close_reason = "no_progress_exit"
+
+                if not close_reason and pnl < -0.004:
+                    close_reason = "hard_stop"
 
             if close_reason:
                 pnl_gbp = (pnl_percent / 100) * TRADE_SIZE_GBP
