@@ -1,10 +1,10 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.35 (EARLY FILTER UPGRADE)
+# VERSION: v3.36 (REGIME FIX + FULL LOGGING)
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v3.35 RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v3.36 RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -31,12 +31,11 @@ ENABLE_STRONG_TRAIL = True
 STRONG_TRAIL_THRESHOLD = 40
 STRONG_TRAIL_RATIO = 0.65
 
-# 🔥 UPDATED EARLY FILTER
 ENABLE_NO_PROGRESS_EXIT = True
 NO_PROGRESS_TIME_MIN = 12
 NO_PROGRESS_PEAK_THRESHOLD = 0.06
 
-DATA_VERSION = "v3.35"
+DATA_VERSION = "v3.36"
 
 PRICE_CACHE = {}
 
@@ -68,7 +67,7 @@ def get_global_regime(cur):
         FROM (
             SELECT peak_pnl_percent, pnl_percent
             FROM bot_trades
-            WHERE status='CLOSED' AND is_shadow = FALSE
+            WHERE status='CLOSED'
             ORDER BY closed_at DESC
             LIMIT 40
         ) t
@@ -137,7 +136,17 @@ def webhook():
                 force_shadow = True
                 entry_block_reason = "low_quality"
 
-        print(f"📊 {symbol} | {decision} | Q={quality} | reg={regime} | G={global_regime}", flush=True)
+        action = "REAL" if (allow_real and not force_shadow) else "SHADOW"
+
+        # 🔥 FULL LOG LINE
+        print(
+            f"📊 {symbol} | {decision} | "
+            f"mom={round(momentum,3)} ({round(abs_mom,3)}) | "
+            f"trend={round(trend,3)} ({round(abs_trend,3)}) | "
+            f"Q={quality} | reg={regime} | G={global_regime} | "
+            f"action={action} | reason={entry_block_reason}",
+            flush=True
+        )
 
         def real_exists(symbol, direction):
             cur.execute("""
