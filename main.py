@@ -1,14 +1,7 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.34
-# NOTES:
-# - ✅ PRESERVES v3.33.3 DATA PIPELINE (NO NULL ISSUES)
-# - ✅ ADDS TRADE QUALITY FILTER (A / B / C)
-# - ✅ BAD REGIME: ALLOWS A TRADES (REAL), OTHERS SHADOW
-# - ✅ VERY_BAD NOW SHADOW ONLY (NO DATA BLACKOUT)
-# - ✅ ADDED ENTRY ANALYTICS (block_reason, quality, abs values)
-# - ✅ ENHANCED LIVE LOGGING (FULL CONTEXT)
+# VERSION: v3.34 (HOTFIX: EXIT ENGINE FIXED)
 # =========================
 
 print("🔥🔥🔥 MAIN.PY v3.34 RUNNING 🔥🔥🔥", flush=True)
@@ -49,9 +42,6 @@ PRICE_CACHE = {}
 def get_db():
     return psycopg2.connect(DATABASE_URL)
 
-# =========================
-# 🧠 REGIME CLASSIFIER
-# =========================
 def classify_regime(trend):
     try:
         abs_trend = abs(float(trend))
@@ -63,9 +53,6 @@ def classify_regime(trend):
     except:
         return "UNKNOWN"
 
-# =========================
-# 🧠 TRADE QUALITY
-# =========================
 def classify_quality(momentum, trend):
     abs_mom = abs(momentum)
     abs_trend = abs(trend)
@@ -78,9 +65,6 @@ def classify_quality(momentum, trend):
         return "B"
     return "C"
 
-# =========================
-# 🌍 GLOBAL REGIME
-# =========================
 def get_global_regime(cur):
     cur.execute("""
         SELECT AVG(peak_pnl_percent), AVG(pnl_percent)
@@ -108,9 +92,6 @@ def get_global_regime(cur):
 
     return "NEUTRAL", avg_peak, avg_final
 
-# =========================
-# 🚀 WEBHOOK
-# =========================
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
@@ -172,7 +153,6 @@ def webhook():
                 force_shadow = True
                 entry_block_reason = "low_quality"
 
-        # ================= LOGGING =================
         print(
             f"📊 {symbol} | {decision} | "
             f"mom={round(momentum,3)} ({round(abs_mom,3)}) | "
@@ -182,9 +162,6 @@ def webhook():
             f"reason={entry_block_reason}",
             flush=True
         )
-
-        if force_shadow:
-            print(f"🚫 BLOCKED → {entry_block_reason}", flush=True)
 
         def real_exists(symbol, direction):
             cur.execute("""
@@ -247,8 +224,71 @@ def webhook():
 
                 print(f"👻 SHADOW OPEN | {symbol} | Q={quality}", flush=True)
 
-        # ================= EXIT ENGINE (UNCHANGED) =================
-        # (kept identical to your version — no risk introduced)
+        # ================= EXIT ENGINE (FIXED) =================
+        cur.execute("""
+            SELECT id, symbol, direction, entry_price, opened_at, peak_pnl_percent, is_shadow
+            FROM bot_trades
+            WHERE status='OPEN' AND symbol=%s
+        """, (symbol,))
+
+        for tid, sym, direction, entry_price, opened_at, peak_pnl, is_shadow in cur.fetchall():
+
+            trade_price = price  # ✅ GUARANTEED fresh
+
+            pnl = ((trade_price - entry_price) / entry_price) if direction == "LONG" \
+                else ((entry_price - trade_price) / entry_price)
+
+            pnl_percent = pnl * 100
+
+            if pnl_percent > (peak_pnl or 0):
+                cur.execute(
+                    "UPDATE bot_trades SET peak_pnl_percent=%s WHERE id=%s",
+                    (pnl_percent, tid)
+                )
+
+            mins = (now - opened_at).total_seconds() / 60
+            close_reason = None
+
+            if ENABLE_STRONG_TRAIL and peak_pnl and peak_pnl >= STRONG_TRAIL_THRESHOLD:
+                if pnl_percent <= peak_pnl * STRONG_TRAIL_RATIO:
+                    close_reason = "strong_trail_exit"
+
+            elif ENABLE_PROFIT_LOCK and peak_pnl and peak_pnl >= PROFIT_LOCK_THRESHOLD:
+                if pnl_percent <= peak_pnl * PROFIT_LOCK_RATIO:
+                    close_reason = "profit_lock_exit"
+
+            elif ENABLE_EARLY_TRAIL and peak_pnl and peak_pnl >= EARLY_TRAIL_THRESHOLD:
+                if pnl_percent <= peak_pnl - EARLY_TRAIL_GIVEBACK:
+                    close_reason = "early_trail_exit"
+
+            elif ENABLE_NO_PROGRESS_EXIT:
+                if mins > NO_PROGRESS_TIME_MIN and (peak_pnl or 0) < NO_PROGRESS_PEAK_THRESHOLD:
+                    close_reason = "no_progress_exit"
+
+            elif pnl < -0.004:
+                close_reason = "hard_stop"
+
+            if close_reason:
+                pnl_gbp = (pnl_percent / 100) * TRADE_SIZE_GBP
+                leakage = (peak_pnl or 0) - pnl_percent
+
+                cur.execute("""
+                    UPDATE bot_trades
+                    SET status='CLOSED',
+                        closed_at=NOW(),
+                        close_price=%s,
+                        pnl_percent=%s,
+                        pnl_gbp=%s,
+                        leakage_percent=%s,
+                        trade_size_gbp=%s,
+                        close_reason=%s
+                    WHERE id=%s
+                """, (
+                    trade_price, pnl_percent, pnl_gbp,
+                    leakage, TRADE_SIZE_GBP, close_reason, tid
+                ))
+
+                print(f"{'👻' if is_shadow else '💰'} CLOSED | {sym} | {round(pnl_percent,3)}% | {close_reason}", flush=True)
 
         conn.commit()
         cur.close()
