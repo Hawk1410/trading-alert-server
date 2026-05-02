@@ -1,10 +1,10 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.34 (FIXED EXITS)
+# VERSION: v3.35 (EARLY FILTER UPGRADE)
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v3.34 RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v3.35 RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -31,11 +31,12 @@ ENABLE_STRONG_TRAIL = True
 STRONG_TRAIL_THRESHOLD = 40
 STRONG_TRAIL_RATIO = 0.65
 
+# 🔥 UPDATED EARLY FILTER
 ENABLE_NO_PROGRESS_EXIT = True
-NO_PROGRESS_TIME_MIN = 20
-NO_PROGRESS_PEAK_THRESHOLD = 0.05
+NO_PROGRESS_TIME_MIN = 12
+NO_PROGRESS_PEAK_THRESHOLD = 0.06
 
-DATA_VERSION = "v3.34"
+DATA_VERSION = "v3.35"
 
 PRICE_CACHE = {}
 
