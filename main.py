@@ -1,10 +1,10 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v3.36 (REGIME FIX + FULL LOGGING)
+# VERSION: v3.37 (EXIT ENGINE FIX)
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v3.36 RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v3.37 RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -35,7 +35,7 @@ ENABLE_NO_PROGRESS_EXIT = True
 NO_PROGRESS_TIME_MIN = 12
 NO_PROGRESS_PEAK_THRESHOLD = 0.06
 
-DATA_VERSION = "v3.36"
+DATA_VERSION = "v3.37"
 
 PRICE_CACHE = {}
 
@@ -138,7 +138,6 @@ def webhook():
 
         action = "REAL" if (allow_real and not force_shadow) else "SHADOW"
 
-        # 🔥 FULL LOG LINE
         print(
             f"📊 {symbol} | {decision} | "
             f"mom={round(momentum,3)} ({round(abs_mom,3)}) | "
@@ -199,39 +198,47 @@ def webhook():
 
         for (tid, sym, direction, entry_price, opened_at, peak_pnl, is_shadow) in cur.fetchall():
 
+            # 🔥 FIX 1: fallback price
             trade_price = PRICE_CACHE.get(sym)
             if not trade_price:
-                continue
+                trade_price = entry_price
 
             pnl = ((trade_price - entry_price) / entry_price) if direction == "LONG" \
                 else ((entry_price - trade_price) / entry_price)
 
             pnl_percent = pnl * 100
 
-            if pnl_percent > (peak_pnl or 0):
-                cur.execute("UPDATE bot_trades SET peak_pnl_percent=%s WHERE id=%s",
-                            (pnl_percent, tid))
+            # safer peak update
+            current_peak = peak_pnl or 0
+            if pnl_percent > current_peak:
+                current_peak = pnl_percent
+                cur.execute(
+                    "UPDATE bot_trades SET peak_pnl_percent=%s WHERE id=%s",
+                    (current_peak, tid)
+                )
 
             mins = (now - opened_at).total_seconds() / 60
             close_reason = None
 
-            if ENABLE_STRONG_TRAIL and peak_pnl and peak_pnl >= STRONG_TRAIL_THRESHOLD:
-                if pnl_percent <= peak_pnl * STRONG_TRAIL_RATIO:
+            # 🔥 FIX 2: independent exit checks
+
+            if ENABLE_STRONG_TRAIL and current_peak >= STRONG_TRAIL_THRESHOLD:
+                if pnl_percent <= current_peak * STRONG_TRAIL_RATIO:
                     close_reason = "strong_trail_exit"
 
-            elif ENABLE_PROFIT_LOCK and peak_pnl and peak_pnl >= PROFIT_LOCK_THRESHOLD:
-                if pnl_percent <= peak_pnl * PROFIT_LOCK_RATIO:
+            if not close_reason and ENABLE_PROFIT_LOCK and current_peak >= PROFIT_LOCK_THRESHOLD:
+                if pnl_percent <= current_peak * PROFIT_LOCK_RATIO:
                     close_reason = "profit_lock_exit"
 
-            elif ENABLE_EARLY_TRAIL and peak_pnl and peak_pnl >= EARLY_TRAIL_THRESHOLD:
-                if pnl_percent <= peak_pnl - EARLY_TRAIL_GIVEBACK:
+            if not close_reason and ENABLE_EARLY_TRAIL and current_peak >= EARLY_TRAIL_THRESHOLD:
+                if pnl_percent <= current_peak - EARLY_TRAIL_GIVEBACK:
                     close_reason = "early_trail_exit"
 
-            elif ENABLE_NO_PROGRESS_EXIT:
-                if mins > NO_PROGRESS_TIME_MIN and (peak_pnl or 0) < NO_PROGRESS_PEAK_THRESHOLD:
+            if not close_reason and ENABLE_NO_PROGRESS_EXIT:
+                if mins > NO_PROGRESS_TIME_MIN and current_peak < NO_PROGRESS_PEAK_THRESHOLD:
                     close_reason = "no_progress_exit"
 
-            elif pnl < -0.004:
+            if not close_reason and pnl < -0.004:
                 close_reason = "hard_stop"
 
             if close_reason:
@@ -248,7 +255,11 @@ def webhook():
                     WHERE id=%s
                 """, (trade_price, pnl_percent, pnl_gbp, close_reason, tid))
 
-                print(f"{'👻' if is_shadow else '💰'} CLOSED | {sym} | {round(pnl_percent,3)}% | {close_reason}", flush=True)
+                print(
+                    f"{'👻' if is_shadow else '💰'} CLOSED | {sym} | "
+                    f"{round(pnl_percent,3)}% | peak={round(current_peak,3)} | {close_reason}",
+                    flush=True
+                )
 
         conn.commit()
         cur.close()
