@@ -72,7 +72,6 @@ def webhook():
         momentum = float(data.get("momentum_strength") or 0)
         trend = float(data.get("trend_strength") or 0)
 
-        # normalize decision
         if decision in ["", "NONE", "NULL", "UPDATE"]:
             decision = None
 
@@ -84,24 +83,14 @@ def webhook():
         conn = get_db()
         cur = conn.cursor()
 
-        # ================= RAW SIGNAL LOGGING =================
+        # ================= RAW SIGNAL =================
         cur.execute("""
             INSERT INTO signals_raw (
-                symbol,
-                price,
-                momentum,
-                trend,
-                decision,
-                data_version
+                symbol, price, momentum, trend, decision, data_version
             )
             VALUES (%s,%s,%s,%s,%s,%s)
         """, (
-            symbol,
-            price,
-            momentum,
-            trend,
-            decision,
-            DATA_VERSION
+            symbol, price, momentum, trend, decision, DATA_VERSION
         ))
 
         # ================= ENTRY =================
@@ -140,7 +129,6 @@ def webhook():
 
         for (tid, sym, direction, entry_price, opened_at, peak_pnl) in open_trades:
 
-            # 🔥 KEY FIX: only process trades for THIS symbol
             if sym != symbol:
                 continue
 
@@ -159,6 +147,8 @@ def webhook():
                     (current_peak, tid)
                 )
 
+            mins = (now - opened_at).total_seconds() / 60
+
             # ================= EVENT LOG =================
             cur.execute("""
                 INSERT INTO trade_events (
@@ -168,9 +158,17 @@ def webhook():
                     pnl_percent,
                     peak_pnl_percent,
                     momentum,
-                    trend
+                    trend,
+                    event_type,
+                    minutes_in_trade,
+                    direction,
+                    entry_price,
+                    decision,
+                    data_version,
+                    is_entry,
+                    created_at
                 )
-                VALUES (%s,%s,%s,%s,%s,%s,%s)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
             """, (
                 tid,
                 sym,
@@ -178,10 +176,16 @@ def webhook():
                 pnl_percent,
                 current_peak,
                 momentum,
-                trend
+                trend,
+                "UPDATE",
+                mins,
+                direction,
+                entry_price,
+                decision,
+                DATA_VERSION,
+                False
             ))
 
-            mins = (now - opened_at).total_seconds() / 60
             close_reason = None
 
             # ================= INITIAL FILTER =================
