@@ -1,10 +1,10 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v4.0 (DATA-FIRST + RAW SIGNAL CAPTURE)
+# VERSION: v4.1 (FIXED PRICE FLOW + TRUE SYMBOL EVALUATION)
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v4.0 DATA MODE RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v4.1 RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -34,9 +34,7 @@ LOCK_1_FLOOR = 10
 LOCK_2_TRIGGER = 30
 LOCK_2_FLOOR = 20
 
-DATA_VERSION = "v4.0"
-
-PRICE_CACHE = {}
+DATA_VERSION = "v4.1"
 
 def get_db():
     return psycopg2.connect(DATABASE_URL)
@@ -74,10 +72,8 @@ def webhook():
         momentum = float(data.get("momentum_strength") or 0)
         trend = float(data.get("trend_strength") or 0)
 
-        if symbol:
-            PRICE_CACHE[symbol] = price
-
-        if decision in ["", "NONE", "NULL"]:
+        # normalize decision
+        if decision in ["", "NONE", "NULL", "UPDATE"]:
             decision = None
 
         now = datetime.utcnow()
@@ -140,9 +136,15 @@ def webhook():
             WHERE status='OPEN'
         """)
 
-        for (tid, sym, direction, entry_price, opened_at, peak_pnl) in cur.fetchall():
+        open_trades = cur.fetchall()
 
-            trade_price = PRICE_CACHE.get(sym, entry_price)
+        for (tid, sym, direction, entry_price, opened_at, peak_pnl) in open_trades:
+
+            # 🔥 KEY FIX: only process trades for THIS symbol
+            if sym != symbol:
+                continue
+
+            trade_price = price
 
             pnl = ((trade_price - entry_price) / entry_price) if direction == "LONG" \
                 else ((entry_price - trade_price) / entry_price)
