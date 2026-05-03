@@ -1,7 +1,7 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v4.0 (DATA-FIRST ARCHITECTURE)
+# VERSION: v4.0 (DATA-FIRST ARCHITECTURE - CLEAN TABLE)
 # =========================
 
 print("🔥🔥🔥 MAIN.PY v4.0 DATA MODE RUNNING 🔥🔥🔥", flush=True)
@@ -92,7 +92,7 @@ def webhook():
         if decision in ["LONG", "SHORT"]:
 
             cur.execute("""
-                INSERT INTO bot_trades (
+                INSERT INTO bot_trades_v4 (
                     symbol, direction, entry_price,
                     status, opened_at, data_version,
                     momentum_strength, trend_strength,
@@ -116,7 +116,7 @@ def webhook():
         cur.execute("""
             SELECT id, symbol, direction, entry_price, opened_at,
                    peak_pnl_percent
-            FROM bot_trades
+            FROM bot_trades_v4
             WHERE status='OPEN'
         """)
 
@@ -133,11 +133,11 @@ def webhook():
             if pnl_percent > current_peak:
                 current_peak = pnl_percent
                 cur.execute(
-                    "UPDATE bot_trades SET peak_pnl_percent=%s WHERE id=%s",
+                    "UPDATE bot_trades_v4 SET peak_pnl_percent=%s WHERE id=%s",
                     (current_peak, tid)
                 )
 
-            # ================= 🧠 EVENT LOGGING (KEY ADDITION) =================
+            # ================= EVENT LOG =================
             cur.execute("""
                 INSERT INTO trade_events (
                     trade_id,
@@ -186,7 +186,7 @@ def webhook():
                 pnl_gbp = (pnl_percent / 100) * TRADE_SIZE_GBP
 
                 cur.execute("""
-                    UPDATE bot_trades
+                    UPDATE bot_trades_v4
                     SET status='CLOSED',
                         closed_at=NOW(),
                         close_price=%s,
