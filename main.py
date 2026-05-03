@@ -1,7 +1,7 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v4.0 (DATA-FIRST ARCHITECTURE - CLEAN TABLE)
+# VERSION: v4.0 (DATA-FIRST + RAW SIGNAL CAPTURE)
 # =========================
 
 print("🔥🔥🔥 MAIN.PY v4.0 DATA MODE RUNNING 🔥🔥🔥", flush=True)
@@ -87,6 +87,26 @@ def webhook():
 
         conn = get_db()
         cur = conn.cursor()
+
+        # ================= RAW SIGNAL LOGGING =================
+        cur.execute("""
+            INSERT INTO signals_raw (
+                symbol,
+                price,
+                momentum,
+                trend,
+                decision,
+                data_version
+            )
+            VALUES (%s,%s,%s,%s,%s,%s)
+        """, (
+            symbol,
+            price,
+            momentum,
+            trend,
+            decision,
+            DATA_VERSION
+        ))
 
         # ================= ENTRY =================
         if decision in ["LONG", "SHORT"]:
