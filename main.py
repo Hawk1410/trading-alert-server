@@ -1,10 +1,10 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v4.1 (FIXED PRICE FLOW + TRUE SYMBOL EVALUATION)
+# VERSION: v4.2 (EXIT ENGINE FIXED + SIGNAL LINKING)
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v4.1 RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v4.2 RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -19,22 +19,24 @@ MAX_OPEN_TRADES = 7
 TRADE_SIZE_GBP = 100
 
 # =========================
-# 🚀 V4 CORE SETTINGS
+# 🚀 CORE SETTINGS
 # =========================
 
-ENABLE_INITIAL_MOVE_FILTER = True
-INITIAL_MOVE_WINDOW = 5
-MIN_INITIAL_MOVE = 0.15
+ENABLE_EARLY_KILL = True
+EARLY_KILL_WINDOW = 5       # minutes
+EARLY_KILL_THRESHOLD = 10   # % peak
 
-ENABLE_V4_PROFIT_SYSTEM = True
+ENABLE_PROFIT_LOCKS = True
 
 LOCK_1_TRIGGER = 20
-LOCK_1_FLOOR = 10
+LOCK_1_RATIO = 0.7
 
 LOCK_2_TRIGGER = 30
-LOCK_2_FLOOR = 20
+LOCK_2_RATIO = 0.8
 
-DATA_VERSION = "v4.1"
+ENABLE_NO_RED_AFTER_WIN = True
+
+DATA_VERSION = "v4.2"
 
 def get_db():
     return psycopg2.connect(DATABASE_URL)
@@ -89,9 +91,12 @@ def webhook():
                 symbol, price, momentum, trend, decision, data_version
             )
             VALUES (%s,%s,%s,%s,%s,%s)
+            RETURNING id, created_at
         """, (
             symbol, price, momentum, trend, decision, DATA_VERSION
         ))
+
+        signal_id, signal_time = cur.fetchone()
 
         # ================= ENTRY =================
         if decision in ["LONG", "SHORT"]:
@@ -102,15 +107,17 @@ def webhook():
                     status, opened_at, data_version,
                     momentum_strength, trend_strength,
                     entry_quality, regime,
-                    is_shadow, peak_pnl_percent
+                    is_shadow, peak_pnl_percent,
+                    signal_id, signal_timestamp
                 )
-                VALUES (%s,%s,%s,'OPEN',NOW(),%s,%s,%s,%s,%s,FALSE,0)
+                VALUES (%s,%s,%s,'OPEN',NOW(),%s,%s,%s,%s,%s,FALSE,0,%s,%s)
                 RETURNING id
             """, (
                 symbol, decision, price,
                 DATA_VERSION,
                 momentum, trend,
-                quality, regime
+                quality, regime,
+                signal_id, signal_time
             ))
 
             trade_id = cur.fetchone()[0]
@@ -132,10 +139,8 @@ def webhook():
             if sym != symbol:
                 continue
 
-            trade_price = price
-
-            pnl = ((trade_price - entry_price) / entry_price) if direction == "LONG" \
-                else ((entry_price - trade_price) / entry_price)
+            pnl = ((price - entry_price) / entry_price) if direction == "LONG" \
+                else ((entry_price - price) / entry_price)
 
             pnl_percent = pnl * 100
 
@@ -149,60 +154,30 @@ def webhook():
 
             mins = (now - opened_at).total_seconds() / 60
 
-            # ================= EVENT LOG =================
-            cur.execute("""
-                INSERT INTO trade_events (
-                    trade_id,
-                    symbol,
-                    price,
-                    pnl_percent,
-                    peak_pnl_percent,
-                    momentum,
-                    trend,
-                    event_type,
-                    minutes_in_trade,
-                    direction,
-                    entry_price,
-                    decision,
-                    data_version,
-                    is_entry,
-                    created_at
-                )
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
-            """, (
-                tid,
-                sym,
-                trade_price,
-                pnl_percent,
-                current_peak,
-                momentum,
-                trend,
-                "UPDATE",
-                mins,
-                direction,
-                entry_price,
-                decision,
-                DATA_VERSION,
-                False
-            ))
-
             close_reason = None
 
-            # ================= INITIAL FILTER =================
-            if ENABLE_INITIAL_MOVE_FILTER:
-                if mins > INITIAL_MOVE_WINDOW and current_peak < MIN_INITIAL_MOVE:
-                    close_reason = "no_expansion"
+            # ================= EARLY KILL =================
+            if ENABLE_EARLY_KILL:
+                if mins > EARLY_KILL_WINDOW and current_peak < EARLY_KILL_THRESHOLD:
+                    close_reason = "dead_trade"
 
-            # ================= PROFIT SYSTEM =================
-            if not close_reason and ENABLE_V4_PROFIT_SYSTEM:
+            # ================= PROFIT LOCK =================
+            if not close_reason and ENABLE_PROFIT_LOCKS:
 
                 if current_peak >= LOCK_2_TRIGGER:
-                    if pnl_percent <= LOCK_2_FLOOR:
-                        close_reason = "lock_2_exit"
+                    lock_floor = current_peak * LOCK_2_RATIO
+                    if pnl_percent <= lock_floor:
+                        close_reason = "lock_2"
 
                 elif current_peak >= LOCK_1_TRIGGER:
-                    if pnl_percent <= LOCK_1_FLOOR:
-                        close_reason = "lock_1_exit"
+                    lock_floor = current_peak * LOCK_1_RATIO
+                    if pnl_percent <= lock_floor:
+                        close_reason = "lock_1"
+
+            # ================= NO RED AFTER WIN =================
+            if not close_reason and ENABLE_NO_RED_AFTER_WIN:
+                if current_peak >= 20 and pnl_percent < 0:
+                    close_reason = "gave_back_winner"
 
             # ================= HARD STOP =================
             if not close_reason and pnl < -0.004:
@@ -220,7 +195,7 @@ def webhook():
                         pnl_gbp=%s,
                         close_reason=%s
                     WHERE id=%s
-                """, (trade_price, pnl_percent, pnl_gbp, close_reason, tid))
+                """, (price, pnl_percent, pnl_gbp, close_reason, tid))
 
                 print(
                     f"💰 CLOSED | {sym} | "
