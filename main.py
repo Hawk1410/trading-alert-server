@@ -1,7 +1,7 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v4.2 (EXIT ENGINE FIXED + SIGNAL LINKING)
+# VERSION: v4.2 (EXIT ENGINE FIXED + SIGNAL LINKING - FINAL)
 # =========================
 
 print("🔥🔥🔥 MAIN.PY v4.2 RUNNING 🔥🔥🔥", flush=True)
@@ -91,7 +91,7 @@ def webhook():
                 symbol, price, momentum, trend, decision, data_version
             )
             VALUES (%s,%s,%s,%s,%s,%s)
-            RETURNING id, created_at
+            RETURNING id, timestamp
         """, (
             symbol, price, momentum, trend, decision, DATA_VERSION
         ))
