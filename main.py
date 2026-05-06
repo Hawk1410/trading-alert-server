@@ -1,10 +1,10 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v5.0 (REGIME ENGINE + RAW SIGNALS PRESERVED)
+# VERSION: v5.1 (CONTROLLED RELAXED STRUCTURE + REGIME ENGINE)
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v5.0 RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v5.1 RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -18,7 +18,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 MAX_OPEN_TRADES = 7
 TRADE_SIZE_GBP = 100
 
-DATA_VERSION = "v5.0"
+DATA_VERSION = "v5.1"
 
 # =========================
 # 🚀 V5 REGIME SETTINGS
@@ -27,8 +27,8 @@ DATA_VERSION = "v5.0"
 ENABLE_V5_ENTRY_FILTER = True
 ENABLE_MAX_OPEN_TRADES = True
 
-MIN_ENTRY_TREND = 0.35
-MIN_ENTRY_MOMENTUM = 1.00
+MIN_ENTRY_TREND = 0.25
+MIN_ENTRY_MOMENTUM = 0.70
 
 HOT_SNIPER_COUNT = 5
 WARM_SNIPER_COUNT = 3
