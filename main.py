@@ -112,7 +112,6 @@ def get_live_regime(cur):
     """, (MIN_ENTRY_TREND, MIN_ENTRY_MOMENTUM))
 
     sniper_before = cur.fetchone()[0] or 0
-
     sniper_delta = sniper_now - sniper_before
 
     if sniper_now >= HOT_SNIPER_COUNT:
@@ -204,12 +203,22 @@ def webhook():
         # ================= RAW SIGNAL — ALWAYS STORE =================
         cur.execute("""
             INSERT INTO signals_raw (
-                symbol, price, momentum, trend, decision, data_version
+                symbol,
+                price,
+                momentum,
+                trend,
+                decision,
+                data_version
             )
             VALUES (%s,%s,%s,%s,%s,%s)
             RETURNING id, timestamp
         """, (
-            symbol, price, momentum, trend, decision, DATA_VERSION
+            symbol,
+            price,
+            momentum,
+            trend,
+            decision,
+            DATA_VERSION
         ))
 
         signal_id, signal_time = cur.fetchone()
@@ -224,7 +233,11 @@ def webhook():
             flush=True
         )
 
-        # ================= ENTRY =================
+        # ================= ENTRY DECISION =================
+        entry_allowed = False
+        block_reason = None
+        open_count = None
+
         if decision in ["LONG", "SHORT"]:
 
             entry_allowed = True
@@ -237,6 +250,16 @@ def webhook():
                     active_rising
                 )
 
+            if not entry_allowed:
+                if abs(trend) < MIN_ENTRY_TREND:
+                    block_reason = "trend_too_weak"
+                elif abs(momentum) < MIN_ENTRY_MOMENTUM:
+                    block_reason = "momentum_too_weak"
+                elif regime_state not in ["HOT", "WARM"] and not active_rising:
+                    block_reason = "bad_regime"
+                else:
+                    block_reason = "v5_filter_block"
+
             if ENABLE_MAX_OPEN_TRADES:
                 cur.execute("""
                     SELECT COUNT(*)
@@ -247,7 +270,35 @@ def webhook():
 
                 if open_count >= MAX_OPEN_TRADES:
                     entry_allowed = False
+                    block_reason = "max_open_trades"
                     print(f"⛔ BLOCKED | max open trades reached: {open_count}", flush=True)
+
+        else:
+            block_reason = "no_decision"
+
+        # ================= UPDATE RAW SIGNAL INTELLIGENCE =================
+        cur.execute("""
+            UPDATE signals_raw
+            SET
+                regime_state = %s,
+                sniper_density = %s,
+                sniper_density_delta = %s,
+                active_rising = %s,
+                entry_allowed = %s,
+                block_reason = %s
+            WHERE id = %s
+        """, (
+            regime_state,
+            sniper_now,
+            sniper_delta,
+            active_rising,
+            entry_allowed,
+            block_reason,
+            signal_id
+        ))
+
+        # ================= ENTRY EXECUTION =================
+        if decision in ["LONG", "SHORT"]:
 
             if entry_allowed:
 
@@ -309,7 +360,7 @@ def webhook():
                 print(
                     f"⛔ BLOCKED | {symbol} | {decision} | "
                     f"mom={round(momentum,3)} trend={round(trend,3)} | "
-                    f"regime={regime_state}",
+                    f"regime={regime_state} | reason={block_reason}",
                     flush=True
                 )
 
