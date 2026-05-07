@@ -1,10 +1,10 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v5.1 (CONTROLLED RELAXED STRUCTURE + REGIME ENGINE)
+# VERSION: v5.2 (U2 CONFIRMATION EXIT + REGIME ENGINE)
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v5.1 RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v5.2 RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -18,7 +18,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 MAX_OPEN_TRADES = 7
 TRADE_SIZE_GBP = 100
 
-DATA_VERSION = "v5.1"
+DATA_VERSION = "v5.2"
 
 # =========================
 # 🚀 V5 REGIME SETTINGS
@@ -40,9 +40,13 @@ ACTIVE_RISING_MIN_DELTA = 2
 # 🚪 EXIT SETTINGS
 # =========================
 
-ENABLE_EARLY_KILL = True
+ENABLE_EARLY_KILL = False
 EARLY_KILL_WINDOW = 5
 EARLY_KILL_THRESHOLD = 10
+
+ENABLE_CONFIRMATION_EXIT = True
+CONFIRMATION_UPDATE_NUM = 2
+CONFIRMATION_MIN_PNL = 0.15
 
 ENABLE_PROFIT_LOCKS = True
 
@@ -171,6 +175,15 @@ def log_trade_event(cur, trade_id, symbol, event_type, price, pnl_percent,
         trend,
         is_entry
     ))
+
+def get_update_count(cur, trade_id):
+    cur.execute("""
+        SELECT COUNT(*)
+        FROM trade_events
+        WHERE trade_id = %s
+          AND LOWER(event_type) = 'update'
+    """, (str(trade_id),))
+    return cur.fetchone()[0] or 0
 
 # =========================
 # WEBHOOK
@@ -423,10 +436,17 @@ def webhook():
                 False
             )
 
+            update_count = get_update_count(cur, tid)
+
             close_reason = None
 
+            # U2 CONFIRMATION EXIT
+            if ENABLE_CONFIRMATION_EXIT:
+                if update_count == CONFIRMATION_UPDATE_NUM and pnl_percent < CONFIRMATION_MIN_PNL:
+                    close_reason = "failed_confirmation"
+
             # EARLY KILL
-            if ENABLE_EARLY_KILL:
+            if not close_reason and ENABLE_EARLY_KILL:
                 if mins > EARLY_KILL_WINDOW and current_peak < EARLY_KILL_THRESHOLD:
                     close_reason = "dead_trade"
 
