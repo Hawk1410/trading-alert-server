@@ -1,10 +1,10 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v5.2 (U2 CONFIRMATION EXIT + REGIME ENGINE)
+# VERSION: v5.3 (CONTROLLED IGNITION CONTINUATION ENGINE)
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v5.2 RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v5.3 RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -18,7 +18,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 MAX_OPEN_TRADES = 7
 TRADE_SIZE_GBP = 100
 
-DATA_VERSION = "v5.2"
+DATA_VERSION = "v5.3"
 
 # =========================
 # 🚀 V5 REGIME SETTINGS
@@ -37,6 +37,18 @@ LOW_SNIPER_COUNT = 1
 ACTIVE_RISING_MIN_DELTA = 2
 
 # =========================
+# 🎯 V5.3 CONTROLLED IGNITION FILTER
+# =========================
+
+ENABLE_V53_CONTROLLED_IGNITION = True
+
+V53_REQUIRED_REGIME = "WARM"
+V53_MIN_DENSITY = 3
+V53_MAX_DENSITY = 5
+V53_MIN_DENSITY_DELTA = 2
+V53_MAX_DENSITY_DELTA = 4
+
+# =========================
 # 🚪 EXIT SETTINGS
 # =========================
 
@@ -46,7 +58,7 @@ EARLY_KILL_THRESHOLD = 10
 
 ENABLE_CONFIRMATION_EXIT = True
 CONFIRMATION_UPDATE_NUM = 2
-CONFIRMATION_MIN_PNL = 0.15
+CONFIRMATION_MIN_PNL = -0.05
 
 ENABLE_PROFIT_LOCKS = True
 
@@ -131,12 +143,27 @@ def get_live_regime(cur):
 
     return regime_state, sniper_now, sniper_before, sniper_delta, active_rising
 
-def passes_v5_filter(momentum, trend, regime_state, active_rising):
+def passes_v5_filter(momentum, trend, regime_state, active_rising, sniper_density, sniper_density_delta):
     if abs(trend) < MIN_ENTRY_TREND:
         return False
 
     if abs(momentum) < MIN_ENTRY_MOMENTUM:
         return False
+
+    if ENABLE_V53_CONTROLLED_IGNITION:
+        if regime_state != V53_REQUIRED_REGIME:
+            return False
+
+        if not active_rising:
+            return False
+
+        if sniper_density < V53_MIN_DENSITY or sniper_density > V53_MAX_DENSITY:
+            return False
+
+        if sniper_density_delta < V53_MIN_DENSITY_DELTA or sniper_density_delta > V53_MAX_DENSITY_DELTA:
+            return False
+
+        return True
 
     if regime_state in ["HOT", "WARM"]:
         return True
@@ -260,7 +287,9 @@ def webhook():
                     momentum,
                     trend,
                     regime_state,
-                    active_rising
+                    active_rising,
+                    sniper_now,
+                    sniper_delta
                 )
 
             if not entry_allowed:
@@ -268,6 +297,14 @@ def webhook():
                     block_reason = "trend_too_weak"
                 elif abs(momentum) < MIN_ENTRY_MOMENTUM:
                     block_reason = "momentum_too_weak"
+                elif ENABLE_V53_CONTROLLED_IGNITION and regime_state != V53_REQUIRED_REGIME:
+                    block_reason = "v53_not_warm_regime"
+                elif ENABLE_V53_CONTROLLED_IGNITION and not active_rising:
+                    block_reason = "v53_not_active_rising"
+                elif ENABLE_V53_CONTROLLED_IGNITION and (sniper_now < V53_MIN_DENSITY or sniper_now > V53_MAX_DENSITY):
+                    block_reason = "v53_density_outside_range"
+                elif ENABLE_V53_CONTROLLED_IGNITION and (sniper_delta < V53_MIN_DENSITY_DELTA or sniper_delta > V53_MAX_DENSITY_DELTA):
+                    block_reason = "v53_density_delta_outside_range"
                 elif regime_state not in ["HOT", "WARM"] and not active_rising:
                     block_reason = "bad_regime"
                 else:
@@ -365,7 +402,8 @@ def webhook():
 
                 print(
                     f"🚀 OPEN | {symbol} | {decision} | id={trade_id} | "
-                    f"Q={quality} | regime={regime_state}",
+                    f"Q={quality} | regime={regime_state} | "
+                    f"density={sniper_now} | delta={sniper_delta}",
                     flush=True
                 )
 
@@ -373,7 +411,8 @@ def webhook():
                 print(
                     f"⛔ BLOCKED | {symbol} | {decision} | "
                     f"mom={round(momentum,3)} trend={round(trend,3)} | "
-                    f"regime={regime_state} | reason={block_reason}",
+                    f"regime={regime_state} | density={sniper_now} | "
+                    f"delta={sniper_delta} | reason={block_reason}",
                     flush=True
                 )
 
