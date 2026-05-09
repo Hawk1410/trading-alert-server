@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v5.4
-# TITLE: LONG CORE + S5 TACTICAL SHORTS + V6/V7 SHADOWS
+# VERSION: v5.5
+# TITLE: V7 MAIN CONTINUATION ENGINE + TREND DECAY EXIT + V5.3/V6 SHADOWS + S5 TACTICAL SHORTS
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v5.4 RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v5.5 RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -20,13 +20,12 @@ MAX_OPEN_TRADES = 7
 MAX_OPEN_SHADOW_TRADES = 30
 TRADE_SIZE_GBP = 100
 
-DATA_VERSION = "v5.4"
+DATA_VERSION = "v5.5"
 
 # =========================
-# 🚀 V5 REGIME SETTINGS
+# 🚀 REGIME SETTINGS
 # =========================
 
-ENABLE_V5_ENTRY_FILTER = True
 ENABLE_MAX_OPEN_TRADES = True
 
 MIN_ENTRY_TREND = 0.25
@@ -39,11 +38,25 @@ LOW_SNIPER_COUNT = 1
 ACTIVE_RISING_MIN_DELTA = 2
 
 # =========================
-# 🎯 V5.4 LONG CORE
+# 🧠 V7 MAIN LONG ENGINE
 # =========================
 
-ENABLE_V53_CONTROLLED_IGNITION = True
-ENABLE_CORE_LONG_ONLY = True
+ENABLE_V7_MAIN_ENGINE = True
+
+V7_MIN_TREND = 0.20
+V7_MIN_MOMENTUM = 0.00
+
+# validated V7 decay exit
+ENABLE_V7_TREND_DECAY_EXIT = True
+V7_DECAY_MINUTES = 120
+V7_DECAY_TREND_THRESHOLD = 0.22
+V7_DECAY_MAX_PEAK = 0.50
+
+# =========================
+# 🎯 V5.3 SHADOW SNIPER ENGINE
+# =========================
+
+ENABLE_SHADOW_V53_SNIPER = True
 
 V53_REQUIRED_REGIME = "WARM"
 V53_MIN_DENSITY = 3
@@ -75,7 +88,6 @@ S5_ELITE_SYMBOLS = {
 # =========================
 
 ENABLE_SHADOW_V6 = True
-ENABLE_SHADOW_V7 = True
 
 # V6 compression continuation
 V6_MIN_TREND = 0.13
@@ -85,9 +97,6 @@ V6_MIN_DENSITY = 4
 V6_MAX_DENSITY = 6
 V6_MIN_DELTA = -3
 V6_MAX_DELTA = 0
-
-# V7 broad continuation
-V7_MIN_TREND = 0.20
 
 # =========================
 # 🚪 EXIT SETTINGS
@@ -215,35 +224,33 @@ def get_live_regime(cur):
 
     return regime_state, sniper_now, sniper_before, sniper_delta, active_rising
 
-def passes_v5_long_filter(momentum, trend, regime_state, active_rising, sniper_density, sniper_density_delta):
+def passes_v7_main(momentum, trend):
+    return (
+        ENABLE_V7_MAIN_ENGINE
+        and trend >= V7_MIN_TREND
+        and momentum > V7_MIN_MOMENTUM
+    )
+
+def passes_v53_shadow(momentum, trend, regime_state, active_rising, sniper_density, sniper_density_delta):
     if trend < MIN_ENTRY_TREND:
         return False
 
     if momentum < MIN_ENTRY_MOMENTUM:
         return False
 
-    if ENABLE_V53_CONTROLLED_IGNITION:
-        if regime_state != V53_REQUIRED_REGIME:
-            return False
+    if regime_state != V53_REQUIRED_REGIME:
+        return False
 
-        if not active_rising:
-            return False
+    if not active_rising:
+        return False
 
-        if sniper_density < V53_MIN_DENSITY or sniper_density > V53_MAX_DENSITY:
-            return False
+    if sniper_density < V53_MIN_DENSITY or sniper_density > V53_MAX_DENSITY:
+        return False
 
-        if sniper_density_delta < V53_MIN_DENSITY_DELTA or sniper_density_delta > V53_MAX_DENSITY_DELTA:
-            return False
+    if sniper_density_delta < V53_MIN_DENSITY_DELTA or sniper_density_delta > V53_MAX_DENSITY_DELTA:
+        return False
 
-        return True
-
-    if regime_state in ["HOT", "WARM"]:
-        return True
-
-    if active_rising:
-        return True
-
-    return False
+    return True
 
 def passes_v6_shadow(momentum, trend, sniper_density, sniper_density_delta):
     return (
@@ -252,9 +259,6 @@ def passes_v6_shadow(momentum, trend, sniper_density, sniper_density_delta):
         and V6_MIN_DENSITY <= sniper_density <= V6_MAX_DENSITY
         and V6_MIN_DELTA <= sniper_density_delta <= V6_MAX_DELTA
     )
-
-def passes_v7_shadow(momentum, trend):
-    return trend >= V7_MIN_TREND and momentum > 0
 
 def log_trade_event(cur, trade_id, symbol, event_type, price, pnl_percent,
                     peak_pnl_percent, minutes_in_trade, momentum, trend, is_entry=False):
@@ -348,6 +352,34 @@ def open_trade(cur, symbol, direction, price, momentum, trend, quality,
 
     return trade_id
 
+def safe_update_trade_telemetry(cur, tid, telemetry):
+    allowed = {}
+
+    for col, val in telemetry.items():
+        if column_exists(cur, "bot_trades_v4", col):
+            allowed[col] = val
+
+    if not allowed:
+        return
+
+    set_sql = ", ".join([f"{col} = %s" for col in allowed.keys()])
+    values = list(allowed.values()) + [tid]
+
+    cur.execute(
+        f"""
+        UPDATE bot_trades_v4
+        SET {set_sql}
+        WHERE id = %s
+        """,
+        values
+    )
+
+def is_v7_trade(entry_quality, is_shadow):
+    return (
+        not is_shadow
+        and entry_quality == "V7_MAIN_BROAD"
+    )
+
 # =========================
 # WEBHOOK
 # =========================
@@ -401,7 +433,6 @@ def webhook():
 
         # ================= LIVE REGIME =================
         regime_state, sniper_now, sniper_before, sniper_delta, active_rising = get_live_regime(cur)
-        quality = classify_quality(momentum, trend)
 
         print(
             f"🧠 REGIME | {regime_state} | sniper_now={sniper_now} | "
@@ -412,35 +443,22 @@ def webhook():
         # ================= ENTRY DECISION =================
         entry_allowed = False
         block_reason = None
-        live_entry_quality = quality
+        live_entry_quality = None
 
         if decision in ["LONG", "SHORT"]:
 
             if decision == "LONG":
-                entry_allowed = passes_v5_long_filter(
-                    momentum,
-                    trend,
-                    regime_state,
-                    active_rising,
-                    sniper_now,
-                    sniper_delta
-                )
-
-                if not entry_allowed:
-                    if trend < MIN_ENTRY_TREND:
-                        block_reason = "trend_too_weak"
-                    elif momentum < MIN_ENTRY_MOMENTUM:
-                        block_reason = "momentum_too_weak"
-                    elif ENABLE_V53_CONTROLLED_IGNITION and regime_state != V53_REQUIRED_REGIME:
-                        block_reason = "v53_not_warm_regime"
-                    elif ENABLE_V53_CONTROLLED_IGNITION and not active_rising:
-                        block_reason = "v53_not_active_rising"
-                    elif ENABLE_V53_CONTROLLED_IGNITION and (sniper_now < V53_MIN_DENSITY or sniper_now > V53_MAX_DENSITY):
-                        block_reason = "v53_density_outside_range"
-                    elif ENABLE_V53_CONTROLLED_IGNITION and (sniper_delta < V53_MIN_DENSITY_DELTA or sniper_delta > V53_MAX_DENSITY_DELTA):
-                        block_reason = "v53_density_delta_outside_range"
+                if passes_v7_main(momentum, trend):
+                    entry_allowed = True
+                    live_entry_quality = "V7_MAIN_BROAD"
+                else:
+                    entry_allowed = False
+                    if trend < V7_MIN_TREND:
+                        block_reason = "v7_trend_too_weak"
+                    elif momentum <= V7_MIN_MOMENTUM:
+                        block_reason = "v7_momentum_not_positive"
                     else:
-                        block_reason = "v5_long_filter_block"
+                        block_reason = "v7_main_filter_block"
 
             elif decision == "SHORT":
                 short_tier = classify_short_tier(symbol, momentum, trend, sniper_now)
@@ -536,6 +554,29 @@ def webhook():
 
             if open_shadow_count < MAX_OPEN_SHADOW_TRADES:
 
+                if ENABLE_SHADOW_V53_SNIPER and passes_v53_shadow(
+                    momentum,
+                    trend,
+                    regime_state,
+                    active_rising,
+                    sniper_now,
+                    sniper_delta
+                ):
+                    shadow_id = open_trade(
+                        cur,
+                        symbol,
+                        "LONG",
+                        price,
+                        momentum,
+                        trend,
+                        "SHADOW_V53_SNIPER",
+                        regime_state,
+                        signal_id,
+                        signal_time,
+                        is_shadow=True
+                    )
+                    print(f"👻 OPEN SHADOW V5.3 SNIPER | {symbol} | id={shadow_id}", flush=True)
+
                 if ENABLE_SHADOW_V6 and passes_v6_shadow(momentum, trend, sniper_now, sniper_delta):
                     shadow_id = open_trade(
                         cur,
@@ -551,22 +592,6 @@ def webhook():
                         is_shadow=True
                     )
                     print(f"👻 OPEN SHADOW V6 | {symbol} | id={shadow_id}", flush=True)
-
-                if ENABLE_SHADOW_V7 and passes_v7_shadow(momentum, trend):
-                    shadow_id = open_trade(
-                        cur,
-                        symbol,
-                        "LONG",
-                        price,
-                        momentum,
-                        trend,
-                        "SHADOW_V7_BROAD",
-                        regime_state,
-                        signal_id,
-                        signal_time,
-                        is_shadow=True
-                    )
-                    print(f"👻 OPEN SHADOW V7 | {symbol} | id={shadow_id}", flush=True)
 
         # ================= EXIT ENGINE =================
         cur.execute("""
@@ -632,11 +657,38 @@ def webhook():
             update_count = get_update_count(cur, tid)
 
             close_reason = None
+            exit_architecture = None
+            decay_triggered = False
 
             # U2 CONFIRMATION EXIT
             if ENABLE_CONFIRMATION_EXIT:
                 if update_count == CONFIRMATION_UPDATE_NUM and pnl_percent < CONFIRMATION_MIN_PNL:
                     close_reason = "failed_confirmation"
+                    exit_architecture = "confirmation_exit"
+
+            # V7 STRUCTURAL TREND DECAY EXIT
+            if (
+                not close_reason
+                and direction == "LONG"
+                and ENABLE_V7_TREND_DECAY_EXIT
+                and is_v7_trade(entry_quality, is_shadow)
+                and mins >= V7_DECAY_MINUTES
+                and current_peak < V7_DECAY_MAX_PEAK
+                and trend < V7_DECAY_TREND_THRESHOLD
+            ):
+                close_reason = "v7_trend_decay_exit"
+                exit_architecture = "v7_single_confirm_decay_cut_zero"
+                decay_triggered = True
+
+                safe_update_trade_telemetry(cur, tid, {
+                    "decay_triggered": True,
+                    "decay_checked_at_minutes": mins,
+                    "decay_peak_at_check": current_peak,
+                    "decay_trend_at_check": trend,
+                    "decay_momentum_at_check": momentum,
+                    "slot_recycle_candidate": True,
+                    "exit_architecture": exit_architecture
+                })
 
             # LONG EXIT MODEL
             if not close_reason and direction == "LONG":
@@ -646,39 +698,48 @@ def webhook():
                         lock_floor = current_peak * LONG_LOCK_4_RATIO
                         if pnl_percent <= lock_floor:
                             close_reason = "long_lock_4"
+                            exit_architecture = "long_profit_lock"
 
                     elif current_peak >= LONG_LOCK_3_TRIGGER:
                         lock_floor = current_peak * LONG_LOCK_3_RATIO
                         if pnl_percent <= lock_floor:
                             close_reason = "long_lock_3"
+                            exit_architecture = "long_profit_lock"
 
                     elif current_peak >= LONG_LOCK_2_TRIGGER:
                         lock_floor = current_peak * LONG_LOCK_2_RATIO
                         if pnl_percent <= lock_floor:
                             close_reason = "long_lock_2"
+                            exit_architecture = "long_profit_lock"
 
                     elif current_peak >= LONG_LOCK_1_TRIGGER:
                         lock_floor = current_peak * LONG_LOCK_1_RATIO
                         if pnl_percent <= lock_floor:
                             close_reason = "long_lock_1"
+                            exit_architecture = "long_profit_lock"
 
                 if not close_reason and current_peak >= LONG_NO_RED_AFTER_WIN_TRIGGER and pnl_percent < 0:
                     close_reason = "long_gave_back_winner"
+                    exit_architecture = "long_no_red_after_win"
 
                 if not close_reason and pnl_percent <= LONG_HARD_STOP:
                     close_reason = "long_hard_stop"
+                    exit_architecture = "long_hard_stop"
 
             # SHORT EXIT MODEL
             if not close_reason and direction == "SHORT":
 
                 if current_peak >= SHORT_TP_1_TRIGGER and pnl_percent <= SHORT_TP_1_FLOOR:
                     close_reason = "short_tp_1_lock"
+                    exit_architecture = "short_tactical_lock"
 
                 elif current_peak >= SHORT_TP_05_TRIGGER and pnl_percent <= SHORT_TP_05_FLOOR:
                     close_reason = "short_tp_0_5_lock"
+                    exit_architecture = "short_tactical_lock"
 
                 elif pnl_percent <= SHORT_HARD_STOP:
                     close_reason = "short_hard_stop"
+                    exit_architecture = "short_hard_stop"
 
             if close_reason:
                 pnl_gbp = 0 if is_shadow else (pnl_percent / 100) * TRADE_SIZE_GBP
@@ -699,6 +760,16 @@ def webhook():
                     close_reason,
                     tid
                 ))
+
+                safe_update_trade_telemetry(cur, tid, {
+                    "decay_triggered": decay_triggered,
+                    "decay_checked_at_minutes": mins if decay_triggered else None,
+                    "decay_peak_at_check": current_peak if decay_triggered else None,
+                    "decay_trend_at_check": trend if decay_triggered else None,
+                    "decay_momentum_at_check": momentum if decay_triggered else None,
+                    "slot_recycle_candidate": decay_triggered,
+                    "exit_architecture": exit_architecture
+                })
 
                 log_trade_event(
                     cur,
