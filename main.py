@@ -2,15 +2,20 @@
 # 🤖 BOT VERSION
 # =========================
 # VERSION: v5.5
-# TITLE: V7 MAIN CONTINUATION ENGINE + TREND DECAY EXIT + V5.3/V6 SHADOWS + S5 TACTICAL SHORTS
+# TITLE: V7 MAIN CONTINUATION ENGINE + TREND DECAY EXIT + V5.3/V6 SHADOWS + S5 SHORTS SHADOW + OKX EXECUTION LAYER
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v5.5 RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v5.5 + OKX EXEC LAYER RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
+import json
+import hmac
+import base64
+import hashlib
+import requests
 import psycopg2
-from datetime import datetime
+from datetime import datetime, timezone
 
 app = Flask(__name__)
 
@@ -21,6 +26,30 @@ MAX_OPEN_SHADOW_TRADES = 30
 TRADE_SIZE_GBP = 100
 
 DATA_VERSION = "v5.5"
+
+# =========================
+# 🔌 OKX EXECUTION SETTINGS
+# =========================
+
+OKX_API_KEY = os.environ.get("OKX_API_KEY")
+OKX_API_SECRET = os.environ.get("OKX_API_SECRET")
+OKX_API_PASSPHRASE = os.environ.get("OKX_API_PASSPHRASE")
+OKX_BASE_URL = os.environ.get("OKX_BASE_URL", "https://www.okx.com").rstrip("/")
+
+ENABLE_ORDER_LOGGING = os.environ.get("ENABLE_ORDER_LOGGING", "true").lower() == "true"
+ENABLE_LIVE_ORDERS = os.environ.get("ENABLE_LIVE_ORDERS", "false").lower() == "true"
+
+LIVE_TRADE_SIZE_GBP = float(os.environ.get("LIVE_TRADE_SIZE_GBP", "5") or 5)
+MAX_LIVE_OPEN_TRADES = int(os.environ.get("MAX_LIVE_OPEN_TRADES", "2") or 2)
+
+OKX_TD_MODE = os.environ.get("OKX_TD_MODE", "cash")
+OKX_ORDER_TYPE = os.environ.get("OKX_ORDER_TYPE", "market")
+
+# NOTE:
+# OKX spot market buys use quote currency when tgtCcy="quote_ccy".
+# LIVE_TRADE_SIZE_GBP is treated here as the small quote-size test amount.
+# For USDT pairs this effectively means "spend about this many USDT".
+LIVE_TRADE_SIZE_QUOTE = float(os.environ.get("LIVE_TRADE_SIZE_QUOTE", LIVE_TRADE_SIZE_GBP) or LIVE_TRADE_SIZE_GBP)
 
 # =========================
 # 🚀 REGIME SETTINGS
@@ -65,10 +94,10 @@ V53_MIN_DENSITY_DELTA = 2
 V53_MAX_DENSITY_DELTA = 4
 
 # =========================
-# 🩸 S5 TACTICAL SHORT ENGINE
+# 🩸 S5 TACTICAL SHORT ENGINE — SHADOW ONLY
 # =========================
 
-ENABLE_S5_SHORT_ENGINE = True
+ENABLE_SHADOW_S5_SHORT_ENGINE = True
 
 S5_MIN_MOMENTUM = -0.70
 S5_MIN_DENSITY = 10
@@ -151,6 +180,351 @@ def column_exists(cur, table_name, column_name):
     """, (table_name, column_name))
     return cur.fetchone()[0]
 
+def ensure_okx_order_log_table(cur):
+    if not ENABLE_ORDER_LOGGING:
+        return
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS okx_order_log (
+            id BIGSERIAL PRIMARY KEY,
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            trade_id TEXT,
+            symbol TEXT,
+            okx_inst_id TEXT,
+            action TEXT,
+            side TEXT,
+            direction TEXT,
+            dry_run BOOLEAN,
+            live_orders_enabled BOOLEAN,
+            request_payload JSONB,
+            response_payload JSONB,
+            success BOOLEAN,
+            error_message TEXT
+        )
+    """)
+
+# =========================
+# OKX HELPERS
+# =========================
+
+def bool_status():
+    return {
+        "ENABLE_ORDER_LOGGING": ENABLE_ORDER_LOGGING,
+        "ENABLE_LIVE_ORDERS": ENABLE_LIVE_ORDERS,
+        "MAX_LIVE_OPEN_TRADES": MAX_LIVE_OPEN_TRADES,
+        "LIVE_TRADE_SIZE_QUOTE": LIVE_TRADE_SIZE_QUOTE,
+        "OKX_BASE_URL": OKX_BASE_URL,
+        "OKX_TD_MODE": OKX_TD_MODE,
+    }
+
+def okx_symbol_to_inst_id(symbol):
+    """
+    Converts TradingView-style symbols like BTCUSDT into OKX spot instIds like BTC-USDT.
+    """
+    s = (symbol or "").upper().replace("-", "").replace("/", "")
+
+    quote_assets = ["USDT", "USDC", "USD", "BTC", "ETH", "EUR", "GBP"]
+
+    for quote in quote_assets:
+        if s.endswith(quote) and len(s) > len(quote):
+            base = s[:-len(quote)]
+            return f"{base}-{quote}"
+
+    return symbol
+
+def get_okx_timestamp():
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+def okx_sign(timestamp, method, request_path, body=""):
+    message = f"{timestamp}{method.upper()}{request_path}{body}"
+    mac = hmac.new(
+        bytes(OKX_API_SECRET, encoding="utf-8"),
+        bytes(message, encoding="utf-8"),
+        digestmod=hashlib.sha256
+    )
+    return base64.b64encode(mac.digest()).decode()
+
+def okx_headers(method, request_path, body=""):
+    timestamp = get_okx_timestamp()
+    sign = okx_sign(timestamp, method, request_path, body)
+
+    return {
+        "OK-ACCESS-KEY": OKX_API_KEY,
+        "OK-ACCESS-SIGN": sign,
+        "OK-ACCESS-TIMESTAMP": timestamp,
+        "OK-ACCESS-PASSPHRASE": OKX_API_PASSPHRASE,
+        "Content-Type": "application/json",
+    }
+
+def okx_api_ready():
+    return bool(OKX_API_KEY and OKX_API_SECRET and OKX_API_PASSPHRASE and OKX_BASE_URL)
+
+def log_okx_order(cur, trade_id, symbol, okx_inst_id, action, side, direction,
+                  dry_run, request_payload, response_payload=None,
+                  success=True, error_message=None):
+    if not ENABLE_ORDER_LOGGING:
+        return
+
+    ensure_okx_order_log_table(cur)
+
+    cur.execute("""
+        INSERT INTO okx_order_log (
+            trade_id,
+            symbol,
+            okx_inst_id,
+            action,
+            side,
+            direction,
+            dry_run,
+            live_orders_enabled,
+            request_payload,
+            response_payload,
+            success,
+            error_message
+        )
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+    """, (
+        str(trade_id) if trade_id is not None else None,
+        symbol,
+        okx_inst_id,
+        action,
+        side,
+        direction,
+        dry_run,
+        ENABLE_LIVE_ORDERS,
+        json.dumps(request_payload),
+        json.dumps(response_payload) if response_payload is not None else None,
+        success,
+        error_message
+    ))
+
+def get_live_real_open_count(cur):
+    cur.execute("""
+        SELECT COUNT(*)
+        FROM bot_trades_v4
+        WHERE status = 'OPEN'
+          AND COALESCE(is_shadow, FALSE) = FALSE
+    """)
+    return cur.fetchone()[0] or 0
+
+def calculate_exit_base_size(entry_price):
+    if entry_price <= 0:
+        return 0
+
+    base_size = LIVE_TRADE_SIZE_QUOTE / float(entry_price)
+
+    # Conservative rounding to reduce precision errors.
+    return round(base_size, 8)
+
+def okx_place_market_order(cur, trade_id, symbol, direction, action, price=None, entry_price=None):
+    """
+    action:
+      - "entry": real LONG entry = buy
+      - "exit": real LONG exit = sell
+
+    S5 shorts are now shadow only, so this live execution wrapper intentionally
+    only supports real LONG spot buy/sell execution.
+    """
+
+    okx_inst_id = okx_symbol_to_inst_id(symbol)
+
+    if direction != "LONG":
+        request_payload = {
+            "blocked": True,
+            "reason": "live_execution_only_supports_long_spot_orders",
+            "symbol": symbol,
+            "direction": direction,
+            "action": action
+        }
+
+        log_okx_order(
+            cur, trade_id, symbol, okx_inst_id, action, None, direction,
+            True, request_payload, None, False,
+            "live_execution_only_supports_long_spot_orders"
+        )
+
+        print(f"🛡️ OKX BLOCKED | {symbol} | {direction} | live execution supports LONG spot only", flush=True)
+
+        return {
+            "success": False,
+            "dry_run": True,
+            "blocked": True,
+            "reason": "live_execution_only_supports_long_spot_orders"
+        }
+
+    if action == "entry":
+        side = "buy"
+        payload = {
+            "instId": okx_inst_id,
+            "tdMode": OKX_TD_MODE,
+            "side": side,
+            "ordType": OKX_ORDER_TYPE,
+            "sz": str(LIVE_TRADE_SIZE_QUOTE),
+            "tgtCcy": "quote_ccy"
+        }
+
+    elif action == "exit":
+        side = "sell"
+        reference_price = entry_price or price or 0
+        sell_size = calculate_exit_base_size(reference_price)
+
+        payload = {
+            "instId": okx_inst_id,
+            "tdMode": OKX_TD_MODE,
+            "side": side,
+            "ordType": OKX_ORDER_TYPE,
+            "sz": str(sell_size)
+        }
+
+    else:
+        payload = {
+            "blocked": True,
+            "reason": "unknown_okx_action",
+            "symbol": symbol,
+            "direction": direction,
+            "action": action
+        }
+
+        log_okx_order(
+            cur, trade_id, symbol, okx_inst_id, action, None, direction,
+            True, payload, None, False, "unknown_okx_action"
+        )
+
+        return {
+            "success": False,
+            "dry_run": True,
+            "blocked": True,
+            "reason": "unknown_okx_action"
+        }
+
+    dry_run = not ENABLE_LIVE_ORDERS
+
+    if dry_run:
+        response_payload = {
+            "dry_run": True,
+            "message": "OKX live orders disabled. No order sent.",
+            "payload": payload
+        }
+
+        log_okx_order(
+            cur, trade_id, symbol, okx_inst_id, action, side, direction,
+            True, payload, response_payload, True, None
+        )
+
+        print(
+            f"🧪 OKX DRY RUN | {action.upper()} | {symbol} -> {okx_inst_id} | "
+            f"side={side} | size={payload.get('sz')}",
+            flush=True
+        )
+
+        return {
+            "success": True,
+            "dry_run": True,
+            "response": response_payload
+        }
+
+    if not okx_api_ready():
+        error_message = "OKX API credentials missing or incomplete"
+
+        log_okx_order(
+            cur, trade_id, symbol, okx_inst_id, action, side, direction,
+            False, payload, None, False, error_message
+        )
+
+        print(f"❌ OKX LIVE ORDER BLOCKED | {symbol} | {error_message}", flush=True)
+
+        return {
+            "success": False,
+            "dry_run": False,
+            "error": error_message
+        }
+
+    if action == "entry":
+        live_open_count = get_live_real_open_count(cur)
+        if live_open_count > MAX_LIVE_OPEN_TRADES:
+            error_message = f"MAX_LIVE_OPEN_TRADES exceeded: {live_open_count} > {MAX_LIVE_OPEN_TRADES}"
+
+            log_okx_order(
+                cur, trade_id, symbol, okx_inst_id, action, side, direction,
+                False, payload, None, False, error_message
+            )
+
+            print(f"🛡️ OKX LIVE ORDER BLOCKED | {symbol} | {error_message}", flush=True)
+
+            return {
+                "success": False,
+                "dry_run": False,
+                "blocked": True,
+                "error": error_message
+            }
+
+    request_path = "/api/v5/trade/order"
+    method = "POST"
+    body = json.dumps(payload, separators=(",", ":"))
+
+    try:
+        headers = okx_headers(method, request_path, body)
+
+        response = requests.post(
+            f"{OKX_BASE_URL}{request_path}",
+            headers=headers,
+            data=body,
+            timeout=10
+        )
+
+        try:
+            response_payload = response.json()
+        except Exception:
+            response_payload = {
+                "status_code": response.status_code,
+                "text": response.text
+            }
+
+        okx_code = str(response_payload.get("code")) if isinstance(response_payload, dict) else None
+        success = response.status_code == 200 and okx_code == "0"
+
+        log_okx_order(
+            cur, trade_id, symbol, okx_inst_id, action, side, direction,
+            False, payload, response_payload, success,
+            None if success else f"OKX order failed: {response_payload}"
+        )
+
+        if success:
+            print(
+                f"✅ OKX LIVE ORDER SENT | {action.upper()} | {symbol} -> {okx_inst_id} | "
+                f"side={side} | size={payload.get('sz')}",
+                flush=True
+            )
+        else:
+            print(
+                f"❌ OKX LIVE ORDER FAILED | {action.upper()} | {symbol} -> {okx_inst_id} | "
+                f"response={response_payload}",
+                flush=True
+            )
+
+        return {
+            "success": success,
+            "dry_run": False,
+            "status_code": response.status_code,
+            "response": response_payload
+        }
+
+    except Exception as e:
+        error_message = str(e)
+
+        log_okx_order(
+            cur, trade_id, symbol, okx_inst_id, action, side, direction,
+            False, payload, None, False, error_message
+        )
+
+        print(f"❌ OKX EXECUTION ERROR | {symbol} | {error_message}", flush=True)
+
+        return {
+            "success": False,
+            "dry_run": False,
+            "error": error_message
+        }
+
 # =========================
 # HELPERS
 # =========================
@@ -173,14 +547,14 @@ def classify_short_tier(symbol, momentum, trend, sniper_density):
         and momentum <= S5_MIN_MOMENTUM
         and sniper_density >= S5_MIN_DENSITY
     ):
-        return "S5_SHORT_TIER_2_ELITE"
+        return "SHADOW_S5_SHORT_TIER_2_ELITE"
 
     if (
         S5_MIN_TREND <= trend <= S5_MAX_TREND
         and momentum <= S5_MIN_MOMENTUM
         and sniper_density >= S5_MIN_DENSITY
     ):
-        return "S5_SHORT_TIER_1_BROAD"
+        return "SHADOW_S5_SHORT_TIER_1_BROAD"
 
     return None
 
@@ -406,6 +780,9 @@ def webhook():
         conn = get_db()
         cur = conn.cursor()
 
+        if ENABLE_ORDER_LOGGING:
+            ensure_okx_order_log_table(cur)
+
         has_peak_time = column_exists(cur, "bot_trades_v4", "peak_time_minutes")
 
         # ================= RAW SIGNAL — ALWAYS STORE =================
@@ -461,14 +838,14 @@ def webhook():
                         block_reason = "v7_main_filter_block"
 
             elif decision == "SHORT":
+                # S5 shorts are now SHADOW ONLY.
+                # No real SHORT trades are opened.
+                entry_allowed = False
                 short_tier = classify_short_tier(symbol, momentum, trend, sniper_now)
 
-                if ENABLE_S5_SHORT_ENGINE and short_tier:
-                    entry_allowed = True
-                    block_reason = None
-                    live_entry_quality = short_tier
+                if ENABLE_SHADOW_S5_SHORT_ENGINE and short_tier:
+                    block_reason = "s5_shadow_only"
                 else:
-                    entry_allowed = False
                     block_reason = "short_not_s5_tactical"
 
             if ENABLE_MAX_OPEN_TRADES and entry_allowed:
@@ -533,6 +910,18 @@ def webhook():
                     flush=True
                 )
 
+                # OKX EXECUTION LAYER — real trades only.
+                # Dry-run unless ENABLE_LIVE_ORDERS=true.
+                okx_place_market_order(
+                    cur=cur,
+                    trade_id=trade_id,
+                    symbol=symbol,
+                    direction=decision,
+                    action="entry",
+                    price=price,
+                    entry_price=price
+                )
+
             else:
                 print(
                     f"⛔ BLOCKED | {symbol} | {decision} | "
@@ -543,16 +932,17 @@ def webhook():
                 )
 
         # ================= SHADOW ENTRIES =================
-        if decision == "LONG":
-            cur.execute("""
-                SELECT COUNT(*)
-                FROM bot_trades_v4
-                WHERE status = 'OPEN'
-                  AND COALESCE(is_shadow, FALSE) = TRUE
-            """)
-            open_shadow_count = cur.fetchone()[0] or 0
+        cur.execute("""
+            SELECT COUNT(*)
+            FROM bot_trades_v4
+            WHERE status = 'OPEN'
+              AND COALESCE(is_shadow, FALSE) = TRUE
+        """)
+        open_shadow_count = cur.fetchone()[0] or 0
 
-            if open_shadow_count < MAX_OPEN_SHADOW_TRADES:
+        if open_shadow_count < MAX_OPEN_SHADOW_TRADES:
+
+            if decision == "LONG":
 
                 if ENABLE_SHADOW_V53_SNIPER and passes_v53_shadow(
                     momentum,
@@ -592,6 +982,26 @@ def webhook():
                         is_shadow=True
                     )
                     print(f"👻 OPEN SHADOW V6 | {symbol} | id={shadow_id}", flush=True)
+
+            elif decision == "SHORT":
+
+                short_tier = classify_short_tier(symbol, momentum, trend, sniper_now)
+
+                if ENABLE_SHADOW_S5_SHORT_ENGINE and short_tier:
+                    shadow_id = open_trade(
+                        cur,
+                        symbol,
+                        "SHORT",
+                        price,
+                        momentum,
+                        trend,
+                        short_tier,
+                        regime_state,
+                        signal_id,
+                        signal_time,
+                        is_shadow=True
+                    )
+                    print(f"👻 OPEN SHADOW S5 SHORT | {symbol} | id={shadow_id} | tier={short_tier}", flush=True)
 
         # ================= EXIT ENGINE =================
         cur.execute("""
@@ -785,6 +1195,18 @@ def webhook():
                     False
                 )
 
+                # OKX EXIT EXECUTION — real trades only.
+                if not is_shadow:
+                    okx_place_market_order(
+                        cur=cur,
+                        trade_id=tid,
+                        symbol=sym,
+                        direction=direction,
+                        action="exit",
+                        price=price,
+                        entry_price=entry_price
+                    )
+
                 trade_type = "SHADOW" if is_shadow else "REAL"
 
                 print(
@@ -807,4 +1229,8 @@ def webhook():
 
 @app.route("/", methods=["GET"])
 def home():
-    return jsonify({"status": "running", "version": DATA_VERSION}), 200
+    return jsonify({
+        "status": "running",
+        "version": DATA_VERSION,
+        "okx_execution": bool_status()
+    }), 200
