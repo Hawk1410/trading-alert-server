@@ -2,10 +2,10 @@
 # 🤖 BOT VERSION
 # =========================
 # VERSION: v5.5
-# TITLE: V7 MAIN CONTINUATION ENGINE + TREND DECAY EXIT + V5.3/V6 SHADOWS + S5 SHORTS SHADOW + OKX EXECUTION LAYER + OKX TRADABILITY FILTER + EXIT SAFETY
+# TITLE: V7 MAIN CONTINUATION ENGINE + TREND DECAY EXIT + V5.3/V6 SHADOWS + S5 SHORTS SHADOW + OKX EXECUTION LAYER + OKX TRADABILITY FILTER + EXIT SAFETY + TELEGRAM ALERTS
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v5.5 + OKX EXEC + TRADABILITY FILTER + EXIT SAFETY RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v5.5 + OKX EXEC + TRADABILITY FILTER + EXIT SAFETY + TELEGRAM RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -44,6 +44,14 @@ MAX_LIVE_OPEN_TRADES = int(os.environ.get("MAX_LIVE_OPEN_TRADES", "7") or 7)
 
 OKX_TD_MODE = os.environ.get("OKX_TD_MODE", "cash")
 OKX_ORDER_TYPE = os.environ.get("OKX_ORDER_TYPE", "market")
+
+# =========================
+# 📲 TELEGRAM ALERT SETTINGS
+# =========================
+
+ENABLE_TELEGRAM_ALERTS = os.environ.get("ENABLE_TELEGRAM_ALERTS", "false").lower() == "true"
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 # OKX spot market buys use quote currency when tgtCcy="quote_ccy".
 LIVE_TRADE_SIZE_QUOTE = float(os.environ.get("LIVE_TRADE_SIZE_QUOTE", LIVE_TRADE_SIZE_GBP) or LIVE_TRADE_SIZE_GBP)
@@ -213,6 +221,47 @@ def ensure_okx_order_log_table(cur):
     """)
 
 # =========================
+# TELEGRAM HELPERS
+# =========================
+
+def send_telegram_alert(message):
+    if not ENABLE_TELEGRAM_ALERTS:
+        return False
+
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("⚠️ TELEGRAM ALERT SKIPPED | missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID", flush=True)
+        return False
+
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": message,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True
+        }
+
+        response = requests.post(url, json=payload, timeout=8)
+
+        if response.status_code == 200:
+            print("📲 TELEGRAM ALERT SENT", flush=True)
+            return True
+
+        print(f"⚠️ TELEGRAM ALERT FAILED | status={response.status_code} | body={response.text}", flush=True)
+        return False
+
+    except Exception as e:
+        print(f"⚠️ TELEGRAM ALERT ERROR | {e}", flush=True)
+        return False
+
+def fmt_num(value, digits=3):
+    try:
+        return round(float(value), digits)
+    except Exception:
+        return value
+
+# =========================
 # OKX HELPERS
 # =========================
 
@@ -229,6 +278,8 @@ def bool_status():
         "OKX_TRADABLE_SPOT_COUNT": len(OKX_TRADABLE_SPOT_INST_IDS),
         "OKX_TRADABILITY_CACHE_UPDATED_AT": OKX_TRADABILITY_CACHE_UPDATED_AT.isoformat() if OKX_TRADABILITY_CACHE_UPDATED_AT else None,
         "OKX_TRADABILITY_LAST_ERROR": OKX_TRADABILITY_LAST_ERROR,
+        "ENABLE_TELEGRAM_ALERTS": ENABLE_TELEGRAM_ALERTS,
+        "TELEGRAM_CONFIGURED": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
     }
 
 def okx_symbol_to_inst_id(symbol):
@@ -469,8 +520,8 @@ def has_successful_okx_live_entry(cur, trade_id):
           AND COALESCE(dry_run, FALSE) = FALSE
           AND COALESCE(success, FALSE) = TRUE
           AND error_message IS NULL
-          AND COALESCE(response_payload::text, '') NOT ILIKE '%skipped%'
-          AND COALESCE(response_payload::text, '') NOT ILIKE '%dry_run%'
+          AND COALESCE(response_payload::text, '') NOT ILIKE '%%skipped%%'
+          AND COALESCE(response_payload::text, '') NOT ILIKE '%%dry_run%%'
     """, (str(trade_id),))
 
     return (cur.fetchone()[0] or 0) > 0
@@ -673,6 +724,12 @@ def okx_place_market_order(cur, trade_id, symbol, direction, action, price=None,
             flush=True
         )
 
+        send_telegram_alert(
+            f"🛡️ <b>OKX ORDER SKIPPED</b>\n"
+            f"{action.upper()} | {symbol} → {okx_inst_id}\n"
+            f"Reason: {tradability_reason}"
+        )
+
         return {
             "success": True,
             "dry_run": False,
@@ -737,11 +794,25 @@ def okx_place_market_order(cur, trade_id, symbol, direction, action, price=None,
                 f"side={side} | size={payload.get('sz')}",
                 flush=True
             )
+
+            send_telegram_alert(
+                f"✅ <b>OKX LIVE ORDER SENT</b>\n"
+                f"{action.upper()} | {symbol} → {okx_inst_id}\n"
+                f"Side: {side}\n"
+                f"Size: {payload.get('sz')}"
+            )
         else:
             print(
                 f"❌ OKX LIVE ORDER FAILED | {action.upper()} | {symbol} -> {okx_inst_id} | "
                 f"response={response_payload}",
                 flush=True
+            )
+
+            send_telegram_alert(
+                f"❌ <b>OKX LIVE ORDER FAILED</b>\n"
+                f"{action.upper()} | {symbol} → {okx_inst_id}\n"
+                f"Side: {side}\n"
+                f"Response: {response_payload}"
             )
 
         return {
@@ -1152,6 +1223,16 @@ def webhook():
                     flush=True
                 )
 
+                send_telegram_alert(
+                    f"🚀 <b>OPEN REAL</b>\n"
+                    f"{symbol} | {decision}\n"
+                    f"Entry: {price}\n"
+                    f"Engine: {live_entry_quality}\n"
+                    f"Regime: {regime_state}\n"
+                    f"Density: {sniper_now} | Delta: {sniper_delta}\n"
+                    f"Trade ID: {trade_id}"
+                )
+
                 # OKX EXECUTION LAYER — real trades only.
                 # Live order is skipped automatically if OKX account cannot trade symbol.
                 okx_place_market_order(
@@ -1471,6 +1552,16 @@ def webhook():
                     flush=True
                 )
 
+                if not is_shadow:
+                    send_telegram_alert(
+                        f"💰 <b>CLOSED REAL</b>\n"
+                        f"{sym} | {direction}\n"
+                        f"PnL: {fmt_num(pnl_percent)}%\n"
+                        f"Peak: {fmt_num(current_peak)}%\n"
+                        f"Reason: {close_reason}\n"
+                        f"Exit architecture: {exit_architecture}"
+                    )
+
         conn.commit()
         cur.close()
         conn.close()
@@ -1577,6 +1668,26 @@ def okx_tradability_status():
 
     except Exception as e:
         print("❌ OKX TRADABILITY STATUS ERROR:", e, flush=True)
+        return jsonify({"error": str(e)}), 400
+
+@app.route("/telegram_test", methods=["GET"])
+def telegram_test():
+    try:
+        sent = send_telegram_alert(
+            f"📲 <b>Telegram test successful</b>\n"
+            f"Bot version: {DATA_VERSION}\n"
+            f"Live orders: {ENABLE_LIVE_ORDERS}\n"
+            f"OKX tradability filter: {ENABLE_OKX_TRADABILITY_FILTER}"
+        )
+
+        return jsonify({
+            "status": "ok",
+            "telegram_enabled": ENABLE_TELEGRAM_ALERTS,
+            "telegram_configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
+            "sent": sent
+        }), 200
+
+    except Exception as e:
         return jsonify({"error": str(e)}), 400
 
 @app.route("/", methods=["GET"])
