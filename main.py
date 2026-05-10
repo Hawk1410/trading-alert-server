@@ -2,10 +2,10 @@
 # 🤖 BOT VERSION
 # =========================
 # VERSION: v5.5
-# TITLE: V7 MAIN CONTINUATION ENGINE + TREND DECAY EXIT + V5.3/V6 SHADOWS + S5 SHORTS SHADOW + OKX EXECUTION LAYER + OKX TRADABILITY FILTER
+# TITLE: V7 MAIN CONTINUATION ENGINE + TREND DECAY EXIT + V5.3/V6 SHADOWS + S5 SHORTS SHADOW + OKX EXECUTION LAYER + OKX TRADABILITY FILTER + EXIT SAFETY
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v5.5 + OKX EXEC + TRADABILITY FILTER RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v5.5 + OKX EXEC + TRADABILITY FILTER + EXIT SAFETY RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -447,6 +447,73 @@ def get_live_real_open_count(cur):
           AND COALESCE(is_shadow, FALSE) = FALSE
     """)
     return cur.fetchone()[0] or 0
+
+def has_successful_okx_live_entry(cur, trade_id):
+    """
+    Safety gate for exits.
+
+    Only send a live OKX exit if this exact bot trade previously had a successful,
+    non-dry-run OKX entry order. This prevents the bot trying to sell coins that
+    only exist as database trades, legacy trades, restricted-symbol skips, or failed entries.
+    """
+    if not ENABLE_ORDER_LOGGING:
+        return False
+
+    ensure_okx_order_log_table(cur)
+
+    cur.execute("""
+        SELECT COUNT(*)
+        FROM okx_order_log
+        WHERE trade_id = %s
+          AND action = 'entry'
+          AND COALESCE(dry_run, FALSE) = FALSE
+          AND COALESCE(success, FALSE) = TRUE
+          AND error_message IS NULL
+          AND COALESCE(response_payload::text, '') NOT ILIKE '%skipped%'
+          AND COALESCE(response_payload::text, '') NOT ILIKE '%dry_run%'
+    """, (str(trade_id),))
+
+    return (cur.fetchone()[0] or 0) > 0
+
+def log_okx_exit_skip_no_live_entry(cur, trade_id, symbol, direction, price=None):
+    okx_inst_id = okx_symbol_to_inst_id(symbol)
+
+    request_payload = {
+        "skipped": True,
+        "reason": "no_successful_okx_live_entry_for_trade",
+        "symbol": symbol,
+        "okx_inst_id": okx_inst_id,
+        "direction": direction,
+        "action": "exit",
+        "price": price
+    }
+
+    response_payload = {
+        "skipped": True,
+        "message": "OKX exit skipped because this bot trade has no successful live OKX entry order.",
+        "reason": "no_successful_okx_live_entry_for_trade"
+    }
+
+    log_okx_order(
+        cur,
+        trade_id,
+        symbol,
+        okx_inst_id,
+        "exit",
+        "sell",
+        direction,
+        False,
+        request_payload,
+        response_payload,
+        True,
+        "okx_exit_skipped_no_successful_live_entry"
+    )
+
+    print(
+        f"🛡️ OKX EXIT SKIPPED | {symbol} -> {okx_inst_id} | "
+        f"reason=no_successful_okx_live_entry_for_trade",
+        flush=True
+    )
 
 def calculate_exit_base_size(entry_price):
     if entry_price <= 0:
@@ -1371,17 +1438,29 @@ def webhook():
                 )
 
                 # OKX EXIT EXECUTION — real trades only.
-                # If the symbol was not tradable/never bought live, this will safely skip.
+                # Safety rule:
+                # Only send an OKX sell if this exact trade had a successful live OKX buy.
+                # This prevents sell attempts for legacy DB trades, failed entries, dry-runs,
+                # or restricted-symbol skipped entries.
                 if not is_shadow:
-                    okx_place_market_order(
-                        cur=cur,
-                        trade_id=tid,
-                        symbol=sym,
-                        direction=direction,
-                        action="exit",
-                        price=price,
-                        entry_price=entry_price
-                    )
+                    if has_successful_okx_live_entry(cur, tid):
+                        okx_place_market_order(
+                            cur=cur,
+                            trade_id=tid,
+                            symbol=sym,
+                            direction=direction,
+                            action="exit",
+                            price=price,
+                            entry_price=entry_price
+                        )
+                    else:
+                        log_okx_exit_skip_no_live_entry(
+                            cur=cur,
+                            trade_id=tid,
+                            symbol=sym,
+                            direction=direction,
+                            price=price
+                        )
 
                 trade_type = "SHADOW" if is_shadow else "REAL"
 
