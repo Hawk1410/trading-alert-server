@@ -2,10 +2,10 @@
 # 🤖 BOT VERSION
 # =========================
 # VERSION: v5.5
-# TITLE: V7 MAIN CONTINUATION ENGINE + TREND DECAY EXIT + V5.3/V6 SHADOWS + S5 SHORTS SHADOW + OKX EXECUTION LAYER
+# TITLE: V7 MAIN CONTINUATION ENGINE + TREND DECAY EXIT + V5.3/V6 SHADOWS + S5 SHORTS SHADOW + OKX EXECUTION LAYER + OKX TRADABILITY FILTER
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v5.5 + OKX EXEC LAYER RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v5.5 + OKX EXEC + TRADABILITY FILTER RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -15,7 +15,7 @@ import base64
 import hashlib
 import requests
 import psycopg2
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 app = Flask(__name__)
 
@@ -40,16 +40,25 @@ ENABLE_ORDER_LOGGING = os.environ.get("ENABLE_ORDER_LOGGING", "true").lower() ==
 ENABLE_LIVE_ORDERS = os.environ.get("ENABLE_LIVE_ORDERS", "false").lower() == "true"
 
 LIVE_TRADE_SIZE_GBP = float(os.environ.get("LIVE_TRADE_SIZE_GBP", "5") or 5)
-MAX_LIVE_OPEN_TRADES = int(os.environ.get("MAX_LIVE_OPEN_TRADES", "2") or 2)
+MAX_LIVE_OPEN_TRADES = int(os.environ.get("MAX_LIVE_OPEN_TRADES", "7") or 7)
 
 OKX_TD_MODE = os.environ.get("OKX_TD_MODE", "cash")
 OKX_ORDER_TYPE = os.environ.get("OKX_ORDER_TYPE", "market")
 
-# NOTE:
 # OKX spot market buys use quote currency when tgtCcy="quote_ccy".
-# LIVE_TRADE_SIZE_GBP is treated here as the small quote-size test amount.
-# For USDT pairs this effectively means "spend about this many USDT".
 LIVE_TRADE_SIZE_QUOTE = float(os.environ.get("LIVE_TRADE_SIZE_QUOTE", LIVE_TRADE_SIZE_GBP) or LIVE_TRADE_SIZE_GBP)
+
+# =========================
+# 🛡️ OKX TRADABILITY FILTER
+# =========================
+
+# Keeps strategy universe intact, but only sends real OKX orders for account-tradable SPOT pairs.
+ENABLE_OKX_TRADABILITY_FILTER = os.environ.get("ENABLE_OKX_TRADABILITY_FILTER", "true").lower() == "true"
+OKX_TRADABILITY_CACHE_SECONDS = int(os.environ.get("OKX_TRADABILITY_CACHE_SECONDS", "900") or 900)
+
+OKX_TRADABLE_SPOT_INST_IDS = set()
+OKX_TRADABILITY_CACHE_UPDATED_AT = None
+OKX_TRADABILITY_LAST_ERROR = None
 
 # =========================
 # 🚀 REGIME SETTINGS
@@ -215,6 +224,11 @@ def bool_status():
         "LIVE_TRADE_SIZE_QUOTE": LIVE_TRADE_SIZE_QUOTE,
         "OKX_BASE_URL": OKX_BASE_URL,
         "OKX_TD_MODE": OKX_TD_MODE,
+        "ENABLE_OKX_TRADABILITY_FILTER": ENABLE_OKX_TRADABILITY_FILTER,
+        "OKX_TRADABILITY_CACHE_SECONDS": OKX_TRADABILITY_CACHE_SECONDS,
+        "OKX_TRADABLE_SPOT_COUNT": len(OKX_TRADABLE_SPOT_INST_IDS),
+        "OKX_TRADABILITY_CACHE_UPDATED_AT": OKX_TRADABILITY_CACHE_UPDATED_AT.isoformat() if OKX_TRADABILITY_CACHE_UPDATED_AT else None,
+        "OKX_TRADABILITY_LAST_ERROR": OKX_TRADABILITY_LAST_ERROR,
     }
 
 def okx_symbol_to_inst_id(symbol):
@@ -258,6 +272,133 @@ def okx_headers(method, request_path, body=""):
 
 def okx_api_ready():
     return bool(OKX_API_KEY and OKX_API_SECRET and OKX_API_PASSPHRASE and OKX_BASE_URL)
+
+def okx_authenticated_get(request_path_with_query):
+    if not okx_api_ready():
+        return {
+            "success": False,
+            "error": "OKX API credentials missing or incomplete",
+            "response": None
+        }
+
+    method = "GET"
+    body = ""
+
+    try:
+        headers = okx_headers(method, request_path_with_query, body)
+
+        response = requests.get(
+            f"{OKX_BASE_URL}{request_path_with_query}",
+            headers=headers,
+            timeout=10
+        )
+
+        try:
+            response_payload = response.json()
+        except Exception:
+            response_payload = {
+                "status_code": response.status_code,
+                "text": response.text
+            }
+
+        okx_code = str(response_payload.get("code")) if isinstance(response_payload, dict) else None
+        success = response.status_code == 200 and okx_code == "0"
+
+        return {
+            "success": success,
+            "status_code": response.status_code,
+            "response": response_payload,
+            "error": None if success else f"OKX GET failed: {response_payload}"
+        }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "status_code": None,
+            "response": None,
+            "error": str(e)
+        }
+
+def refresh_okx_tradable_spot_instruments(force=False):
+    """
+    Uses OKX account-level instruments so the result reflects this account's actual tradable instruments.
+    """
+    global OKX_TRADABLE_SPOT_INST_IDS
+    global OKX_TRADABILITY_CACHE_UPDATED_AT
+    global OKX_TRADABILITY_LAST_ERROR
+
+    now_utc = datetime.now(timezone.utc)
+
+    if (
+        not force
+        and OKX_TRADABILITY_CACHE_UPDATED_AT is not None
+        and (now_utc - OKX_TRADABILITY_CACHE_UPDATED_AT).total_seconds() < OKX_TRADABILITY_CACHE_SECONDS
+        and OKX_TRADABLE_SPOT_INST_IDS
+    ):
+        return {
+            "success": True,
+            "cached": True,
+            "count": len(OKX_TRADABLE_SPOT_INST_IDS),
+            "inst_ids": sorted(list(OKX_TRADABLE_SPOT_INST_IDS)),
+            "error": None
+        }
+
+    result = okx_authenticated_get("/api/v5/account/instruments?instType=SPOT")
+
+    if not result.get("success"):
+        OKX_TRADABILITY_LAST_ERROR = result.get("error")
+        return {
+            "success": False,
+            "cached": False,
+            "count": len(OKX_TRADABLE_SPOT_INST_IDS),
+            "inst_ids": sorted(list(OKX_TRADABLE_SPOT_INST_IDS)),
+            "error": result.get("error"),
+            "response": result.get("response")
+        }
+
+    response_payload = result.get("response") or {}
+    data = response_payload.get("data") or []
+
+    inst_ids = set()
+
+    for item in data:
+        inst_id = item.get("instId")
+        state = (item.get("state") or "").lower()
+
+        # OKX usually returns live instruments here. Keep only live if state is present.
+        if inst_id and (not state or state == "live"):
+            inst_ids.add(inst_id.upper())
+
+    OKX_TRADABLE_SPOT_INST_IDS = inst_ids
+    OKX_TRADABILITY_CACHE_UPDATED_AT = now_utc
+    OKX_TRADABILITY_LAST_ERROR = None
+
+    print(f"🛡️ OKX TRADABILITY CACHE REFRESHED | spot_pairs={len(inst_ids)}", flush=True)
+
+    return {
+        "success": True,
+        "cached": False,
+        "count": len(inst_ids),
+        "inst_ids": sorted(list(inst_ids)),
+        "error": None
+    }
+
+def is_okx_symbol_live_tradable(symbol):
+    if not ENABLE_OKX_TRADABILITY_FILTER:
+        return True, "tradability_filter_disabled"
+
+    okx_inst_id = okx_symbol_to_inst_id(symbol).upper()
+
+    result = refresh_okx_tradable_spot_instruments(force=False)
+
+    if not result.get("success"):
+        # Safety first: if we cannot confirm tradability, do not send live orders.
+        return False, f"tradability_check_failed: {result.get('error')}"
+
+    if okx_inst_id in OKX_TRADABLE_SPOT_INST_IDS:
+        return True, "tradable"
+
+    return False, "not_in_account_tradable_spot_instruments"
 
 def log_okx_order(cur, trade_id, symbol, okx_inst_id, action, side, direction,
                   dry_run, request_payload, response_payload=None,
@@ -322,8 +463,11 @@ def okx_place_market_order(cur, trade_id, symbol, direction, action, price=None,
       - "entry": real LONG entry = buy
       - "exit": real LONG exit = sell
 
-    S5 shorts are now shadow only, so this live execution wrapper intentionally
+    S5 shorts are shadow only, so this live execution wrapper intentionally
     only supports real LONG spot buy/sell execution.
+
+    The tradability filter does NOT alter strategy/database trades.
+    It only skips live OKX order submission when the account cannot trade the pair.
     """
 
     okx_inst_id = okx_symbol_to_inst_id(symbol)
@@ -437,6 +581,37 @@ def okx_place_market_order(cur, trade_id, symbol, direction, action, price=None,
             "success": False,
             "dry_run": False,
             "error": error_message
+        }
+
+    tradable, tradability_reason = is_okx_symbol_live_tradable(symbol)
+
+    if not tradable:
+        response_payload = {
+            "skipped": True,
+            "message": "Live OKX order skipped because symbol is not confirmed tradable for this account.",
+            "reason": tradability_reason,
+            "symbol": symbol,
+            "okx_inst_id": okx_inst_id,
+            "payload": payload
+        }
+
+        log_okx_order(
+            cur, trade_id, symbol, okx_inst_id, action, side, direction,
+            False, payload, response_payload, True, f"okx_live_order_skipped_{tradability_reason}"
+        )
+
+        print(
+            f"🛡️ OKX LIVE ORDER SKIPPED | {action.upper()} | {symbol} -> {okx_inst_id} | "
+            f"reason={tradability_reason}",
+            flush=True
+        )
+
+        return {
+            "success": True,
+            "dry_run": False,
+            "skipped": True,
+            "reason": tradability_reason,
+            "response": response_payload
         }
 
     if action == "entry":
@@ -911,7 +1086,7 @@ def webhook():
                 )
 
                 # OKX EXECUTION LAYER — real trades only.
-                # Dry-run unless ENABLE_LIVE_ORDERS=true.
+                # Live order is skipped automatically if OKX account cannot trade symbol.
                 okx_place_market_order(
                     cur=cur,
                     trade_id=trade_id,
@@ -1196,6 +1371,7 @@ def webhook():
                 )
 
                 # OKX EXIT EXECUTION — real trades only.
+                # If the symbol was not tradable/never bought live, this will safely skip.
                 if not is_shadow:
                     okx_place_market_order(
                         cur=cur,
@@ -1226,6 +1402,103 @@ def webhook():
         print("❌ ERROR:", e, flush=True)
         return jsonify({"error": str(e)}), 400
 
+# =========================
+# OKX TRADABILITY SCANNER ROUTES
+# =========================
+
+@app.route("/okx_tradability_scan", methods=["GET"])
+def okx_tradability_scan():
+    """
+    Scans recent bot symbols against OKX account-level SPOT instruments.
+    This identifies which strategy symbols can actually be executed live on this OKX account.
+    """
+    try:
+        days = int(request.args.get("days", "14") or 14)
+        limit = int(request.args.get("limit", "300") or 300)
+        force = request.args.get("force", "true").lower() == "true"
+
+        tradability_result = refresh_okx_tradable_spot_instruments(force=force)
+
+        conn = get_db()
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT
+                symbol,
+                COUNT(*) AS signal_count,
+                MAX(timestamp) AS last_seen
+            FROM signals_raw
+            WHERE timestamp >= NOW() - (%s || ' days')::INTERVAL
+              AND symbol IS NOT NULL
+            GROUP BY symbol
+            ORDER BY signal_count DESC
+            LIMIT %s
+        """, (days, limit))
+
+        rows = cur.fetchall()
+
+        cur.close()
+        conn.close()
+
+        scan = []
+        tradable = []
+        restricted_or_unavailable = []
+
+        for symbol, signal_count, last_seen in rows:
+            okx_inst_id = okx_symbol_to_inst_id(symbol).upper()
+            is_tradable = okx_inst_id in OKX_TRADABLE_SPOT_INST_IDS
+
+            item = {
+                "symbol": symbol,
+                "okx_inst_id": okx_inst_id,
+                "signal_count": signal_count,
+                "last_seen": last_seen.isoformat() if last_seen else None,
+                "okx_live_tradable": is_tradable
+            }
+
+            scan.append(item)
+
+            if is_tradable:
+                tradable.append(item)
+            else:
+                restricted_or_unavailable.append(item)
+
+        return jsonify({
+            "status": "ok",
+            "version": DATA_VERSION,
+            "days": days,
+            "limit": limit,
+            "okx_account_instruments_success": tradability_result.get("success"),
+            "okx_account_spot_pair_count": len(OKX_TRADABLE_SPOT_INST_IDS),
+            "cache_updated_at": OKX_TRADABILITY_CACHE_UPDATED_AT.isoformat() if OKX_TRADABILITY_CACHE_UPDATED_AT else None,
+            "tradable_count": len(tradable),
+            "restricted_or_unavailable_count": len(restricted_or_unavailable),
+            "tradable": tradable,
+            "restricted_or_unavailable": restricted_or_unavailable,
+            "all": scan,
+            "okx_error": tradability_result.get("error")
+        }), 200
+
+    except Exception as e:
+        print("❌ OKX TRADABILITY SCAN ERROR:", e, flush=True)
+        return jsonify({"error": str(e)}), 400
+
+@app.route("/okx_tradability_status", methods=["GET"])
+def okx_tradability_status():
+    try:
+        force = request.args.get("force", "false").lower() == "true"
+        result = refresh_okx_tradable_spot_instruments(force=force)
+
+        return jsonify({
+            "status": "ok",
+            "version": DATA_VERSION,
+            "result": result,
+            "okx_execution": bool_status()
+        }), 200
+
+    except Exception as e:
+        print("❌ OKX TRADABILITY STATUS ERROR:", e, flush=True)
+        return jsonify({"error": str(e)}), 400
 
 @app.route("/", methods=["GET"])
 def home():
