@@ -2,10 +2,10 @@
 # 🤖 BOT VERSION
 # =========================
 # VERSION: v5.5
-# TITLE: V7 MAIN CONTINUATION ENGINE + TREND DECAY EXIT + V5.3/V6 SHADOWS + S5 SHORTS SHADOW + OKX EXECUTION LAYER + OKX TRADABILITY FILTER + STACK-SAFE FEE-AWARE EXIT SIZING + TELEGRAM ALERTS
+# TITLE: V7 MAIN CONTINUATION ENGINE + TREND DECAY EXIT + V5.3/V6 SHADOWS + S5 SHORTS SHADOW + OKX EXECUTION LAYER + V7 REAL TREND>=0.28 + LOW-TREND SHADOW + OKX STACK-SAFE FEE-AWARE EXITS + TELEGRAM ALERTS
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v5.5 + OKX EXEC + STACK-SAFE EXITS + 0.10% FEE AWARE BUFFER + CONFIRMATION EXIT OFF + TELEGRAM RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v5.5 + V7 REAL TREND>=0.28 + LOW-TREND SHADOW + OKX STACK-SAFE EXITS RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -96,8 +96,15 @@ ACTIVE_RISING_MIN_DELTA = 2
 
 ENABLE_V7_MAIN_ENGINE = True
 
-V7_MIN_TREND = 0.20
+V7_MIN_TREND = 0.28
 V7_MIN_MOMENTUM = 0.00
+
+# Shadow-only V7 lower-trend bucket.
+# This preserves data collection for the old broad V7 zone without paying live fees.
+ENABLE_SHADOW_V7_LOW_TREND = True
+SHADOW_V7_LOW_MIN_TREND = 0.20
+SHADOW_V7_LOW_MAX_TREND = 0.28
+SHADOW_V7_LOW_MIN_MOMENTUM = 0.00
 
 # validated V7 decay exit
 ENABLE_V7_TREND_DECAY_EXIT = True
@@ -1101,6 +1108,13 @@ def passes_v7_main(momentum, trend):
         and momentum > V7_MIN_MOMENTUM
     )
 
+def passes_shadow_v7_low_trend(momentum, trend):
+    return (
+        ENABLE_SHADOW_V7_LOW_TREND
+        and SHADOW_V7_LOW_MIN_TREND <= trend < SHADOW_V7_LOW_MAX_TREND
+        and momentum > SHADOW_V7_LOW_MIN_MOMENTUM
+    )
+
 def passes_v53_shadow(momentum, trend, regime_state, active_rising, sniper_density, sniper_density_delta):
     if trend < MIN_ENTRY_TREND:
         return False
@@ -1449,6 +1463,22 @@ def webhook():
         if open_shadow_count < MAX_OPEN_SHADOW_TRADES:
 
             if decision == "LONG":
+
+                if passes_shadow_v7_low_trend(momentum, trend):
+                    shadow_id = open_trade(
+                        cur,
+                        symbol,
+                        "LONG",
+                        price,
+                        momentum,
+                        trend,
+                        "SHADOW_V7_LOW_TREND_020_028",
+                        regime_state,
+                        signal_id,
+                        signal_time,
+                        is_shadow=True
+                    )
+                    print(f"👻 OPEN SHADOW V7 LOW TREND | {symbol} | id={shadow_id}", flush=True)
 
                 if ENABLE_SHADOW_V53_SNIPER and passes_v53_shadow(
                     momentum,
