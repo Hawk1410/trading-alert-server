@@ -2,10 +2,10 @@
 # 🤖 BOT VERSION
 # =========================
 # VERSION: v5.5
-# TITLE: V7 MAIN CONTINUATION ENGINE + TREND DECAY EXIT + V5.3/V6 SHADOWS + S5 SHORTS SHADOW + OKX EXECUTION LAYER + OKX TRADABILITY FILTER + EXIT SAFETY + TELEGRAM ALERTS
+# TITLE: V7 MAIN CONTINUATION ENGINE + TREND DECAY EXIT + V5.3/V6 SHADOWS + S5 SHORTS SHADOW + OKX EXECUTION LAYER + OKX TRADABILITY FILTER + EXIT BALANCE SAFETY + TELEGRAM ALERTS
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v5.5 + OKX EXEC + TRADABILITY FILTER + EXIT SAFETY + TELEGRAM RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v5.5 + OKX EXEC + TRADABILITY FILTER + EXIT BALANCE SAFETY + TELEGRAM RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -148,7 +148,7 @@ V6_MAX_DELTA = 0
 # 🚪 EXIT SETTINGS
 # =========================
 
-ENABLE_CONFIRMATION_EXIT = False
+ENABLE_CONFIRMATION_EXIT = True
 CONFIRMATION_UPDATE_NUM = 2
 CONFIRMATION_MIN_PNL = -0.05
 
@@ -296,6 +296,79 @@ def okx_symbol_to_inst_id(symbol):
             return f"{base}-{quote}"
 
     return symbol
+
+def okx_inst_id_to_base_ccy(okx_inst_id):
+    """
+    Converts OKX instId like BTC-USDT into BTC.
+    """
+    if not okx_inst_id or "-" not in okx_inst_id:
+        return None
+
+    return okx_inst_id.split("-")[0].upper()
+
+def okx_get_available_balance(ccy):
+    """
+    Gets actual available OKX balance for a currency.
+    Used for exits so we sell what OKX actually holds after fees/rounding,
+    instead of a theoretical calculated base size.
+    """
+    if not ccy:
+        return {
+            "success": False,
+            "available": 0.0,
+            "error": "missing_currency",
+            "response": None
+        }
+
+    result = okx_authenticated_get(f"/api/v5/account/balance?ccy={ccy}")
+
+    if not result.get("success"):
+        return {
+            "success": False,
+            "available": 0.0,
+            "error": result.get("error"),
+            "response": result.get("response")
+        }
+
+    response_payload = result.get("response") or {}
+
+    try:
+        data = response_payload.get("data") or []
+        details = []
+
+        if data and isinstance(data, list):
+            details = data[0].get("details") or []
+
+        for item in details:
+            if (item.get("ccy") or "").upper() == ccy.upper():
+                available_raw = (
+                    item.get("availBal")
+                    or item.get("availableBal")
+                    or item.get("cashBal")
+                    or "0"
+                )
+
+                return {
+                    "success": True,
+                    "available": float(available_raw or 0),
+                    "error": None,
+                    "response": response_payload
+                }
+
+        return {
+            "success": True,
+            "available": 0.0,
+            "error": None,
+            "response": response_payload
+        }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "available": 0.0,
+            "error": str(e),
+            "response": response_payload
+        }
 
 def get_okx_timestamp():
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
@@ -627,8 +700,92 @@ def okx_place_market_order(cur, trade_id, symbol, direction, action, price=None,
 
     elif action == "exit":
         side = "sell"
-        reference_price = entry_price or price or 0
-        sell_size = calculate_exit_base_size(reference_price)
+
+        # Critical live-execution fix:
+        # For exits, sell actual available OKX balance rather than theoretical size.
+        # This avoids failures caused by fees, rounding, and partial fills.
+        base_ccy = okx_inst_id_to_base_ccy(okx_inst_id)
+
+        if ENABLE_LIVE_ORDERS:
+            balance_result = okx_get_available_balance(base_ccy)
+
+            if not balance_result.get("success"):
+                request_payload = {
+                    "blocked": True,
+                    "reason": "could_not_fetch_okx_available_balance",
+                    "symbol": symbol,
+                    "okx_inst_id": okx_inst_id,
+                    "base_ccy": base_ccy,
+                    "action": action,
+                    "balance_error": balance_result.get("error")
+                }
+
+                log_okx_order(
+                    cur, trade_id, symbol, okx_inst_id, action, side, direction,
+                    False, request_payload, balance_result.get("response"), False,
+                    f"could_not_fetch_okx_available_balance: {balance_result.get('error')}"
+                )
+
+                print(
+                    f"🛡️ OKX EXIT BLOCKED | {symbol} -> {okx_inst_id} | "
+                    f"reason=could_not_fetch_available_balance | error={balance_result.get('error')}",
+                    flush=True
+                )
+
+                return {
+                    "success": False,
+                    "dry_run": False,
+                    "blocked": True,
+                    "reason": "could_not_fetch_okx_available_balance",
+                    "error": balance_result.get("error")
+                }
+
+            available_balance = float(balance_result.get("available") or 0)
+
+            # Tiny buffer so OKX does not reject because of fee/precision rounding.
+            sell_size = round(available_balance * 0.995, 8)
+
+            if sell_size <= 0:
+                request_payload = {
+                    "skipped": True,
+                    "reason": "no_available_okx_balance_to_sell",
+                    "symbol": symbol,
+                    "okx_inst_id": okx_inst_id,
+                    "base_ccy": base_ccy,
+                    "available_balance": available_balance,
+                    "action": action
+                }
+
+                response_payload = {
+                    "skipped": True,
+                    "message": "OKX exit skipped because available balance is zero/dust.",
+                    "available_balance": available_balance,
+                    "base_ccy": base_ccy
+                }
+
+                log_okx_order(
+                    cur, trade_id, symbol, okx_inst_id, action, side, direction,
+                    False, request_payload, response_payload, True,
+                    "okx_exit_skipped_no_available_balance"
+                )
+
+                print(
+                    f"🛡️ OKX EXIT SKIPPED | {symbol} -> {okx_inst_id} | "
+                    f"available_{base_ccy}={available_balance}",
+                    flush=True
+                )
+
+                return {
+                    "success": True,
+                    "dry_run": False,
+                    "skipped": True,
+                    "reason": "no_available_okx_balance_to_sell",
+                    "available_balance": available_balance
+                }
+
+        else:
+            reference_price = entry_price or price or 0
+            sell_size = calculate_exit_base_size(reference_price)
 
         payload = {
             "instId": okx_inst_id,
