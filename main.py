@@ -2,10 +2,10 @@
 # 🤖 BOT VERSION
 # =========================
 # VERSION: v5.5
-# TITLE: V7 MAIN CONTINUATION ENGINE + TREND DECAY EXIT + V5.3/V6 SHADOWS + S5 SHORTS SHADOW + OKX EXECUTION LAYER + OKX TRADABILITY FILTER + EXIT BALANCE SAFETY + TELEGRAM ALERTS
+# TITLE: V7 MAIN CONTINUATION ENGINE + TREND DECAY EXIT + V5.3/V6 SHADOWS + S5 SHORTS SHADOW + OKX EXECUTION LAYER + OKX TRADABILITY FILTER + STACK-SAFE FEE-AWARE EXIT SIZING + TELEGRAM ALERTS
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v5.5 + OKX EXEC + TRADABILITY FILTER + EXIT BALANCE SAFETY + CONFIRMATION EXIT OFF + TELEGRAM RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v5.5 + OKX EXEC + STACK-SAFE EXITS + 0.10% FEE AWARE BUFFER + CONFIRMATION EXIT OFF + TELEGRAM RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -44,6 +44,13 @@ MAX_LIVE_OPEN_TRADES = int(os.environ.get("MAX_LIVE_OPEN_TRADES", "7") or 7)
 
 OKX_TD_MODE = os.environ.get("OKX_TD_MODE", "cash")
 OKX_ORDER_TYPE = os.environ.get("OKX_ORDER_TYPE", "market")
+
+# OKX current spot taker fee is 0.10% for this account.
+# We use a larger 0.50% exit-size buffer for live stack-safe exits to avoid
+# precision, fee, and dust rejection issues while preventing one stacked exit
+# from selling the entire symbol balance.
+OKX_SPOT_TAKER_FEE_RATE = float(os.environ.get("OKX_SPOT_TAKER_FEE_RATE", "0.001") or 0.001)
+OKX_EXIT_SIZE_BUFFER = float(os.environ.get("OKX_EXIT_SIZE_BUFFER", "0.995") or 0.995)
 
 # =========================
 # 📲 TELEGRAM ALERT SETTINGS
@@ -742,8 +749,25 @@ def okx_place_market_order(cur, trade_id, symbol, direction, action, price=None,
 
             available_balance = float(balance_result.get("available") or 0)
 
-            # Tiny buffer so OKX does not reject because of fee/precision rounding.
-            sell_size = round(available_balance * 0.995, 8)
+            # CRITICAL STACKING FIX:
+            # Do NOT sell the whole available symbol balance.
+            # When multiple DB trades are stacked on the same coin, the available balance
+            # belongs to several open trades. Selling the whole balance on one exit
+            # accidentally flattens all stacked exchange exposure while other DB trades
+            # remain open.
+            #
+            # Instead, estimate this specific trade's base size from its entry price
+            # and quote size, then cap it by actual available OKX balance.
+            reference_price = entry_price or price or 0
+            theoretical_trade_size = calculate_exit_base_size(reference_price)
+
+            # Apply a small buffer to both sides:
+            # - desired size: avoid selling slightly more than this trade's true filled size after fees
+            # - available size: avoid OKX rejecting due to precision/dust
+            desired_trade_sell_size = theoretical_trade_size * OKX_EXIT_SIZE_BUFFER
+            max_safe_available_size = available_balance * OKX_EXIT_SIZE_BUFFER
+
+            sell_size = round(min(desired_trade_sell_size, max_safe_available_size), 8)
 
             if sell_size <= 0:
                 request_payload = {
@@ -753,6 +777,8 @@ def okx_place_market_order(cur, trade_id, symbol, direction, action, price=None,
                     "okx_inst_id": okx_inst_id,
                     "base_ccy": base_ccy,
                     "available_balance": available_balance,
+                    "theoretical_trade_size": theoretical_trade_size,
+                    "desired_trade_sell_size": desired_trade_sell_size,
                     "action": action
                 }
 
