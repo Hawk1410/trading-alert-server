@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v5.5
-# TITLE: V7 MAIN CONTINUATION ENGINE + TREND DECAY EXIT + V5.3/V6 SHADOWS + S5 SHORTS SHADOW + OKX EXECUTION LAYER + V7 REAL TREND>=0.28 + LOW-TREND SHADOW + OKX STACK-SAFE FEE-AWARE EXITS + TELEGRAM ALERTS
+# VERSION: v5.6
+# TITLE: V7 FIRST-ENTRY CONTINUATION ENGINE + NO SAME-SYMBOL STACKING + MAX 5 REAL TRADES + £20 SIZE + DEAD LEADER RECYCLER + ADAPTIVE WINNER PROTECTION + V5.3/V6/S5 SHADOWS + OKX EXECUTION LAYER + TELEGRAM ALERTS
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v5.5 + V7 REAL TREND>=0.28 + LOW-TREND SHADOW + OKX STACK-SAFE EXITS RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v5.6 + V7 FIRST-ENTRY + NO STACKING + ADAPTIVE LIFECYCLE EXITS RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -21,11 +21,11 @@ app = Flask(__name__)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-MAX_OPEN_TRADES = 7
+MAX_OPEN_TRADES = 5
 MAX_OPEN_SHADOW_TRADES = 30
-TRADE_SIZE_GBP = 5
+TRADE_SIZE_GBP = 20
 
-DATA_VERSION = "v5.5"
+DATA_VERSION = "v5.6"
 
 # =========================
 # 🔌 OKX EXECUTION SETTINGS
@@ -39,16 +39,15 @@ OKX_BASE_URL = os.environ.get("OKX_BASE_URL", "https://www.okx.com").rstrip("/")
 ENABLE_ORDER_LOGGING = os.environ.get("ENABLE_ORDER_LOGGING", "true").lower() == "true"
 ENABLE_LIVE_ORDERS = os.environ.get("ENABLE_LIVE_ORDERS", "false").lower() == "true"
 
-LIVE_TRADE_SIZE_GBP = float(os.environ.get("LIVE_TRADE_SIZE_GBP", "5") or 5)
-MAX_LIVE_OPEN_TRADES = int(os.environ.get("MAX_LIVE_OPEN_TRADES", "7") or 7)
+LIVE_TRADE_SIZE_GBP = float(os.environ.get("LIVE_TRADE_SIZE_GBP", "20") or 20)
+MAX_LIVE_OPEN_TRADES = int(os.environ.get("MAX_LIVE_OPEN_TRADES", "5") or 5)
 
 OKX_TD_MODE = os.environ.get("OKX_TD_MODE", "cash")
 OKX_ORDER_TYPE = os.environ.get("OKX_ORDER_TYPE", "market")
 
 # OKX current spot taker fee is 0.10% for this account.
 # We use a larger 0.50% exit-size buffer for live stack-safe exits to avoid
-# precision, fee, and dust rejection issues while preventing one stacked exit
-# from selling the entire symbol balance.
+# precision, fee, and dust rejection issues.
 OKX_SPOT_TAKER_FEE_RATE = float(os.environ.get("OKX_SPOT_TAKER_FEE_RATE", "0.001") or 0.001)
 OKX_EXIT_SIZE_BUFFER = float(os.environ.get("OKX_EXIT_SIZE_BUFFER", "0.995") or 0.995)
 
@@ -64,10 +63,16 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 LIVE_TRADE_SIZE_QUOTE = float(os.environ.get("LIVE_TRADE_SIZE_QUOTE", LIVE_TRADE_SIZE_GBP) or LIVE_TRADE_SIZE_GBP)
 
 # =========================
+# 🛡️ SAME-SYMBOL STACKING CONTROL
+# =========================
+
+MAX_SAME_SYMBOL_OPEN = int(os.environ.get("MAX_SAME_SYMBOL_OPEN", "1") or 1)
+ENABLE_SAME_SYMBOL_STACKING_LIMIT = os.environ.get("ENABLE_SAME_SYMBOL_STACKING_LIMIT", "true").lower() == "true"
+
+# =========================
 # 🛡️ OKX TRADABILITY FILTER
 # =========================
 
-# Keeps strategy universe intact, but only sends real OKX orders for account-tradable SPOT pairs.
 ENABLE_OKX_TRADABILITY_FILTER = os.environ.get("ENABLE_OKX_TRADABILITY_FILTER", "true").lower() == "true"
 OKX_TRADABILITY_CACHE_SECONDS = int(os.environ.get("OKX_TRADABILITY_CACHE_SECONDS", "900") or 900)
 
@@ -100,17 +105,34 @@ V7_MIN_TREND = 0.28
 V7_MIN_MOMENTUM = 0.00
 
 # Shadow-only V7 lower-trend bucket.
-# This preserves data collection for the old broad V7 zone without paying live fees.
 ENABLE_SHADOW_V7_LOW_TREND = True
 SHADOW_V7_LOW_MIN_TREND = 0.20
 SHADOW_V7_LOW_MAX_TREND = 0.28
 SHADOW_V7_LOW_MIN_MOMENTUM = 0.00
 
-# validated V7 decay exit
+# Legacy validated V7 decay exit, retained as fallback.
 ENABLE_V7_TREND_DECAY_EXIT = True
 V7_DECAY_MINUTES = 120
 V7_DECAY_TREND_THRESHOLD = 0.22
 V7_DECAY_MAX_PEAK = 0.50
+
+# =========================
+# ♻️ V5.6 ADAPTIVE LIFECYCLE EXITS
+# =========================
+
+ENABLE_DEAD_LEADER_RECYCLER = os.environ.get("ENABLE_DEAD_LEADER_RECYCLER", "true").lower() == "true"
+DEAD_LEADER_MINUTES = float(os.environ.get("DEAD_LEADER_MINUTES", "90") or 90)
+DEAD_LEADER_MAX_PEAK = float(os.environ.get("DEAD_LEADER_MAX_PEAK", "0.25") or 0.25)
+DEAD_LEADER_TREND_THRESHOLD = float(os.environ.get("DEAD_LEADER_TREND_THRESHOLD", "0.30") or 0.30)
+
+ENABLE_ADAPTIVE_WINNER_PROTECTION = os.environ.get("ENABLE_ADAPTIVE_WINNER_PROTECTION", "true").lower() == "true"
+ADAPTIVE_SMALL_PEAK_TRIGGER = float(os.environ.get("ADAPTIVE_SMALL_PEAK_TRIGGER", "0.75") or 0.75)
+ADAPTIVE_SMALL_DRAWDOWN = float(os.environ.get("ADAPTIVE_SMALL_DRAWDOWN", "0.25") or 0.25)
+ADAPTIVE_MEDIUM_PEAK_TRIGGER = float(os.environ.get("ADAPTIVE_MEDIUM_PEAK_TRIGGER", "1.50") or 1.50)
+ADAPTIVE_MEDIUM_DRAWDOWN = float(os.environ.get("ADAPTIVE_MEDIUM_DRAWDOWN", "0.40") or 0.40)
+ADAPTIVE_LARGE_PEAK_TRIGGER = float(os.environ.get("ADAPTIVE_LARGE_PEAK_TRIGGER", "3.00") or 3.00)
+ADAPTIVE_LARGE_DRAWDOWN = float(os.environ.get("ADAPTIVE_LARGE_DRAWDOWN", "0.75") or 0.75)
+ADAPTIVE_TREND_WEAK_THRESHOLD = float(os.environ.get("ADAPTIVE_TREND_WEAK_THRESHOLD", "0.15") or 0.15)
 
 # =========================
 # 🎯 V5.3 SHADOW SNIPER ENGINE
@@ -281,10 +303,22 @@ def fmt_num(value, digits=3):
 
 def bool_status():
     return {
+        "DATA_VERSION": DATA_VERSION,
+        "MAX_OPEN_TRADES": MAX_OPEN_TRADES,
+        "TRADE_SIZE_GBP": TRADE_SIZE_GBP,
+        "LIVE_TRADE_SIZE_GBP": LIVE_TRADE_SIZE_GBP,
         "ENABLE_ORDER_LOGGING": ENABLE_ORDER_LOGGING,
         "ENABLE_LIVE_ORDERS": ENABLE_LIVE_ORDERS,
         "MAX_LIVE_OPEN_TRADES": MAX_LIVE_OPEN_TRADES,
         "LIVE_TRADE_SIZE_QUOTE": LIVE_TRADE_SIZE_QUOTE,
+        "MAX_SAME_SYMBOL_OPEN": MAX_SAME_SYMBOL_OPEN,
+        "ENABLE_SAME_SYMBOL_STACKING_LIMIT": ENABLE_SAME_SYMBOL_STACKING_LIMIT,
+        "ENABLE_DEAD_LEADER_RECYCLER": ENABLE_DEAD_LEADER_RECYCLER,
+        "DEAD_LEADER_MINUTES": DEAD_LEADER_MINUTES,
+        "DEAD_LEADER_MAX_PEAK": DEAD_LEADER_MAX_PEAK,
+        "DEAD_LEADER_TREND_THRESHOLD": DEAD_LEADER_TREND_THRESHOLD,
+        "ENABLE_ADAPTIVE_WINNER_PROTECTION": ENABLE_ADAPTIVE_WINNER_PROTECTION,
+        "ADAPTIVE_TREND_WEAK_THRESHOLD": ADAPTIVE_TREND_WEAK_THRESHOLD,
         "OKX_BASE_URL": OKX_BASE_URL,
         "OKX_TD_MODE": OKX_TD_MODE,
         "ENABLE_OKX_TRADABILITY_FILTER": ENABLE_OKX_TRADABILITY_FILTER,
@@ -503,7 +537,6 @@ def refresh_okx_tradable_spot_instruments(force=False):
         inst_id = item.get("instId")
         state = (item.get("state") or "").lower()
 
-        # OKX usually returns live instruments here. Keep only live if state is present.
         if inst_id and (not state or state == "live"):
             inst_ids.add(inst_id.upper())
 
@@ -530,7 +563,6 @@ def is_okx_symbol_live_tradable(symbol):
     result = refresh_okx_tradable_spot_instruments(force=False)
 
     if not result.get("success"):
-        # Safety first: if we cannot confirm tradability, do not send live orders.
         return False, f"tradability_check_failed: {result.get('error')}"
 
     if okx_inst_id in OKX_TRADABLE_SPOT_INST_IDS:
@@ -586,13 +618,21 @@ def get_live_real_open_count(cur):
     """)
     return cur.fetchone()[0] or 0
 
+def get_open_same_symbol_real_count(cur, symbol):
+    cur.execute("""
+        SELECT COUNT(*)
+        FROM bot_trades_v4
+        WHERE status = 'OPEN'
+          AND COALESCE(is_shadow, FALSE) = FALSE
+          AND symbol = %s
+    """, (symbol,))
+    return cur.fetchone()[0] or 0
+
 def has_successful_okx_live_entry(cur, trade_id):
     """
     Safety gate for exits.
-
     Only send a live OKX exit if this exact bot trade previously had a successful,
-    non-dry-run OKX entry order. This prevents the bot trying to sell coins that
-    only exist as database trades, legacy trades, restricted-symbol skips, or failed entries.
+    non-dry-run OKX entry order.
     """
     if not ENABLE_ORDER_LOGGING:
         return False
@@ -658,8 +698,6 @@ def calculate_exit_base_size(entry_price):
         return 0
 
     base_size = LIVE_TRADE_SIZE_QUOTE / float(entry_price)
-
-    # Conservative rounding to reduce precision errors.
     return round(base_size, 8)
 
 def okx_place_market_order(cur, trade_id, symbol, direction, action, price=None, entry_price=None):
@@ -667,12 +705,6 @@ def okx_place_market_order(cur, trade_id, symbol, direction, action, price=None,
     action:
       - "entry": real LONG entry = buy
       - "exit": real LONG exit = sell
-
-    S5 shorts are shadow only, so this live execution wrapper intentionally
-    only supports real LONG spot buy/sell execution.
-
-    The tradability filter does NOT alter strategy/database trades.
-    It only skips live OKX order submission when the account cannot trade the pair.
     """
 
     okx_inst_id = okx_symbol_to_inst_id(symbol)
@@ -714,10 +746,6 @@ def okx_place_market_order(cur, trade_id, symbol, direction, action, price=None,
 
     elif action == "exit":
         side = "sell"
-
-        # Critical live-execution fix:
-        # For exits, sell actual available OKX balance rather than theoretical size.
-        # This avoids failures caused by fees, rounding, and partial fills.
         base_ccy = okx_inst_id_to_base_ccy(okx_inst_id)
 
         if ENABLE_LIVE_ORDERS:
@@ -755,22 +783,9 @@ def okx_place_market_order(cur, trade_id, symbol, direction, action, price=None,
                 }
 
             available_balance = float(balance_result.get("available") or 0)
-
-            # CRITICAL STACKING FIX:
-            # Do NOT sell the whole available symbol balance.
-            # When multiple DB trades are stacked on the same coin, the available balance
-            # belongs to several open trades. Selling the whole balance on one exit
-            # accidentally flattens all stacked exchange exposure while other DB trades
-            # remain open.
-            #
-            # Instead, estimate this specific trade's base size from its entry price
-            # and quote size, then cap it by actual available OKX balance.
             reference_price = entry_price or price or 0
             theoretical_trade_size = calculate_exit_base_size(reference_price)
 
-            # Apply a small buffer to both sides:
-            # - desired size: avoid selling slightly more than this trade's true filled size after fees
-            # - available size: avoid OKX rejecting due to precision/dust
             desired_trade_sell_size = theoretical_trade_size * OKX_EXIT_SIZE_BUFFER
             max_safe_available_size = available_balance * OKX_EXIT_SIZE_BUFFER
 
@@ -1348,8 +1363,6 @@ def webhook():
                         block_reason = "v7_main_filter_block"
 
             elif decision == "SHORT":
-                # S5 shorts are now SHADOW ONLY.
-                # No real SHORT trades are opened.
                 entry_allowed = False
                 short_tier = classify_short_tier(symbol, momentum, trend, sniper_now)
 
@@ -1359,18 +1372,24 @@ def webhook():
                     block_reason = "short_not_s5_tactical"
 
             if ENABLE_MAX_OPEN_TRADES and entry_allowed:
-                cur.execute("""
-                    SELECT COUNT(*)
-                    FROM bot_trades_v4
-                    WHERE status = 'OPEN'
-                      AND COALESCE(is_shadow, FALSE) = FALSE
-                """)
-                open_count = cur.fetchone()[0] or 0
+                open_count = get_live_real_open_count(cur)
 
                 if open_count >= MAX_OPEN_TRADES:
                     entry_allowed = False
                     block_reason = "max_open_trades"
                     print(f"⛔ BLOCKED | max open real trades reached: {open_count}", flush=True)
+
+            if entry_allowed and ENABLE_SAME_SYMBOL_STACKING_LIMIT:
+                same_symbol_count = get_open_same_symbol_real_count(cur, symbol)
+
+                if same_symbol_count >= MAX_SAME_SYMBOL_OPEN:
+                    entry_allowed = False
+                    block_reason = "max_same_symbol_open"
+                    print(
+                        f"⛔ BLOCKED | same symbol open limit reached: "
+                        f"{symbol} count={same_symbol_count} max={MAX_SAME_SYMBOL_OPEN}",
+                        flush=True
+                    )
 
         else:
             block_reason = "no_decision"
@@ -1430,8 +1449,6 @@ def webhook():
                     f"Trade ID: {trade_id}"
                 )
 
-                # OKX EXECUTION LAYER — real trades only.
-                # Live order is skipped automatically if OKX account cannot trade symbol.
                 okx_place_market_order(
                     cur=cur,
                     trade_id=trade_id,
@@ -1605,6 +1622,9 @@ def webhook():
             close_reason = None
             exit_architecture = None
             decay_triggered = False
+            adaptive_exit_triggered = False
+            slot_recycle_candidate = False
+            drawdown_from_peak = current_peak - pnl_percent
 
             # U2 CONFIRMATION EXIT
             if ENABLE_CONFIRMATION_EXIT:
@@ -1612,7 +1632,22 @@ def webhook():
                     close_reason = "failed_confirmation"
                     exit_architecture = "confirmation_exit"
 
-            # V7 STRUCTURAL TREND DECAY EXIT
+            # V5.6 DEAD LEADER RECYCLER — checked before profit locks/hard stops.
+            if (
+                not close_reason
+                and direction == "LONG"
+                and ENABLE_DEAD_LEADER_RECYCLER
+                and is_v7_trade(entry_quality, is_shadow)
+                and mins >= DEAD_LEADER_MINUTES
+                and current_peak < DEAD_LEADER_MAX_PEAK
+                and trend < DEAD_LEADER_TREND_THRESHOLD
+            ):
+                close_reason = "dead_leader_recycle_exit"
+                exit_architecture = "v7_dead_leader_recycler"
+                decay_triggered = True
+                slot_recycle_candidate = True
+
+            # Legacy V7 structural trend decay fallback.
             if (
                 not close_reason
                 and direction == "LONG"
@@ -1625,16 +1660,43 @@ def webhook():
                 close_reason = "v7_trend_decay_exit"
                 exit_architecture = "v7_single_confirm_decay_cut_zero"
                 decay_triggered = True
+                slot_recycle_candidate = True
 
-                safe_update_trade_telemetry(cur, tid, {
-                    "decay_triggered": True,
-                    "decay_checked_at_minutes": mins,
-                    "decay_peak_at_check": current_peak,
-                    "decay_trend_at_check": trend,
-                    "decay_momentum_at_check": momentum,
-                    "slot_recycle_candidate": True,
-                    "exit_architecture": exit_architecture
-                })
+            # V5.6 ADAPTIVE WINNER PROTECTION — leadership deterioration + drawdown from peak.
+            if (
+                not close_reason
+                and direction == "LONG"
+                and ENABLE_ADAPTIVE_WINNER_PROTECTION
+                and is_v7_trade(entry_quality, is_shadow)
+            ):
+                if (
+                    current_peak >= ADAPTIVE_LARGE_PEAK_TRIGGER
+                    and trend < ADAPTIVE_TREND_WEAK_THRESHOLD
+                    and drawdown_from_peak >= ADAPTIVE_LARGE_DRAWDOWN
+                ):
+                    close_reason = "adaptive_winner_protect_large"
+                    exit_architecture = "v7_adaptive_winner_protection"
+                    adaptive_exit_triggered = True
+
+                elif (
+                    current_peak >= ADAPTIVE_MEDIUM_PEAK_TRIGGER
+                    and current_peak < ADAPTIVE_LARGE_PEAK_TRIGGER
+                    and trend < ADAPTIVE_TREND_WEAK_THRESHOLD
+                    and drawdown_from_peak >= ADAPTIVE_MEDIUM_DRAWDOWN
+                ):
+                    close_reason = "adaptive_winner_protect_medium"
+                    exit_architecture = "v7_adaptive_winner_protection"
+                    adaptive_exit_triggered = True
+
+                elif (
+                    current_peak >= ADAPTIVE_SMALL_PEAK_TRIGGER
+                    and current_peak < ADAPTIVE_MEDIUM_PEAK_TRIGGER
+                    and trend < ADAPTIVE_TREND_WEAK_THRESHOLD
+                    and drawdown_from_peak >= ADAPTIVE_SMALL_DRAWDOWN
+                ):
+                    close_reason = "adaptive_winner_protect_small"
+                    exit_architecture = "v7_adaptive_winner_protection"
+                    adaptive_exit_triggered = True
 
             # LONG EXIT MODEL
             if not close_reason and direction == "LONG":
@@ -1713,8 +1775,11 @@ def webhook():
                     "decay_peak_at_check": current_peak if decay_triggered else None,
                     "decay_trend_at_check": trend if decay_triggered else None,
                     "decay_momentum_at_check": momentum if decay_triggered else None,
-                    "slot_recycle_candidate": decay_triggered,
-                    "exit_architecture": exit_architecture
+                    "slot_recycle_candidate": slot_recycle_candidate,
+                    "exit_architecture": exit_architecture,
+                    "adaptive_exit_triggered": adaptive_exit_triggered,
+                    "drawdown_from_peak_at_exit": drawdown_from_peak,
+                    "leadership_trend_at_exit": trend
                 })
 
                 log_trade_event(
@@ -1731,11 +1796,6 @@ def webhook():
                     False
                 )
 
-                # OKX EXIT EXECUTION — real trades only.
-                # Safety rule:
-                # Only send an OKX sell if this exact trade had a successful live OKX buy.
-                # This prevents sell attempts for legacy DB trades, failed entries, dry-runs,
-                # or restricted-symbol skipped entries.
                 if not is_shadow:
                     if has_successful_okx_live_entry(cur, tid):
                         okx_place_market_order(
@@ -1761,7 +1821,7 @@ def webhook():
                 print(
                     f"💰 CLOSED {trade_type} | {sym} | {direction} | "
                     f"{round(pnl_percent,3)}% | peak={round(current_peak,3)} | "
-                    f"{close_reason}",
+                    f"dd_from_peak={round(drawdown_from_peak,3)} | {close_reason}",
                     flush=True
                 )
 
@@ -1771,6 +1831,8 @@ def webhook():
                         f"{sym} | {direction}\n"
                         f"PnL: {fmt_num(pnl_percent)}%\n"
                         f"Peak: {fmt_num(current_peak)}%\n"
+                        f"Drawdown from peak: {fmt_num(drawdown_from_peak)}%\n"
+                        f"Trend at exit: {fmt_num(trend)}\n"
                         f"Reason: {close_reason}\n"
                         f"Exit architecture: {exit_architecture}"
                     )
