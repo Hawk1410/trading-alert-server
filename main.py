@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v5.6
-# TITLE: V7 FIRST-ENTRY CONTINUATION ENGINE + NO SAME-SYMBOL STACKING + MAX 5 REAL TRADES + £20 SIZE + DEAD LEADER RECYCLER + ADAPTIVE WINNER PROTECTION + V5.3/V6/S5 SHADOWS + OKX EXECUTION LAYER + TELEGRAM ALERTS
+# VERSION: v5.7
+# TITLE: V7 CORE £15 + MONSTER-CATCHER RESERVED SLOTS + ADAPTIVE LIFECYCLE EXITS + TELEGRAM COMMANDS/SUMMARIES + OKX EXECUTION LAYER
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v5.6 + V7 FIRST-ENTRY + NO STACKING + ADAPTIVE LIFECYCLE EXITS RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v5.7 + CORE £15 + MONSTER-CATCHER RESERVED SLOTS + TELEGRAM OPS RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -23,9 +23,9 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 
 MAX_OPEN_TRADES = 5
 MAX_OPEN_SHADOW_TRADES = 30
-TRADE_SIZE_GBP = 20
+TRADE_SIZE_GBP = 15
 
-DATA_VERSION = "v5.6"
+DATA_VERSION = "v5.7"
 
 # =========================
 # 🔌 OKX EXECUTION SETTINGS
@@ -39,8 +39,8 @@ OKX_BASE_URL = os.environ.get("OKX_BASE_URL", "https://www.okx.com").rstrip("/")
 ENABLE_ORDER_LOGGING = os.environ.get("ENABLE_ORDER_LOGGING", "true").lower() == "true"
 ENABLE_LIVE_ORDERS = os.environ.get("ENABLE_LIVE_ORDERS", "false").lower() == "true"
 
-LIVE_TRADE_SIZE_GBP = float(os.environ.get("LIVE_TRADE_SIZE_GBP", "20") or 20)
-MAX_LIVE_OPEN_TRADES = int(os.environ.get("MAX_LIVE_OPEN_TRADES", "5") or 5)
+LIVE_TRADE_SIZE_GBP = float(os.environ.get("LIVE_TRADE_SIZE_GBP", "15") or 15)
+MAX_LIVE_OPEN_TRADES = int(os.environ.get("MAX_LIVE_OPEN_TRADES", "8") or 8)
 
 OKX_TD_MODE = os.environ.get("OKX_TD_MODE", "cash")
 OKX_ORDER_TYPE = os.environ.get("OKX_ORDER_TYPE", "market")
@@ -58,6 +58,13 @@ OKX_EXIT_SIZE_BUFFER = float(os.environ.get("OKX_EXIT_SIZE_BUFFER", "0.995") or 
 ENABLE_TELEGRAM_ALERTS = os.environ.get("ENABLE_TELEGRAM_ALERTS", "false").lower() == "true"
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+TELEGRAM_COMMAND_SECRET = os.environ.get("TELEGRAM_COMMAND_SECRET")
+TELEGRAM_WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET")
+
+# Send rolling 24h summaries from an external cron by calling /telegram_summary_24h
+# at 08:00 and 20:00 UK time.
+ENABLE_TELEGRAM_COMMANDS = os.environ.get("ENABLE_TELEGRAM_COMMANDS", "true").lower() == "true"
+
 
 # OKX spot market buys use quote currency when tgtCcy="quote_ccy".
 LIVE_TRADE_SIZE_QUOTE = float(os.environ.get("LIVE_TRADE_SIZE_QUOTE", LIVE_TRADE_SIZE_GBP) or LIVE_TRADE_SIZE_GBP)
@@ -68,6 +75,21 @@ LIVE_TRADE_SIZE_QUOTE = float(os.environ.get("LIVE_TRADE_SIZE_QUOTE", LIVE_TRADE
 
 MAX_SAME_SYMBOL_OPEN = int(os.environ.get("MAX_SAME_SYMBOL_OPEN", "1") or 1)
 ENABLE_SAME_SYMBOL_STACKING_LIMIT = os.environ.get("ENABLE_SAME_SYMBOL_STACKING_LIMIT", "true").lower() == "true"
+
+# =========================
+# 🔥 V5.7 MONSTER-CATCHER RESERVED ENGINE
+# =========================
+
+ENABLE_MONSTER_CATCHER = os.environ.get("ENABLE_MONSTER_CATCHER", "true").lower() == "true"
+MONSTER_RESERVED_SLOTS = int(os.environ.get("MONSTER_RESERVED_SLOTS", "3") or 3)
+MONSTER_TRADE_SIZE_GBP = float(os.environ.get("MONSTER_TRADE_SIZE_GBP", "35") or 35)
+MONSTER_MAX_SAME_SYMBOL_OPEN = int(os.environ.get("MONSTER_MAX_SAME_SYMBOL_OPEN", "2") or 2)
+MONSTER_LOOKBACK_MINUTES = int(os.environ.get("MONSTER_LOOKBACK_MINUTES", "120") or 120)
+MONSTER_MIN_PRIOR_SUCCESSES = int(os.environ.get("MONSTER_MIN_PRIOR_SUCCESSES", "2") or 2)
+MONSTER_MIN_PRIOR_AVG_PEAK = float(os.environ.get("MONSTER_MIN_PRIOR_AVG_PEAK", "1.50") or 1.50)
+MONSTER_MIN_DENSITY = int(os.environ.get("MONSTER_MIN_DENSITY", "10") or 10)
+MONSTER_MIN_DENSITY_DELTA = int(os.environ.get("MONSTER_MIN_DENSITY_DELTA", "3") or 3)
+
 
 # =========================
 # 🛡️ OKX TRADABILITY FILTER
@@ -261,41 +283,62 @@ def ensure_okx_order_log_table(cur):
 # =========================
 
 def send_telegram_alert(message):
-    if not ENABLE_TELEGRAM_ALERTS:
-        return False
-
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("⚠️ TELEGRAM ALERT SKIPPED | missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID", flush=True)
-        return False
-
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-
-        payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": message,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True
-        }
-
-        response = requests.post(url, json=payload, timeout=8)
-
-        if response.status_code == 200:
-            print("📲 TELEGRAM ALERT SENT", flush=True)
-            return True
-
-        print(f"⚠️ TELEGRAM ALERT FAILED | status={response.status_code} | body={response.text}", flush=True)
-        return False
-
-    except Exception as e:
-        print(f"⚠️ TELEGRAM ALERT ERROR | {e}", flush=True)
-        return False
+    sent = telegram_send_message(TELEGRAM_CHAT_ID, message)
+    if sent:
+        print("📲 TELEGRAM ALERT SENT", flush=True)
+    return sent
 
 def fmt_num(value, digits=3):
     try:
         return round(float(value), digits)
     except Exception:
         return value
+
+def fmt_money(value):
+    try:
+        return f"£{float(value):.2f}"
+    except Exception:
+        return f"£{value}"
+
+def telegram_send_message(chat_id, message):
+    if not ENABLE_TELEGRAM_ALERTS:
+        return False
+
+    if not TELEGRAM_BOT_TOKEN or not chat_id:
+        print("⚠️ TELEGRAM SEND SKIPPED | missing token or chat_id", flush=True)
+        return False
+
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": str(chat_id),
+            "text": message,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True
+        }
+        response = requests.post(url, json=payload, timeout=8)
+        if response.status_code == 200:
+            return True
+        print(f"⚠️ TELEGRAM SEND FAILED | status={response.status_code} | body={response.text}", flush=True)
+        return False
+    except Exception as e:
+        print(f"⚠️ TELEGRAM SEND ERROR | {e}", flush=True)
+        return False
+
+def get_trade_size_for_quality(entry_quality):
+    if entry_quality == "V7_MONSTER_CATCHER":
+        return MONSTER_TRADE_SIZE_GBP
+    return TRADE_SIZE_GBP
+
+def get_trade_size_quote_for_quality(entry_quality):
+    if entry_quality == "V7_MONSTER_CATCHER":
+        return MONSTER_TRADE_SIZE_GBP
+    return LIVE_TRADE_SIZE_QUOTE
+
+def is_authorized_telegram_chat(chat_id):
+    if not TELEGRAM_CHAT_ID:
+        return False
+    return str(chat_id) == str(TELEGRAM_CHAT_ID)
 
 # =========================
 # OKX HELPERS
@@ -313,6 +356,15 @@ def bool_status():
         "LIVE_TRADE_SIZE_QUOTE": LIVE_TRADE_SIZE_QUOTE,
         "MAX_SAME_SYMBOL_OPEN": MAX_SAME_SYMBOL_OPEN,
         "ENABLE_SAME_SYMBOL_STACKING_LIMIT": ENABLE_SAME_SYMBOL_STACKING_LIMIT,
+        "ENABLE_MONSTER_CATCHER": ENABLE_MONSTER_CATCHER,
+        "MONSTER_RESERVED_SLOTS": MONSTER_RESERVED_SLOTS,
+        "MONSTER_TRADE_SIZE_GBP": MONSTER_TRADE_SIZE_GBP,
+        "MONSTER_MAX_SAME_SYMBOL_OPEN": MONSTER_MAX_SAME_SYMBOL_OPEN,
+        "MONSTER_LOOKBACK_MINUTES": MONSTER_LOOKBACK_MINUTES,
+        "MONSTER_MIN_PRIOR_SUCCESSES": MONSTER_MIN_PRIOR_SUCCESSES,
+        "MONSTER_MIN_PRIOR_AVG_PEAK": MONSTER_MIN_PRIOR_AVG_PEAK,
+        "MONSTER_MIN_DENSITY": MONSTER_MIN_DENSITY,
+        "MONSTER_MIN_DENSITY_DELTA": MONSTER_MIN_DENSITY_DELTA,
         "ENABLE_DEAD_LEADER_RECYCLER": ENABLE_DEAD_LEADER_RECYCLER,
         "DEAD_LEADER_MINUTES": DEAD_LEADER_MINUTES,
         "DEAD_LEADER_MAX_PEAK": DEAD_LEADER_MAX_PEAK,
@@ -327,6 +379,7 @@ def bool_status():
         "OKX_TRADABILITY_CACHE_UPDATED_AT": OKX_TRADABILITY_CACHE_UPDATED_AT.isoformat() if OKX_TRADABILITY_CACHE_UPDATED_AT else None,
         "OKX_TRADABILITY_LAST_ERROR": OKX_TRADABILITY_LAST_ERROR,
         "ENABLE_TELEGRAM_ALERTS": ENABLE_TELEGRAM_ALERTS,
+        "ENABLE_TELEGRAM_COMMANDS": ENABLE_TELEGRAM_COMMANDS,
         "TELEGRAM_CONFIGURED": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
     }
 
@@ -618,6 +671,16 @@ def get_live_real_open_count(cur):
     """)
     return cur.fetchone()[0] or 0
 
+def get_live_core_open_count(cur):
+    cur.execute("""
+        SELECT COUNT(*)
+        FROM bot_trades_v4
+        WHERE status = 'OPEN'
+          AND COALESCE(is_shadow, FALSE) = FALSE
+          AND COALESCE(entry_quality, '') <> 'V7_MONSTER_CATCHER'
+    """)
+    return cur.fetchone()[0] or 0
+
 def get_open_same_symbol_real_count(cur, symbol):
     cur.execute("""
         SELECT COUNT(*)
@@ -627,6 +690,87 @@ def get_open_same_symbol_real_count(cur, symbol):
           AND symbol = %s
     """, (symbol,))
     return cur.fetchone()[0] or 0
+
+def get_open_monster_count(cur):
+    cur.execute("""
+        SELECT COUNT(*)
+        FROM bot_trades_v4
+        WHERE status = 'OPEN'
+          AND COALESCE(is_shadow, FALSE) = FALSE
+          AND entry_quality = 'V7_MONSTER_CATCHER'
+    """)
+    return cur.fetchone()[0] or 0
+
+def get_open_monster_same_symbol_count(cur, symbol):
+    cur.execute("""
+        SELECT COUNT(*)
+        FROM bot_trades_v4
+        WHERE status = 'OPEN'
+          AND COALESCE(is_shadow, FALSE) = FALSE
+          AND entry_quality = 'V7_MONSTER_CATCHER'
+          AND symbol = %s
+    """, (symbol,))
+    return cur.fetchone()[0] or 0
+
+def get_monster_leadership_context(cur, symbol):
+    cur.execute("""
+        SELECT
+            COUNT(*) FILTER (WHERE COALESCE(peak_pnl_percent, 0) >= 0.75) AS prior_successes,
+            AVG(COALESCE(peak_pnl_percent, 0)) AS prior_avg_peak
+        FROM bot_trades_v4
+        WHERE symbol = %s
+          AND COALESCE(is_shadow, FALSE) = FALSE
+          AND opened_at >= NOW() - (%s || ' minutes')::INTERVAL
+          AND opened_at < NOW()
+    """, (symbol, MONSTER_LOOKBACK_MINUTES))
+
+    row = cur.fetchone() or (0, 0)
+    prior_successes = row[0] or 0
+    prior_avg_peak = float(row[1] or 0)
+    return prior_successes, prior_avg_peak
+
+def passes_monster_catcher(cur, symbol, sniper_density, sniper_density_delta):
+    if not ENABLE_MONSTER_CATCHER:
+        return False, {"reason": "monster_disabled"}
+
+    prior_successes, prior_avg_peak = get_monster_leadership_context(cur, symbol)
+    open_monsters = get_open_monster_count(cur)
+    open_monsters_same_symbol = get_open_monster_same_symbol_count(cur, symbol)
+
+    context = {
+        "prior_successes": prior_successes,
+        "prior_avg_peak": prior_avg_peak,
+        "open_monsters": open_monsters,
+        "open_monsters_same_symbol": open_monsters_same_symbol,
+        "reason": None
+    }
+
+    if prior_successes < MONSTER_MIN_PRIOR_SUCCESSES:
+        context["reason"] = "monster_prior_successes_too_low"
+        return False, context
+
+    if prior_avg_peak < MONSTER_MIN_PRIOR_AVG_PEAK:
+        context["reason"] = "monster_prior_avg_peak_too_low"
+        return False, context
+
+    if sniper_density < MONSTER_MIN_DENSITY:
+        context["reason"] = "monster_density_too_low"
+        return False, context
+
+    if sniper_density_delta < MONSTER_MIN_DENSITY_DELTA:
+        context["reason"] = "monster_density_delta_too_low"
+        return False, context
+
+    if open_monsters >= MONSTER_RESERVED_SLOTS:
+        context["reason"] = "monster_reserved_slots_full"
+        return False, context
+
+    if open_monsters_same_symbol >= MONSTER_MAX_SAME_SYMBOL_OPEN:
+        context["reason"] = "monster_same_symbol_limit"
+        return False, context
+
+    context["reason"] = "monster_allowed"
+    return True, context
 
 def has_successful_okx_live_entry(cur, trade_id):
     """
@@ -693,14 +837,15 @@ def log_okx_exit_skip_no_live_entry(cur, trade_id, symbol, direction, price=None
         flush=True
     )
 
-def calculate_exit_base_size(entry_price):
+def calculate_exit_base_size(entry_price, trade_size_quote=None):
     if entry_price <= 0:
         return 0
 
-    base_size = LIVE_TRADE_SIZE_QUOTE / float(entry_price)
+    quote_size = float(trade_size_quote if trade_size_quote is not None else LIVE_TRADE_SIZE_QUOTE)
+    base_size = quote_size / float(entry_price)
     return round(base_size, 8)
 
-def okx_place_market_order(cur, trade_id, symbol, direction, action, price=None, entry_price=None):
+def okx_place_market_order(cur, trade_id, symbol, direction, action, price=None, entry_price=None, trade_size_quote=None):
     """
     action:
       - "entry": real LONG entry = buy
@@ -735,12 +880,13 @@ def okx_place_market_order(cur, trade_id, symbol, direction, action, price=None,
 
     if action == "entry":
         side = "buy"
+        quote_size = float(trade_size_quote if trade_size_quote is not None else LIVE_TRADE_SIZE_QUOTE)
         payload = {
             "instId": okx_inst_id,
             "tdMode": OKX_TD_MODE,
             "side": side,
             "ordType": OKX_ORDER_TYPE,
-            "sz": str(LIVE_TRADE_SIZE_QUOTE),
+            "sz": str(quote_size),
             "tgtCcy": "quote_ccy"
         }
 
@@ -784,7 +930,7 @@ def okx_place_market_order(cur, trade_id, symbol, direction, action, price=None,
 
             available_balance = float(balance_result.get("available") or 0)
             reference_price = entry_price or price or 0
-            theoretical_trade_size = calculate_exit_base_size(reference_price)
+            theoretical_trade_size = calculate_exit_base_size(reference_price, trade_size_quote)
 
             desired_trade_sell_size = theoretical_trade_size * OKX_EXIT_SIZE_BUFFER
             max_safe_available_size = available_balance * OKX_EXIT_SIZE_BUFFER
@@ -833,7 +979,7 @@ def okx_place_market_order(cur, trade_id, symbol, direction, action, price=None,
 
         else:
             reference_price = entry_price or price or 0
-            sell_size = calculate_exit_base_size(reference_price)
+            sell_size = calculate_exit_base_size(reference_price, trade_size_quote)
 
         payload = {
             "instId": okx_inst_id,
@@ -945,8 +1091,8 @@ def okx_place_market_order(cur, trade_id, symbol, direction, action, price=None,
 
     if action == "entry":
         live_open_count = get_live_real_open_count(cur)
-        if live_open_count > MAX_LIVE_OPEN_TRADES:
-            error_message = f"MAX_LIVE_OPEN_TRADES exceeded: {live_open_count} > {MAX_LIVE_OPEN_TRADES}"
+        if live_open_count >= MAX_LIVE_OPEN_TRADES:
+            error_message = f"MAX_LIVE_OPEN_TRADES reached: {live_open_count} >= {MAX_LIVE_OPEN_TRADES}"
 
             log_okx_order(
                 cur, trade_id, symbol, okx_inst_id, action, side, direction,
@@ -1346,6 +1492,8 @@ def webhook():
         entry_allowed = False
         block_reason = None
         live_entry_quality = None
+        monster_entry = False
+        monster_context = {}
 
         if decision in ["LONG", "SHORT"]:
 
@@ -1372,12 +1520,12 @@ def webhook():
                     block_reason = "short_not_s5_tactical"
 
             if ENABLE_MAX_OPEN_TRADES and entry_allowed:
-                open_count = get_live_real_open_count(cur)
+                open_count = get_live_core_open_count(cur)
 
                 if open_count >= MAX_OPEN_TRADES:
                     entry_allowed = False
                     block_reason = "max_open_trades"
-                    print(f"⛔ BLOCKED | max open real trades reached: {open_count}", flush=True)
+                    print(f"⛔ BLOCKED | max open core trades reached: {open_count}", flush=True)
 
             if entry_allowed and ENABLE_SAME_SYMBOL_STACKING_LIMIT:
                 same_symbol_count = get_open_same_symbol_real_count(cur, symbol)
@@ -1388,6 +1536,44 @@ def webhook():
                     print(
                         f"⛔ BLOCKED | same symbol open limit reached: "
                         f"{symbol} count={same_symbol_count} max={MAX_SAME_SYMBOL_OPEN}",
+                        flush=True
+                    )
+
+            # V5.7 MONSTER-CATCHER RESERVED ENGINE
+            # Only allows a blocked V7 long to override normal core caps when
+            # persistent rotational leadership is confirmed.
+            if (
+                decision == "LONG"
+                and not entry_allowed
+                and block_reason in ["max_open_trades", "max_same_symbol_open"]
+                and passes_v7_main(momentum, trend)
+            ):
+                monster_allowed, monster_context = passes_monster_catcher(
+                    cur,
+                    symbol,
+                    sniper_now,
+                    sniper_delta
+                )
+
+                if monster_allowed:
+                    entry_allowed = True
+                    block_reason = None
+                    live_entry_quality = "V7_MONSTER_CATCHER"
+                    monster_entry = True
+                    print(
+                        f"🔥 MONSTER CATCHER ALLOWED | {symbol} | "
+                        f"prior_successes={monster_context.get('prior_successes')} | "
+                        f"prior_avg_peak={round(monster_context.get('prior_avg_peak', 0),3)} | "
+                        f"open_monsters={monster_context.get('open_monsters')} | "
+                        f"same_symbol_monsters={monster_context.get('open_monsters_same_symbol')}",
+                        flush=True
+                    )
+                else:
+                    print(
+                        f"🧯 MONSTER CHECK FAILED | {symbol} | "
+                        f"reason={monster_context.get('reason')} | "
+                        f"prior_successes={monster_context.get('prior_successes')} | "
+                        f"prior_avg_peak={round(monster_context.get('prior_avg_peak', 0),3)}",
                         flush=True
                     )
 
@@ -1432,22 +1618,48 @@ def webhook():
                     is_shadow=False
                 )
 
+                entry_trade_size = get_trade_size_for_quality(live_entry_quality)
+                entry_quote_size = get_trade_size_quote_for_quality(live_entry_quality)
+
+                safe_update_trade_telemetry(cur, trade_id, {
+                    "entry_architecture": live_entry_quality,
+                    "trade_size_gbp": entry_trade_size,
+                    "monster_catcher_triggered": monster_entry,
+                    "monster_prior_successes": monster_context.get("prior_successes"),
+                    "monster_prior_avg_peak": monster_context.get("prior_avg_peak"),
+                    "monster_density": sniper_now,
+                    "monster_density_delta": sniper_delta
+                })
+
                 print(
                     f"🚀 OPEN REAL | {symbol} | {decision} | id={trade_id} | "
-                    f"Q={live_entry_quality} | regime={regime_state} | "
+                    f"Q={live_entry_quality} | size=£{entry_trade_size} | regime={regime_state} | "
                     f"density={sniper_now} | delta={sniper_delta}",
                     flush=True
                 )
 
-                send_telegram_alert(
-                    f"🚀 <b>OPEN REAL</b>\n"
-                    f"{symbol} | {decision}\n"
-                    f"Entry: {price}\n"
-                    f"Engine: {live_entry_quality}\n"
-                    f"Regime: {regime_state}\n"
-                    f"Density: {sniper_now} | Delta: {sniper_delta}\n"
-                    f"Trade ID: {trade_id}"
-                )
+                if monster_entry:
+                    send_telegram_alert(
+                        f"🔥 <b>MONSTER ENTRY</b>\n"
+                        f"{symbol} | {decision}\n"
+                        f"Size: £{entry_trade_size}\n"
+                        f"Entry: {price}\n"
+                        f"Prior successes: {monster_context.get('prior_successes')}\n"
+                        f"Prior avg peak: {fmt_num(monster_context.get('prior_avg_peak'))}%\n"
+                        f"Density: {sniper_now} | Delta: {sniper_delta}\n"
+                        f"Trade ID: {trade_id}"
+                    )
+                else:
+                    send_telegram_alert(
+                        f"🚀 <b>CORE ENTRY</b>\n"
+                        f"{symbol} | {decision}\n"
+                        f"Size: £{entry_trade_size}\n"
+                        f"Entry: {price}\n"
+                        f"Engine: {live_entry_quality}\n"
+                        f"Regime: {regime_state}\n"
+                        f"Density: {sniper_now} | Delta: {sniper_delta}\n"
+                        f"Trade ID: {trade_id}"
+                    )
 
                 okx_place_market_order(
                     cur=cur,
@@ -1456,7 +1668,8 @@ def webhook():
                     direction=decision,
                     action="entry",
                     price=price,
-                    entry_price=price
+                    entry_price=price,
+                    trade_size_quote=entry_quote_size
                 )
 
             else:
@@ -1750,7 +1963,8 @@ def webhook():
                     exit_architecture = "short_hard_stop"
 
             if close_reason:
-                pnl_gbp = 0 if is_shadow else (pnl_percent / 100) * TRADE_SIZE_GBP
+                trade_size_for_pnl = get_trade_size_for_quality(entry_quality)
+                pnl_gbp = 0 if is_shadow else (pnl_percent / 100) * trade_size_for_pnl
 
                 cur.execute("""
                     UPDATE bot_trades_v4
@@ -1805,7 +2019,8 @@ def webhook():
                             direction=direction,
                             action="exit",
                             price=price,
-                            entry_price=entry_price
+                            entry_price=entry_price,
+                            trade_size_quote=get_trade_size_quote_for_quality(entry_quality)
                         )
                     else:
                         log_okx_exit_skip_no_live_entry(
@@ -1846,6 +2061,255 @@ def webhook():
     except Exception as e:
         print("❌ ERROR:", e, flush=True)
         return jsonify({"error": str(e)}), 400
+
+
+# =========================
+# TELEGRAM OPS / SUMMARY HELPERS
+# =========================
+
+def require_summary_secret():
+    if not TELEGRAM_COMMAND_SECRET:
+        return True
+    return request.args.get("secret") == TELEGRAM_COMMAND_SECRET
+
+def build_telegram_summary_message(cur, hours=24):
+    cur.execute("""
+        WITH closed AS (
+            SELECT
+                CASE WHEN entry_quality = 'V7_MONSTER_CATCHER' THEN 'MONSTER' ELSE 'CORE' END AS engine,
+                pnl_percent,
+                pnl_gbp,
+                peak_pnl_percent,
+                close_reason
+            FROM bot_trades_v4
+            WHERE closed_at >= NOW() - (%s || ' hours')::INTERVAL
+              AND COALESCE(is_shadow, FALSE) = FALSE
+              AND status = 'CLOSED'
+        )
+        SELECT
+            engine,
+            COUNT(*) AS trades,
+            COALESCE(ROUND(SUM(pnl_gbp)::numeric, 3), 0) AS pnl_gbp,
+            COALESCE(ROUND(AVG(pnl_percent)::numeric, 3), 0) AS avg_pnl,
+            COALESCE(ROUND(AVG(peak_pnl_percent)::numeric, 3), 0) AS avg_peak,
+            COUNT(*) FILTER (WHERE pnl_percent > 0) AS winners,
+            COUNT(*) FILTER (WHERE peak_pnl_percent >= 2.0) AS runners,
+            COUNT(*) FILTER (WHERE peak_pnl_percent >= 5.0) AS monsters
+        FROM closed
+        GROUP BY engine
+        ORDER BY engine
+    """, (hours,))
+    closed_rows = cur.fetchall()
+
+    cur.execute("""
+        WITH latest_price AS (
+            SELECT DISTINCT ON (symbol)
+                symbol,
+                price
+            FROM signals_raw
+            WHERE timestamp >= NOW() - INTERVAL '6 hours'
+            ORDER BY symbol, timestamp DESC
+        ),
+        open_trades AS (
+            SELECT
+                b.id,
+                b.symbol,
+                b.direction,
+                b.entry_price,
+                b.opened_at,
+                b.entry_quality,
+                COALESCE(b.peak_pnl_percent, 0) AS peak_pnl_percent,
+                lp.price AS current_price
+            FROM bot_trades_v4 b
+            LEFT JOIN latest_price lp ON lp.symbol = b.symbol
+            WHERE b.status = 'OPEN'
+              AND COALESCE(b.is_shadow, FALSE) = FALSE
+        )
+        SELECT
+            symbol,
+            entry_quality,
+            ROUND(entry_price::numeric, 6),
+            ROUND(current_price::numeric, 6),
+            ROUND((CASE
+                WHEN current_price IS NULL OR entry_price = 0 THEN NULL
+                WHEN direction = 'LONG' THEN ((current_price - entry_price) / entry_price) * 100
+                ELSE ((entry_price - current_price) / entry_price) * 100
+            END)::numeric, 3) AS current_pnl,
+            ROUND(peak_pnl_percent::numeric, 3) AS peak,
+            ROUND(EXTRACT(EPOCH FROM (NOW() - opened_at)) / 60.0, 1) AS mins_open
+        FROM open_trades
+        ORDER BY entry_quality DESC, opened_at
+        LIMIT 15
+    """)
+    open_rows = cur.fetchall()
+
+    cur.execute("""
+        SELECT
+            COALESCE(block_reason, 'allowed') AS block_reason,
+            COUNT(*)
+        FROM signals_raw
+        WHERE timestamp >= NOW() - (%s || ' hours')::INTERVAL
+        GROUP BY COALESCE(block_reason, 'allowed')
+        ORDER BY COUNT(*) DESC
+        LIMIT 6
+    """, (hours,))
+    block_rows = cur.fetchall()
+
+    cur.execute("""
+        SELECT
+            COUNT(*) FILTER (WHERE status = 'OPEN' AND entry_quality = 'V7_MONSTER_CATCHER') AS open_monsters,
+            COUNT(*) FILTER (WHERE status = 'OPEN' AND entry_quality <> 'V7_MONSTER_CATCHER') AS open_core,
+            COUNT(*) FILTER (WHERE status = 'OPEN') AS open_total
+        FROM bot_trades_v4
+        WHERE COALESCE(is_shadow, FALSE) = FALSE
+    """)
+    open_counts = cur.fetchone() or (0, 0, 0)
+
+    total_pnl = sum(float(r[2] or 0) for r in closed_rows)
+    total_trades = sum(int(r[1] or 0) for r in closed_rows)
+
+    lines = []
+    lines.append(f"📊 <b>Trading Bot {hours}h Summary</b>")
+    lines.append(f"Version: <b>{DATA_VERSION}</b>")
+    lines.append(f"Closed trades: <b>{total_trades}</b>")
+    lines.append(f"Realized PnL: <b>{fmt_money(total_pnl)}</b>")
+    lines.append(f"Open: <b>{open_counts[2] or 0}</b> total | Core {open_counts[1] or 0} | Monster {open_counts[0] or 0}")
+
+    if closed_rows:
+        lines.append("\n<b>Engine breakdown</b>")
+        for engine, trades, pnl_gbp, avg_pnl, avg_peak, winners, runners, monsters in closed_rows:
+            win_rate = (float(winners or 0) / float(trades or 1)) * 100
+            lines.append(
+                f"{engine}: {trades} trades | {fmt_money(pnl_gbp)} | avg {fmt_num(avg_pnl)}% | "
+                f"peak {fmt_num(avg_peak)}% | win {fmt_num(win_rate,1)}% | R {runners} M {monsters}"
+            )
+    else:
+        lines.append("\nNo closed real trades in this window.")
+
+    if open_rows:
+        lines.append("\n<b>Open trades</b>")
+        for symbol, quality, entry_price, current_price, current_pnl, peak, mins_open in open_rows:
+            engine = "🔥" if quality == "V7_MONSTER_CATCHER" else "🟢"
+            pnl_txt = "n/a" if current_pnl is None else f"{fmt_num(current_pnl)}%"
+            lines.append(f"{engine} {symbol} | {pnl_txt} | peak {fmt_num(peak)}% | {fmt_num(mins_open,1)}m")
+
+    if block_rows:
+        lines.append("\n<b>Signal blocks</b>")
+        for reason, count in block_rows:
+            lines.append(f"{reason}: {count}")
+
+    return "\n".join(lines)
+
+def build_telegram_recent_message(cur, limit=8):
+    cur.execute("""
+        SELECT
+            symbol,
+            entry_quality,
+            closed_at,
+            ROUND(pnl_percent::numeric, 3),
+            ROUND(pnl_gbp::numeric, 3),
+            ROUND(peak_pnl_percent::numeric, 3),
+            close_reason
+        FROM bot_trades_v4
+        WHERE status = 'CLOSED'
+          AND COALESCE(is_shadow, FALSE) = FALSE
+        ORDER BY closed_at DESC
+        LIMIT %s
+    """, (limit,))
+    rows = cur.fetchall()
+    if not rows:
+        return "No recent closed real trades."
+    lines = ["🧾 <b>Recent Closed Trades</b>"]
+    for symbol, quality, closed_at, pnl, pnl_gbp, peak, reason in rows:
+        engine = "🔥" if quality == "V7_MONSTER_CATCHER" else "🟢"
+        lines.append(f"{engine} {symbol} | {fmt_num(pnl)}% | {fmt_money(pnl_gbp)} | peak {fmt_num(peak)}% | {reason}")
+    return "\n".join(lines)
+
+def build_telegram_monster_message(cur):
+    cur.execute("""
+        SELECT
+            symbol,
+            opened_at,
+            ROUND(entry_price::numeric, 6),
+            ROUND(COALESCE(peak_pnl_percent,0)::numeric, 3)
+        FROM bot_trades_v4
+        WHERE status = 'OPEN'
+          AND COALESCE(is_shadow, FALSE) = FALSE
+          AND entry_quality = 'V7_MONSTER_CATCHER'
+        ORDER BY opened_at
+    """)
+    rows = cur.fetchall()
+    lines = ["🔥 <b>Monster Engine Status</b>"]
+    lines.append(f"Slots: {MONSTER_RESERVED_SLOTS} | Size: £{MONSTER_TRADE_SIZE_GBP} | Same-symbol max: {MONSTER_MAX_SAME_SYMBOL_OPEN}")
+    lines.append(f"Rule: prior≥{MONSTER_MIN_PRIOR_SUCCESSES}, avg_peak≥{MONSTER_MIN_PRIOR_AVG_PEAK}, density≥{MONSTER_MIN_DENSITY}, delta≥{MONSTER_MIN_DENSITY_DELTA}")
+    if not rows:
+        lines.append("No open monster trades.")
+    else:
+        lines.append("\n<b>Open monster trades</b>")
+        for symbol, opened_at, entry_price, peak in rows:
+            mins = (datetime.now(timezone.utc) - opened_at.replace(tzinfo=timezone.utc)).total_seconds() / 60 if opened_at.tzinfo is None else (datetime.now(timezone.utc) - opened_at).total_seconds() / 60
+            lines.append(f"🔥 {symbol} | entry {entry_price} | peak {fmt_num(peak)}% | {fmt_num(mins,1)}m")
+    return "\n".join(lines)
+
+def build_telegram_health_message(cur):
+    cur.execute("""
+        SELECT
+            MAX(timestamp),
+            COUNT(*) FILTER (WHERE timestamp >= NOW() - INTERVAL '1 hour')
+        FROM signals_raw
+    """)
+    last_signal, signals_1h = cur.fetchone() or (None, 0)
+
+    cur.execute("""
+        SELECT
+            MAX(opened_at),
+            COUNT(*) FILTER (WHERE opened_at >= NOW() - INTERVAL '24 hours'),
+            COUNT(*) FILTER (WHERE status = 'OPEN' AND COALESCE(is_shadow, FALSE) = FALSE)
+        FROM bot_trades_v4
+        WHERE COALESCE(is_shadow, FALSE) = FALSE
+    """)
+    last_trade, trades_24h, open_real = cur.fetchone() or (None, 0, 0)
+
+    return (
+        f"🩺 <b>Bot Health</b>\n"
+        f"Version: {DATA_VERSION}\n"
+        f"Live orders: {ENABLE_LIVE_ORDERS}\n"
+        f"Last signal: {last_signal}\n"
+        f"Signals 1h: {signals_1h}\n"
+        f"Last real trade: {last_trade}\n"
+        f"Real trades 24h: {trades_24h}\n"
+        f"Open real: {open_real}\n"
+        f"Telegram: {ENABLE_TELEGRAM_ALERTS}\n"
+        f"OKX tradable cache: {len(OKX_TRADABLE_SPOT_INST_IDS)} pairs"
+    )
+
+def handle_telegram_command(text):
+    cmd = (text or "").strip().lower().split()[0] if text else "/help"
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        if cmd in ["/status", "/daily", "/summary", "/pnl"]:
+            return build_telegram_summary_message(cur, 24)
+        if cmd == "/monster":
+            return build_telegram_monster_message(cur)
+        if cmd == "/health":
+            return build_telegram_health_message(cur)
+        if cmd == "/recent":
+            return build_telegram_recent_message(cur)
+        if cmd == "/help":
+            return (
+                "🤖 <b>Trading Bot Commands</b>\n"
+                "/status - rolling 24h summary\n"
+                "/daily - rolling 24h summary\n"
+                "/monster - monster engine status\n"
+                "/health - webhook/server health\n"
+                "/recent - recent closed trades\n"
+                "/help - command list"
+            )
+        return "Unknown command. Send /help."
+    finally:
+        cur.close()
+        conn.close()
 
 # =========================
 # OKX TRADABILITY SCANNER ROUTES
@@ -1943,6 +2407,98 @@ def okx_tradability_status():
 
     except Exception as e:
         print("❌ OKX TRADABILITY STATUS ERROR:", e, flush=True)
+        return jsonify({"error": str(e)}), 400
+
+@app.route("/telegram_summary_24h", methods=["GET"])
+def telegram_summary_24h():
+    try:
+        if not require_summary_secret():
+            return jsonify({"error": "unauthorized"}), 403
+
+        conn = get_db()
+        cur = conn.cursor()
+        message = build_telegram_summary_message(cur, 24)
+        cur.close()
+        conn.close()
+
+        sent = send_telegram_alert(message)
+        return jsonify({
+            "status": "ok",
+            "version": DATA_VERSION,
+            "sent": sent,
+            "hours": 24
+        }), 200
+
+    except Exception as e:
+        print("❌ TELEGRAM SUMMARY ERROR:", e, flush=True)
+        return jsonify({"error": str(e)}), 400
+
+@app.route("/telegram_webhook", methods=["POST"])
+def telegram_webhook():
+    try:
+        if not ENABLE_TELEGRAM_COMMANDS:
+            return jsonify({"status": "commands_disabled"}), 200
+
+        if TELEGRAM_WEBHOOK_SECRET:
+            supplied_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+            if supplied_secret != TELEGRAM_WEBHOOK_SECRET:
+                return jsonify({"error": "unauthorized"}), 403
+
+        payload = request.get_json(force=True) or {}
+        message = payload.get("message") or payload.get("edited_message") or {}
+        chat = message.get("chat") or {}
+        chat_id = chat.get("id")
+        text = message.get("text") or ""
+
+        if not is_authorized_telegram_chat(chat_id):
+            telegram_send_message(chat_id, "Unauthorized chat.")
+            return jsonify({"status": "unauthorized_chat"}), 200
+
+        response_text = handle_telegram_command(text)
+        telegram_send_message(chat_id, response_text)
+
+        return jsonify({"status": "ok"}), 200
+
+    except Exception as e:
+        print("❌ TELEGRAM WEBHOOK ERROR:", e, flush=True)
+        return jsonify({"error": str(e)}), 400
+
+@app.route("/telegram_set_webhook", methods=["GET"])
+def telegram_set_webhook():
+    try:
+        if not require_summary_secret():
+            return jsonify({"error": "unauthorized"}), 403
+
+        public_url = os.environ.get("PUBLIC_BASE_URL") or request.args.get("base_url")
+        if not public_url:
+            return jsonify({
+                "error": "missing_PUBLIC_BASE_URL",
+                "message": "Set PUBLIC_BASE_URL=https://your-render-app.onrender.com or pass ?base_url="
+            }), 400
+
+        if not TELEGRAM_BOT_TOKEN:
+            return jsonify({"error": "missing_TELEGRAM_BOT_TOKEN"}), 400
+
+        webhook_url = f"{public_url.rstrip('/')}/telegram_webhook"
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook"
+        payload = {"url": webhook_url}
+        if TELEGRAM_WEBHOOK_SECRET:
+            payload["secret_token"] = TELEGRAM_WEBHOOK_SECRET
+
+        response = requests.post(url, json=payload, timeout=10)
+        try:
+            response_payload = response.json()
+        except Exception:
+            response_payload = {"status_code": response.status_code, "text": response.text}
+
+        return jsonify({
+            "status": "ok" if response.status_code == 200 else "telegram_error",
+            "webhook_url": webhook_url,
+            "telegram_response": response_payload
+        }), 200 if response.status_code == 200 else 400
+
+    except Exception as e:
+        print("❌ TELEGRAM SET WEBHOOK ERROR:", e, flush=True)
         return jsonify({"error": str(e)}), 400
 
 @app.route("/telegram_test", methods=["GET"])
