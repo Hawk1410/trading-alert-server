@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v5.7
-# TITLE: V7 CORE £15 + MONSTER-CATCHER RESERVED SLOTS + ADAPTIVE LIFECYCLE EXITS + TELEGRAM COMMANDS/SUMMARIES + OKX EXECUTION LAYER
+# VERSION: v5.7.1
+# TITLE: V7 CORE £15 + MONSTER-CATCHER RESERVED SLOTS + SHADOW MONSTER RECURSION + ADAPTIVE LIFECYCLE EXITS + TELEGRAM COMMANDS/SUMMARIES + OKX EXECUTION LAYER
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v5.7 + CORE £15 + MONSTER-CATCHER RESERVED SLOTS + TELEGRAM OPS RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v5.7.1 + CORE £15 + MONSTER-CATCHER + SHADOW RECURSION + TELEGRAM OPS RUNNING 🔥🔥🔥", flush=True)
 
 from flask import Flask, request, jsonify
 import os
@@ -25,7 +25,7 @@ MAX_OPEN_TRADES = 5
 MAX_OPEN_SHADOW_TRADES = 30
 TRADE_SIZE_GBP = 15
 
-DATA_VERSION = "v5.7"
+DATA_VERSION = "v5.7.1"
 
 # =========================
 # 🔌 OKX EXECUTION SETTINGS
@@ -89,6 +89,21 @@ MONSTER_MIN_PRIOR_SUCCESSES = int(os.environ.get("MONSTER_MIN_PRIOR_SUCCESSES", 
 MONSTER_MIN_PRIOR_AVG_PEAK = float(os.environ.get("MONSTER_MIN_PRIOR_AVG_PEAK", "1.50") or 1.50)
 MONSTER_MIN_DENSITY = int(os.environ.get("MONSTER_MIN_DENSITY", "10") or 10)
 MONSTER_MIN_DENSITY_DELTA = int(os.environ.get("MONSTER_MIN_DENSITY_DELTA", "3") or 3)
+
+# =========================
+# 👻 SHADOW MONSTER RECURSION ENGINE
+# =========================
+
+# Shadow-only research branch discovered after v5.7 deployment.
+# Tests persistence-only rotational leadership without density requirements.
+ENABLE_SHADOW_MONSTER_RECURSION = os.environ.get("ENABLE_SHADOW_MONSTER_RECURSION", "true").lower() == "true"
+SHADOW_MONSTER_RECURSION_MIN_TREND = float(os.environ.get("SHADOW_MONSTER_RECURSION_MIN_TREND", "0.20") or 0.20)
+SHADOW_MONSTER_RECURSION_MIN_MOMENTUM = float(os.environ.get("SHADOW_MONSTER_RECURSION_MIN_MOMENTUM", "0.00") or 0.00)
+SHADOW_MONSTER_RECURSION_LOOKBACK_MINUTES = int(os.environ.get("SHADOW_MONSTER_RECURSION_LOOKBACK_MINUTES", "120") or 120)
+SHADOW_MONSTER_RECURSION_MIN_PRIOR_SUCCESSES = int(os.environ.get("SHADOW_MONSTER_RECURSION_MIN_PRIOR_SUCCESSES", "2") or 2)
+SHADOW_MONSTER_RECURSION_MIN_PRIOR_AVG_PEAK = float(os.environ.get("SHADOW_MONSTER_RECURSION_MIN_PRIOR_AVG_PEAK", "1.50") or 1.50)
+SHADOW_MONSTER_RECURSION_RESERVED_SLOTS = int(os.environ.get("SHADOW_MONSTER_RECURSION_RESERVED_SLOTS", "3") or 3)
+SHADOW_MONSTER_RECURSION_MAX_SAME_SYMBOL_OPEN = int(os.environ.get("SHADOW_MONSTER_RECURSION_MAX_SAME_SYMBOL_OPEN", "2") or 2)
 
 
 # =========================
@@ -365,6 +380,11 @@ def bool_status():
         "MONSTER_MIN_PRIOR_AVG_PEAK": MONSTER_MIN_PRIOR_AVG_PEAK,
         "MONSTER_MIN_DENSITY": MONSTER_MIN_DENSITY,
         "MONSTER_MIN_DENSITY_DELTA": MONSTER_MIN_DENSITY_DELTA,
+        "ENABLE_SHADOW_MONSTER_RECURSION": ENABLE_SHADOW_MONSTER_RECURSION,
+        "SHADOW_MONSTER_RECURSION_RESERVED_SLOTS": SHADOW_MONSTER_RECURSION_RESERVED_SLOTS,
+        "SHADOW_MONSTER_RECURSION_MAX_SAME_SYMBOL_OPEN": SHADOW_MONSTER_RECURSION_MAX_SAME_SYMBOL_OPEN,
+        "SHADOW_MONSTER_RECURSION_MIN_PRIOR_SUCCESSES": SHADOW_MONSTER_RECURSION_MIN_PRIOR_SUCCESSES,
+        "SHADOW_MONSTER_RECURSION_MIN_PRIOR_AVG_PEAK": SHADOW_MONSTER_RECURSION_MIN_PRIOR_AVG_PEAK,
         "ENABLE_DEAD_LEADER_RECYCLER": ENABLE_DEAD_LEADER_RECYCLER,
         "DEAD_LEADER_MINUTES": DEAD_LEADER_MINUTES,
         "DEAD_LEADER_MAX_PEAK": DEAD_LEADER_MAX_PEAK,
@@ -770,6 +790,90 @@ def passes_monster_catcher(cur, symbol, sniper_density, sniper_density_delta):
         return False, context
 
     context["reason"] = "monster_allowed"
+    return True, context
+
+def get_open_shadow_quality_count(cur, entry_quality):
+    cur.execute("""
+        SELECT COUNT(*)
+        FROM bot_trades_v4
+        WHERE status = 'OPEN'
+          AND COALESCE(is_shadow, FALSE) = TRUE
+          AND entry_quality = %s
+    """, (entry_quality,))
+    return cur.fetchone()[0] or 0
+
+def get_open_shadow_quality_same_symbol_count(cur, entry_quality, symbol):
+    cur.execute("""
+        SELECT COUNT(*)
+        FROM bot_trades_v4
+        WHERE status = 'OPEN'
+          AND COALESCE(is_shadow, FALSE) = TRUE
+          AND entry_quality = %s
+          AND symbol = %s
+    """, (entry_quality, symbol))
+    return cur.fetchone()[0] or 0
+
+def get_shadow_monster_recursion_context(cur, symbol):
+    cur.execute("""
+        SELECT
+            COUNT(*) FILTER (WHERE COALESCE(peak_pnl_percent, 0) >= 0.75) AS prior_successes,
+            AVG(COALESCE(peak_pnl_percent, 0)) AS prior_avg_peak
+        FROM bot_trades_v4
+        WHERE symbol = %s
+          AND opened_at >= NOW() - (%s || ' minutes')::INTERVAL
+          AND opened_at < NOW()
+          AND (
+                COALESCE(is_shadow, FALSE) = FALSE
+                OR entry_quality = 'SHADOW_MONSTER_RECURSION'
+              )
+    """, (symbol, SHADOW_MONSTER_RECURSION_LOOKBACK_MINUTES))
+
+    row = cur.fetchone() or (0, 0)
+    prior_successes = row[0] or 0
+    prior_avg_peak = float(row[1] or 0)
+    return prior_successes, prior_avg_peak
+
+def passes_shadow_monster_recursion(cur, symbol, momentum, trend):
+    if not ENABLE_SHADOW_MONSTER_RECURSION:
+        return False, {"reason": "shadow_monster_recursion_disabled"}
+
+    prior_successes, prior_avg_peak = get_shadow_monster_recursion_context(cur, symbol)
+    open_shadow_recursions = get_open_shadow_quality_count(cur, "SHADOW_MONSTER_RECURSION")
+    open_shadow_recursions_same_symbol = get_open_shadow_quality_same_symbol_count(cur, "SHADOW_MONSTER_RECURSION", symbol)
+
+    context = {
+        "prior_successes": prior_successes,
+        "prior_avg_peak": prior_avg_peak,
+        "open_shadow_recursions": open_shadow_recursions,
+        "open_shadow_recursions_same_symbol": open_shadow_recursions_same_symbol,
+        "reason": None
+    }
+
+    if trend < SHADOW_MONSTER_RECURSION_MIN_TREND:
+        context["reason"] = "shadow_recursion_trend_too_low"
+        return False, context
+
+    if momentum <= SHADOW_MONSTER_RECURSION_MIN_MOMENTUM:
+        context["reason"] = "shadow_recursion_momentum_not_positive"
+        return False, context
+
+    if prior_successes < SHADOW_MONSTER_RECURSION_MIN_PRIOR_SUCCESSES:
+        context["reason"] = "shadow_recursion_prior_successes_too_low"
+        return False, context
+
+    if prior_avg_peak < SHADOW_MONSTER_RECURSION_MIN_PRIOR_AVG_PEAK:
+        context["reason"] = "shadow_recursion_prior_avg_peak_too_low"
+        return False, context
+
+    if open_shadow_recursions >= SHADOW_MONSTER_RECURSION_RESERVED_SLOTS:
+        context["reason"] = "shadow_recursion_slots_full"
+        return False, context
+
+    if open_shadow_recursions_same_symbol >= SHADOW_MONSTER_RECURSION_MAX_SAME_SYMBOL_OPEN:
+        context["reason"] = "shadow_recursion_same_symbol_limit"
+        return False, context
+
+    context["reason"] = "shadow_monster_recursion_allowed"
     return True, context
 
 def has_successful_okx_live_entry(cur, trade_id):
@@ -1749,6 +1853,44 @@ def webhook():
                     )
                     print(f"👻 OPEN SHADOW V6 | {symbol} | id={shadow_id}", flush=True)
 
+                shadow_recursion_allowed, shadow_recursion_context = passes_shadow_monster_recursion(
+                    cur,
+                    symbol,
+                    momentum,
+                    trend
+                )
+
+                if shadow_recursion_allowed:
+                    shadow_id = open_trade(
+                        cur,
+                        symbol,
+                        "LONG",
+                        price,
+                        momentum,
+                        trend,
+                        "SHADOW_MONSTER_RECURSION",
+                        regime_state,
+                        signal_id,
+                        signal_time,
+                        is_shadow=True
+                    )
+
+                    safe_update_trade_telemetry(cur, shadow_id, {
+                        "entry_architecture": "SHADOW_MONSTER_RECURSION",
+                        "monster_catcher_triggered": False,
+                        "monster_prior_successes": shadow_recursion_context.get("prior_successes"),
+                        "monster_prior_avg_peak": shadow_recursion_context.get("prior_avg_peak"),
+                        "monster_density": sniper_now,
+                        "monster_density_delta": sniper_delta
+                    })
+
+                    print(
+                        f"👻 OPEN SHADOW MONSTER RECURSION | {symbol} | id={shadow_id} | "
+                        f"prior_successes={shadow_recursion_context.get('prior_successes')} | "
+                        f"prior_avg_peak={round(shadow_recursion_context.get('prior_avg_peak', 0),3)}",
+                        flush=True
+                    )
+
             elif decision == "SHORT":
 
                 short_tier = classify_short_tier(symbol, momentum, trend, sniper_now)
@@ -2242,6 +2384,11 @@ def build_telegram_monster_message(cur):
     lines = ["🔥 <b>Monster Engine Status</b>"]
     lines.append(f"Slots: {MONSTER_RESERVED_SLOTS} | Size: £{MONSTER_TRADE_SIZE_GBP} | Same-symbol max: {MONSTER_MAX_SAME_SYMBOL_OPEN}")
     lines.append(f"Rule: prior≥{MONSTER_MIN_PRIOR_SUCCESSES}, avg_peak≥{MONSTER_MIN_PRIOR_AVG_PEAK}, density≥{MONSTER_MIN_DENSITY}, delta≥{MONSTER_MIN_DENSITY_DELTA}")
+    lines.append(
+        f"Shadow recursion: {'ON' if ENABLE_SHADOW_MONSTER_RECURSION else 'OFF'} | "
+        f"slots {SHADOW_MONSTER_RECURSION_RESERVED_SLOTS} | same-symbol {SHADOW_MONSTER_RECURSION_MAX_SAME_SYMBOL_OPEN} | "
+        f"prior≥{SHADOW_MONSTER_RECURSION_MIN_PRIOR_SUCCESSES}, avg_peak≥{SHADOW_MONSTER_RECURSION_MIN_PRIOR_AVG_PEAK}"
+    )
     if not rows:
         lines.append("No open monster trades.")
     else:
