@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v6.1
-# TITLE: LEADERSHIP-PERSISTENCE MAIN ENGINE + SIGNAL-BASED LEADERSHIP SCORING + OKX EXECUTION + ADAPTIVE LIFECYCLE
+# VERSION: v6.1.1
+# TITLE: LEADERSHIP-PERSISTENCE MAIN ENGINE + 240M SIGNAL LEADERSHIP LOOKBACK + OKX EXECUTION + ADAPTIVE LIFECYCLE
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v6.1 SIGNAL-LEADERSHIP ENGINE RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v6.1.1 SIGNAL-LEADERSHIP ENGINE + 240M LOOKBACK RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -13,6 +13,7 @@ print("🔥🔥🔥 MAIN.PY v6.1 SIGNAL-LEADERSHIP ENGINE RUNNING 🔥🔥🔥",
 #
 # ✅ Keeps v6.0 leadership-persistence main engine
 # ✅ Adds rolling signal_leadership_scores table support
+# ✅ v6.1.1 changes leadership lookback default from 120m → 240m after rolling-window sweep
 # ✅ Leadership context now uses scored historical signals, not only prior real trades
 # ✅ Restores OKX live/dry-run execution layer for entries and exits
 # ✅ Keeps dynamic sizing:
@@ -50,7 +51,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 MAX_OPEN_TRADES = int(os.environ.get("MAX_OPEN_TRADES", "5") or 5)
 MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 30)
 
-DATA_VERSION = "v6.1"
+DATA_VERSION = "v6.1.1"
 
 MAX_SAME_SYMBOL_OPEN = int(os.environ.get("MAX_SAME_SYMBOL_OPEN", "2") or 2)
 ENABLE_SAME_SYMBOL_STACKING_LIMIT = os.environ.get("ENABLE_SAME_SYMBOL_STACKING_LIMIT", "true").lower() == "true"
@@ -61,7 +62,7 @@ ENABLE_SAME_SYMBOL_STACKING_LIMIT = os.environ.get("ENABLE_SAME_SYMBOL_STACKING_
 
 ENABLE_LEADERSHIP_ENGINE = os.environ.get("ENABLE_LEADERSHIP_ENGINE", "true").lower() == "true"
 
-LEADERSHIP_LOOKBACK_MINUTES = int(os.environ.get("LEADERSHIP_LOOKBACK_MINUTES", "120") or 120)
+LEADERSHIP_LOOKBACK_MINUTES = int(os.environ.get("LEADERSHIP_LOOKBACK_MINUTES", "240") or 240)
 LEADERSHIP_SIGNAL_FORWARD_MINUTES = int(os.environ.get("LEADERSHIP_SIGNAL_FORWARD_MINUTES", "120") or 120)
 LEADERSHIP_SCORER_LIMIT = int(os.environ.get("LEADERSHIP_SCORER_LIMIT", "500") or 500)
 
