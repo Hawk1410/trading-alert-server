@@ -1,32 +1,31 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v6.0
-# TITLE: LEADERSHIP-PERSISTENCE MAIN ENGINE + DYNAMIC AGGRESSION SIZING + ADAPTIVE LIFECYCLE + SHADOW RESEARCH ENGINES
+# VERSION: v6.1
+# TITLE: LEADERSHIP-PERSISTENCE MAIN ENGINE + SIGNAL-BASED LEADERSHIP SCORING + OKX EXECUTION + ADAPTIVE LIFECYCLE
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v6.0 LEADERSHIP PERSISTENCE ENGINE RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v6.1 SIGNAL-LEADERSHIP ENGINE RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
-# v6.0 CHANGE SUMMARY
+# v6.1 CHANGE SUMMARY
 # =========================
 #
-# CORE CHANGES ONLY — NO UNNECESSARY REWRITES
+# ✅ Keeps v6.0 leadership-persistence main engine
+# ✅ Adds rolling signal_leadership_scores table support
+# ✅ Leadership context now uses scored historical signals, not only prior real trades
+# ✅ Restores OKX live/dry-run execution layer for entries and exits
+# ✅ Keeps dynamic sizing:
+#      1.25–1.49 = CORE £10
+#      1.50–1.99 = AGGRESSIVE £18
+#      2.00+     = MONSTER £30
+# ✅ Keeps max_open_trades = 5
+# ✅ Keeps max_same_symbol_open = 2
+# ✅ Keeps adaptive lifecycle exits
 #
-# ✅ Leadership-gated continuation promoted to PRIMARY engine
-# ✅ prior_avg_peak now determines whether continuation is tradable
-# ✅ Dynamic sizing tiers added
-# ✅ MAX_SAME_SYMBOL_OPEN increased from 1 → 2
-# ✅ Existing adaptive lifecycle exits retained
-# ✅ Existing Telegram/OKX infra retained
-# ✅ Shadow engines retained
-#
-# REMOVED AS PRIMARY CONCEPT:
-# ❌ Broad ungated V7 continuation
-# ❌ Monster override architecture
-#
-# NEW CORE THESIS:
-# Trade continuation ONLY during proven leadership persistence.
+# IMPORTANT:
+# Create signal_leadership_scores table before/after deployment using the SQL provided.
+# Call /score_signal_leadership every 5 minutes via cron.
 #
 # =========================
 
@@ -38,7 +37,7 @@ import base64
 import hashlib
 import requests
 import psycopg2
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 
 app = Flask(__name__)
 
@@ -48,63 +47,32 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 # CORE ENGINE SETTINGS
 # =========================
 
-MAX_OPEN_TRADES = 5
-MAX_OPEN_SHADOW_TRADES = 30
+MAX_OPEN_TRADES = int(os.environ.get("MAX_OPEN_TRADES", "5") or 5)
+MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 30)
 
-DATA_VERSION = "v6.0"
+DATA_VERSION = "v6.1"
 
-# Leadership stacking breakthrough:
-# 1 was too restrictive
-# 3 degraded quality
-# 2 was optimal balance.
-MAX_SAME_SYMBOL_OPEN = int(
-    os.environ.get("MAX_SAME_SYMBOL_OPEN", "2") or 2
-)
-
-ENABLE_SAME_SYMBOL_STACKING_LIMIT = (
-    os.environ.get("ENABLE_SAME_SYMBOL_STACKING_LIMIT", "true").lower() == "true"
-)
+MAX_SAME_SYMBOL_OPEN = int(os.environ.get("MAX_SAME_SYMBOL_OPEN", "2") or 2)
+ENABLE_SAME_SYMBOL_STACKING_LIMIT = os.environ.get("ENABLE_SAME_SYMBOL_STACKING_LIMIT", "true").lower() == "true"
 
 # =========================
 # 🧠 LEADERSHIP ENGINE
 # =========================
 
-ENABLE_LEADERSHIP_ENGINE = True
+ENABLE_LEADERSHIP_ENGINE = os.environ.get("ENABLE_LEADERSHIP_ENGINE", "true").lower() == "true"
 
-LEADERSHIP_LOOKBACK_MINUTES = int(
-    os.environ.get("LEADERSHIP_LOOKBACK_MINUTES", "120") or 120
-)
+LEADERSHIP_LOOKBACK_MINUTES = int(os.environ.get("LEADERSHIP_LOOKBACK_MINUTES", "120") or 120)
+LEADERSHIP_SIGNAL_FORWARD_MINUTES = int(os.environ.get("LEADERSHIP_SIGNAL_FORWARD_MINUTES", "120") or 120)
+LEADERSHIP_SCORER_LIMIT = int(os.environ.get("LEADERSHIP_SCORER_LIMIT", "500") or 500)
 
-LEADERSHIP_MIN_TREND = float(
-    os.environ.get("LEADERSHIP_MIN_TREND", "0.20") or 0.20
-)
+LEADERSHIP_MIN_TREND = float(os.environ.get("LEADERSHIP_MIN_TREND", "0.20") or 0.20)
+LEADERSHIP_MIN_MOMENTUM = float(os.environ.get("LEADERSHIP_MIN_MOMENTUM", "0.00") or 0.00)
+LEADERSHIP_MIN_PRIOR_AVG_PEAK = float(os.environ.get("LEADERSHIP_MIN_PRIOR_AVG_PEAK", "1.25") or 1.25)
 
-LEADERSHIP_MIN_MOMENTUM = float(
-    os.environ.get("LEADERSHIP_MIN_MOMENTUM", "0.00") or 0.00
-)
-
-# Core validated threshold.
-LEADERSHIP_MIN_PRIOR_AVG_PEAK = float(
-    os.environ.get("LEADERSHIP_MIN_PRIOR_AVG_PEAK", "1.25") or 1.25
-)
-
-# =========================
-# 💰 DYNAMIC AGGRESSION SIZING
-# =========================
-
-CORE_TRADE_SIZE_GBP = float(
-    os.environ.get("CORE_TRADE_SIZE_GBP", "10") or 10
-)
-
-AGGRESSIVE_TRADE_SIZE_GBP = float(
-    os.environ.get("AGGRESSIVE_TRADE_SIZE_GBP", "18") or 18
-)
-
-MONSTER_TRADE_SIZE_GBP = float(
-    os.environ.get("MONSTER_TRADE_SIZE_GBP", "30") or 30
-)
-
-# Leadership tiers discovered in sweep testing.
+# Dynamic sizing tiers.
+CORE_TRADE_SIZE_GBP = float(os.environ.get("CORE_TRADE_SIZE_GBP", "10") or 10)
+AGGRESSIVE_TRADE_SIZE_GBP = float(os.environ.get("AGGRESSIVE_TRADE_SIZE_GBP", "18") or 18)
+MONSTER_TRADE_SIZE_GBP = float(os.environ.get("MONSTER_TRADE_SIZE_GBP", "30") or 30)
 
 CORE_MIN_PRIOR_PEAK = 1.25
 AGGRESSIVE_MIN_PRIOR_PEAK = 1.50
@@ -117,103 +85,77 @@ MONSTER_MIN_PRIOR_PEAK = 2.00
 OKX_API_KEY = os.environ.get("OKX_API_KEY")
 OKX_API_SECRET = os.environ.get("OKX_API_SECRET")
 OKX_API_PASSPHRASE = os.environ.get("OKX_API_PASSPHRASE")
+OKX_BASE_URL = os.environ.get("OKX_BASE_URL", "https://www.okx.com").rstrip("/")
 
-OKX_BASE_URL = os.environ.get(
-    "OKX_BASE_URL",
-    "https://www.okx.com"
-).rstrip("/")
+ENABLE_ORDER_LOGGING = os.environ.get("ENABLE_ORDER_LOGGING", "true").lower() == "true"
+ENABLE_LIVE_ORDERS = os.environ.get("ENABLE_LIVE_ORDERS", "false").lower() == "true"
 
-ENABLE_ORDER_LOGGING = (
-    os.environ.get("ENABLE_ORDER_LOGGING", "true").lower() == "true"
-)
-
-ENABLE_LIVE_ORDERS = (
-    os.environ.get("ENABLE_LIVE_ORDERS", "false").lower() == "true"
-)
-
-MAX_LIVE_OPEN_TRADES = int(
-    os.environ.get("MAX_LIVE_OPEN_TRADES", "8") or 8
-)
+MAX_LIVE_OPEN_TRADES = int(os.environ.get("MAX_LIVE_OPEN_TRADES", "5") or 5)
 
 OKX_TD_MODE = os.environ.get("OKX_TD_MODE", "cash")
 OKX_ORDER_TYPE = os.environ.get("OKX_ORDER_TYPE", "market")
+OKX_EXIT_SIZE_BUFFER = float(os.environ.get("OKX_EXIT_SIZE_BUFFER", "0.995") or 0.995)
 
-OKX_SPOT_TAKER_FEE_RATE = float(
-    os.environ.get("OKX_SPOT_TAKER_FEE_RATE", "0.001") or 0.001
-)
+ENABLE_OKX_TRADABILITY_FILTER = os.environ.get("ENABLE_OKX_TRADABILITY_FILTER", "true").lower() == "true"
+OKX_TRADABILITY_CACHE_SECONDS = int(os.environ.get("OKX_TRADABILITY_CACHE_SECONDS", "900") or 900)
 
-OKX_EXIT_SIZE_BUFFER = float(
-    os.environ.get("OKX_EXIT_SIZE_BUFFER", "0.995") or 0.995
-)
+OKX_TRADABLE_SPOT_INST_IDS = set()
+OKX_TRADABILITY_CACHE_UPDATED_AT = None
+OKX_TRADABILITY_LAST_ERROR = None
 
 # =========================
 # 📲 TELEGRAM SETTINGS
 # =========================
 
-ENABLE_TELEGRAM_ALERTS = (
-    os.environ.get("ENABLE_TELEGRAM_ALERTS", "false").lower() == "true"
-)
-
+ENABLE_TELEGRAM_ALERTS = os.environ.get("ENABLE_TELEGRAM_ALERTS", "false").lower() == "true"
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 TELEGRAM_COMMAND_SECRET = os.environ.get("TELEGRAM_COMMAND_SECRET")
 TELEGRAM_WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET")
-
-ENABLE_TELEGRAM_COMMANDS = (
-    os.environ.get("ENABLE_TELEGRAM_COMMANDS", "true").lower() == "true"
-)
-
-# =========================
-# 👻 SHADOW ENGINES RETAINED
-# =========================
-
-ENABLE_SHADOW_V6 = True
-ENABLE_SHADOW_V53_SNIPER = True
-ENABLE_SHADOW_MONSTER_RECURSION = True
-ENABLE_SHADOW_S5_SHORT_ENGINE = True
+ENABLE_TELEGRAM_COMMANDS = os.environ.get("ENABLE_TELEGRAM_COMMANDS", "true").lower() == "true"
 
 # =========================
 # ♻️ ADAPTIVE LIFECYCLE
 # =========================
 
-ENABLE_DEAD_LEADER_RECYCLER = True
-DEAD_LEADER_MINUTES = 90
-DEAD_LEADER_MAX_PEAK = 0.25
-DEAD_LEADER_TREND_THRESHOLD = 0.30
+ENABLE_DEAD_LEADER_RECYCLER = os.environ.get("ENABLE_DEAD_LEADER_RECYCLER", "true").lower() == "true"
+DEAD_LEADER_MINUTES = float(os.environ.get("DEAD_LEADER_MINUTES", "90") or 90)
+DEAD_LEADER_MAX_PEAK = float(os.environ.get("DEAD_LEADER_MAX_PEAK", "0.25") or 0.25)
+DEAD_LEADER_TREND_THRESHOLD = float(os.environ.get("DEAD_LEADER_TREND_THRESHOLD", "0.30") or 0.30)
 
-ENABLE_ADAPTIVE_WINNER_PROTECTION = True
+ENABLE_ADAPTIVE_WINNER_PROTECTION = os.environ.get("ENABLE_ADAPTIVE_WINNER_PROTECTION", "true").lower() == "true"
 
-ADAPTIVE_SMALL_PEAK_TRIGGER = 0.75
-ADAPTIVE_SMALL_DRAWDOWN = 0.25
+ADAPTIVE_SMALL_PEAK_TRIGGER = float(os.environ.get("ADAPTIVE_SMALL_PEAK_TRIGGER", "0.75") or 0.75)
+ADAPTIVE_SMALL_DRAWDOWN = float(os.environ.get("ADAPTIVE_SMALL_DRAWDOWN", "0.25") or 0.25)
 
-ADAPTIVE_MEDIUM_PEAK_TRIGGER = 1.50
-ADAPTIVE_MEDIUM_DRAWDOWN = 0.40
+ADAPTIVE_MEDIUM_PEAK_TRIGGER = float(os.environ.get("ADAPTIVE_MEDIUM_PEAK_TRIGGER", "1.50") or 1.50)
+ADAPTIVE_MEDIUM_DRAWDOWN = float(os.environ.get("ADAPTIVE_MEDIUM_DRAWDOWN", "0.40") or 0.40)
 
-ADAPTIVE_LARGE_PEAK_TRIGGER = 3.00
-ADAPTIVE_LARGE_DRAWDOWN = 0.75
+ADAPTIVE_LARGE_PEAK_TRIGGER = float(os.environ.get("ADAPTIVE_LARGE_PEAK_TRIGGER", "3.00") or 3.00)
+ADAPTIVE_LARGE_DRAWDOWN = float(os.environ.get("ADAPTIVE_LARGE_DRAWDOWN", "0.75") or 0.75)
 
-ADAPTIVE_TREND_WEAK_THRESHOLD = 0.15
+ADAPTIVE_TREND_WEAK_THRESHOLD = float(os.environ.get("ADAPTIVE_TREND_WEAK_THRESHOLD", "0.15") or 0.15)
 
 # =========================
 # 🚪 EXIT SETTINGS
 # =========================
 
-ENABLE_PROFIT_LOCKS = True
+ENABLE_PROFIT_LOCKS = os.environ.get("ENABLE_PROFIT_LOCKS", "true").lower() == "true"
 
-LONG_LOCK_1_TRIGGER = 0.75
-LONG_LOCK_1_RATIO = 0.50
+LONG_LOCK_1_TRIGGER = float(os.environ.get("LONG_LOCK_1_TRIGGER", "0.75") or 0.75)
+LONG_LOCK_1_RATIO = float(os.environ.get("LONG_LOCK_1_RATIO", "0.50") or 0.50)
 
-LONG_LOCK_2_TRIGGER = 1.50
-LONG_LOCK_2_RATIO = 0.70
+LONG_LOCK_2_TRIGGER = float(os.environ.get("LONG_LOCK_2_TRIGGER", "1.50") or 1.50)
+LONG_LOCK_2_RATIO = float(os.environ.get("LONG_LOCK_2_RATIO", "0.70") or 0.70)
 
-LONG_LOCK_3_TRIGGER = 3.00
-LONG_LOCK_3_RATIO = 0.75
+LONG_LOCK_3_TRIGGER = float(os.environ.get("LONG_LOCK_3_TRIGGER", "3.00") or 3.00)
+LONG_LOCK_3_RATIO = float(os.environ.get("LONG_LOCK_3_RATIO", "0.75") or 0.75)
 
-LONG_LOCK_4_TRIGGER = 5.00
-LONG_LOCK_4_RATIO = 0.80
+LONG_LOCK_4_TRIGGER = float(os.environ.get("LONG_LOCK_4_TRIGGER", "5.00") or 5.00)
+LONG_LOCK_4_RATIO = float(os.environ.get("LONG_LOCK_4_RATIO", "0.80") or 0.80)
 
-LONG_HARD_STOP = -0.40
-LONG_NO_RED_AFTER_WIN_TRIGGER = 0.75
+LONG_HARD_STOP = float(os.environ.get("LONG_HARD_STOP", "-0.40") or -0.40)
+LONG_NO_RED_AFTER_WIN_TRIGGER = float(os.environ.get("LONG_NO_RED_AFTER_WIN_TRIGGER", "0.75") or 0.75)
 
 # =========================
 # DB
@@ -233,89 +175,72 @@ def column_exists(cur, table_name, column_name):
     """, (table_name, column_name))
     return cur.fetchone()[0]
 
-# =========================
-# LEADERSHIP CONTEXT
-# =========================
+def safe_update_trade_telemetry(cur, tid, telemetry):
+    allowed = {}
+    for col, val in telemetry.items():
+        if column_exists(cur, "bot_trades_v4", col):
+            allowed[col] = val
 
-def get_leadership_context(cur, symbol):
+    if not allowed:
+        return
+
+    set_sql = ", ".join([f"{col} = %s" for col in allowed.keys()])
+    values = list(allowed.values()) + [tid]
+
+    cur.execute(f"""
+        UPDATE bot_trades_v4
+        SET {set_sql}
+        WHERE id = %s
+    """, values)
+
+def ensure_okx_order_log_table(cur):
+    if not ENABLE_ORDER_LOGGING:
+        return
 
     cur.execute("""
-        SELECT
-            COUNT(*) FILTER (
-                WHERE COALESCE(peak_pnl_percent, 0) >= 0.75
-            ) AS prior_successes,
+        CREATE TABLE IF NOT EXISTS okx_order_log (
+            id BIGSERIAL PRIMARY KEY,
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            trade_id TEXT,
+            symbol TEXT,
+            okx_inst_id TEXT,
+            action TEXT,
+            side TEXT,
+            direction TEXT,
+            dry_run BOOLEAN,
+            live_orders_enabled BOOLEAN,
+            request_payload JSONB,
+            response_payload JSONB,
+            success BOOLEAN,
+            error_message TEXT
+        )
+    """)
 
-            COUNT(*) FILTER (
-                WHERE COALESCE(peak_pnl_percent, 0) >= 2.00
-            ) AS prior_runners,
+def ensure_signal_leadership_scores_table(cur):
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS signal_leadership_scores (
+            id BIGSERIAL PRIMARY KEY,
+            signal_id BIGINT UNIQUE,
+            symbol TEXT,
+            signal_timestamp TIMESTAMPTZ,
+            price NUMERIC,
+            momentum NUMERIC,
+            trend NUMERIC,
+            future_max_price NUMERIC,
+            future_min_price NUMERIC,
+            future_peak_percent NUMERIC,
+            future_worst_percent NUMERIC,
+            scored_at TIMESTAMPTZ DEFAULT NOW()
+        )
+    """)
 
-            AVG(COALESCE(peak_pnl_percent, 0)) AS prior_avg_peak
-
-        FROM bot_trades_v4
-        WHERE symbol = %s
-          AND COALESCE(is_shadow, FALSE) = FALSE
-          AND opened_at >= NOW() - (%s || ' minutes')::INTERVAL
-          AND opened_at < NOW()
-    """, (symbol, LEADERSHIP_LOOKBACK_MINUTES))
-
-    row = cur.fetchone() or (0, 0, 0)
-
-    return {
-        "prior_successes": row[0] or 0,
-        "prior_runners": row[1] or 0,
-        "prior_avg_peak": float(row[2] or 0)
-    }
-
-# =========================
-# LEADERSHIP ENGINE
-# =========================
-
-def passes_leadership_engine(cur, symbol, momentum, trend):
-
-    if not ENABLE_LEADERSHIP_ENGINE:
-        return False, None
-
-    if trend < LEADERSHIP_MIN_TREND:
-        return False, None
-
-    if momentum <= LEADERSHIP_MIN_MOMENTUM:
-        return False, None
-
-    leadership = get_leadership_context(cur, symbol)
-
-    prior_avg_peak = leadership["prior_avg_peak"]
-
-    if prior_avg_peak < LEADERSHIP_MIN_PRIOR_AVG_PEAK:
-        return False, leadership
-
-    return True, leadership
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_signal_leadership_symbol_time
+        ON signal_leadership_scores(symbol, signal_timestamp)
+    """)
 
 # =========================
-# DYNAMIC SIZING
-# =========================
-
-def classify_leadership_tier(prior_avg_peak):
-
-    if prior_avg_peak >= MONSTER_MIN_PRIOR_PEAK:
-        return "LEADERSHIP_MONSTER"
-
-    if prior_avg_peak >= AGGRESSIVE_MIN_PRIOR_PEAK:
-        return "LEADERSHIP_AGGRESSIVE"
-
-    return "LEADERSHIP_CORE"
-
-def get_trade_size_for_quality(entry_quality):
-
-    if entry_quality == "LEADERSHIP_MONSTER":
-        return MONSTER_TRADE_SIZE_GBP
-
-    if entry_quality == "LEADERSHIP_AGGRESSIVE":
-        return AGGRESSIVE_TRADE_SIZE_GBP
-
-    return CORE_TRADE_SIZE_GBP
-
-# =========================
-# HELPERS
+# TELEGRAM HELPERS
 # =========================
 
 def fmt_num(value, digits=3):
@@ -330,48 +255,683 @@ def fmt_money(value):
     except Exception:
         return f"£{value}"
 
-def send_telegram_alert(message):
-
+def telegram_send_message(chat_id, message):
     if not ENABLE_TELEGRAM_ALERTS:
         return False
 
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    if not TELEGRAM_BOT_TOKEN or not chat_id:
+        print("⚠️ TELEGRAM SEND SKIPPED | missing token/chat_id", flush=True)
         return False
 
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-
         payload = {
-            "chat_id": str(TELEGRAM_CHAT_ID),
+            "chat_id": str(chat_id),
             "text": message,
             "parse_mode": "HTML",
             "disable_web_page_preview": True
         }
-
         response = requests.post(url, json=payload, timeout=8)
-
-        return response.status_code == 200
-
-    except Exception:
+        if response.status_code == 200:
+            return True
+        print(f"⚠️ TELEGRAM SEND FAILED | {response.status_code} | {response.text}", flush=True)
+        return False
+    except Exception as e:
+        print(f"⚠️ TELEGRAM SEND ERROR | {e}", flush=True)
         return False
 
+def send_telegram_alert(message):
+    return telegram_send_message(TELEGRAM_CHAT_ID, message)
+
 # =========================
-# OPEN TRADE
+# OKX HELPERS
 # =========================
 
-def open_trade(
-    cur,
-    symbol,
-    direction,
-    price,
-    momentum,
-    trend,
-    quality,
-    signal_id,
-    signal_time,
-    leadership_context
-):
+def okx_symbol_to_inst_id(symbol):
+    s = (symbol or "").upper().replace("-", "").replace("/", "")
+    quote_assets = ["USDT", "USDC", "USD", "BTC", "ETH", "EUR", "GBP"]
+    for quote in quote_assets:
+        if s.endswith(quote) and len(s) > len(quote):
+            base = s[:-len(quote)]
+            return f"{base}-{quote}"
+    return symbol
 
+def okx_inst_id_to_base_ccy(okx_inst_id):
+    if not okx_inst_id or "-" not in okx_inst_id:
+        return None
+    return okx_inst_id.split("-")[0].upper()
+
+def get_okx_timestamp():
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+def okx_sign(timestamp, method, request_path, body=""):
+    message = f"{timestamp}{method.upper()}{request_path}{body}"
+    mac = hmac.new(
+        bytes(OKX_API_SECRET, encoding="utf-8"),
+        bytes(message, encoding="utf-8"),
+        digestmod=hashlib.sha256
+    )
+    return base64.b64encode(mac.digest()).decode()
+
+def okx_headers(method, request_path, body=""):
+    timestamp = get_okx_timestamp()
+    sign = okx_sign(timestamp, method, request_path, body)
+    return {
+        "OK-ACCESS-KEY": OKX_API_KEY,
+        "OK-ACCESS-SIGN": sign,
+        "OK-ACCESS-TIMESTAMP": timestamp,
+        "OK-ACCESS-PASSPHRASE": OKX_API_PASSPHRASE,
+        "Content-Type": "application/json",
+    }
+
+def okx_api_ready():
+    return bool(OKX_API_KEY and OKX_API_SECRET and OKX_API_PASSPHRASE and OKX_BASE_URL)
+
+def okx_authenticated_get(request_path_with_query):
+    if not okx_api_ready():
+        return {"success": False, "error": "OKX API credentials missing or incomplete", "response": None}
+
+    try:
+        headers = okx_headers("GET", request_path_with_query, "")
+        response = requests.get(f"{OKX_BASE_URL}{request_path_with_query}", headers=headers, timeout=10)
+
+        try:
+            response_payload = response.json()
+        except Exception:
+            response_payload = {"status_code": response.status_code, "text": response.text}
+
+        okx_code = str(response_payload.get("code")) if isinstance(response_payload, dict) else None
+        success = response.status_code == 200 and okx_code == "0"
+
+        return {
+            "success": success,
+            "status_code": response.status_code,
+            "response": response_payload,
+            "error": None if success else f"OKX GET failed: {response_payload}"
+        }
+
+    except Exception as e:
+        return {"success": False, "status_code": None, "response": None, "error": str(e)}
+
+def refresh_okx_tradable_spot_instruments(force=False):
+    global OKX_TRADABLE_SPOT_INST_IDS
+    global OKX_TRADABILITY_CACHE_UPDATED_AT
+    global OKX_TRADABILITY_LAST_ERROR
+
+    now_utc = datetime.now(timezone.utc)
+
+    if (
+        not force
+        and OKX_TRADABILITY_CACHE_UPDATED_AT is not None
+        and (now_utc - OKX_TRADABILITY_CACHE_UPDATED_AT).total_seconds() < OKX_TRADABILITY_CACHE_SECONDS
+        and OKX_TRADABLE_SPOT_INST_IDS
+    ):
+        return {
+            "success": True,
+            "cached": True,
+            "count": len(OKX_TRADABLE_SPOT_INST_IDS),
+            "inst_ids": sorted(list(OKX_TRADABLE_SPOT_INST_IDS)),
+            "error": None
+        }
+
+    result = okx_authenticated_get("/api/v5/account/instruments?instType=SPOT")
+
+    if not result.get("success"):
+        OKX_TRADABILITY_LAST_ERROR = result.get("error")
+        return {
+            "success": False,
+            "cached": False,
+            "count": len(OKX_TRADABLE_SPOT_INST_IDS),
+            "inst_ids": sorted(list(OKX_TRADABLE_SPOT_INST_IDS)),
+            "error": result.get("error"),
+            "response": result.get("response")
+        }
+
+    response_payload = result.get("response") or {}
+    data = response_payload.get("data") or []
+
+    inst_ids = set()
+    for item in data:
+        inst_id = item.get("instId")
+        state = (item.get("state") or "").lower()
+        if inst_id and (not state or state == "live"):
+            inst_ids.add(inst_id.upper())
+
+    OKX_TRADABLE_SPOT_INST_IDS = inst_ids
+    OKX_TRADABILITY_CACHE_UPDATED_AT = now_utc
+    OKX_TRADABILITY_LAST_ERROR = None
+
+    print(f"🛡️ OKX TRADABILITY CACHE REFRESHED | spot_pairs={len(inst_ids)}", flush=True)
+
+    return {
+        "success": True,
+        "cached": False,
+        "count": len(inst_ids),
+        "inst_ids": sorted(list(inst_ids)),
+        "error": None
+    }
+
+def is_okx_symbol_live_tradable(symbol):
+    if not ENABLE_OKX_TRADABILITY_FILTER:
+        return True, "tradability_filter_disabled"
+
+    okx_inst_id = okx_symbol_to_inst_id(symbol).upper()
+    result = refresh_okx_tradable_spot_instruments(force=False)
+
+    if not result.get("success"):
+        return False, f"tradability_check_failed: {result.get('error')}"
+
+    if okx_inst_id in OKX_TRADABLE_SPOT_INST_IDS:
+        return True, "tradable"
+
+    return False, "not_in_account_tradable_spot_instruments"
+
+def log_okx_order(cur, trade_id, symbol, okx_inst_id, action, side, direction,
+                  dry_run, request_payload, response_payload=None,
+                  success=True, error_message=None):
+    if not ENABLE_ORDER_LOGGING:
+        return
+
+    ensure_okx_order_log_table(cur)
+
+    cur.execute("""
+        INSERT INTO okx_order_log (
+            trade_id,
+            symbol,
+            okx_inst_id,
+            action,
+            side,
+            direction,
+            dry_run,
+            live_orders_enabled,
+            request_payload,
+            response_payload,
+            success,
+            error_message
+        )
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+    """, (
+        str(trade_id) if trade_id is not None else None,
+        symbol,
+        okx_inst_id,
+        action,
+        side,
+        direction,
+        dry_run,
+        ENABLE_LIVE_ORDERS,
+        json.dumps(request_payload),
+        json.dumps(response_payload) if response_payload is not None else None,
+        success,
+        error_message
+    ))
+
+def get_live_real_open_count(cur):
+    cur.execute("""
+        SELECT COUNT(*)
+        FROM bot_trades_v4
+        WHERE status = 'OPEN'
+          AND COALESCE(is_shadow, FALSE) = FALSE
+    """)
+    return cur.fetchone()[0] or 0
+
+def get_open_same_symbol_real_count(cur, symbol):
+    cur.execute("""
+        SELECT COUNT(*)
+        FROM bot_trades_v4
+        WHERE status = 'OPEN'
+          AND COALESCE(is_shadow, FALSE) = FALSE
+          AND symbol = %s
+    """, (symbol,))
+    return cur.fetchone()[0] or 0
+
+def okx_get_available_balance(ccy):
+    if not ccy:
+        return {"success": False, "available": 0.0, "error": "missing_currency", "response": None}
+
+    result = okx_authenticated_get(f"/api/v5/account/balance?ccy={ccy}")
+
+    if not result.get("success"):
+        return {
+            "success": False,
+            "available": 0.0,
+            "error": result.get("error"),
+            "response": result.get("response")
+        }
+
+    response_payload = result.get("response") or {}
+
+    try:
+        data = response_payload.get("data") or []
+        details = []
+        if data and isinstance(data, list):
+            details = data[0].get("details") or []
+
+        for item in details:
+            if (item.get("ccy") or "").upper() == ccy.upper():
+                available_raw = item.get("availBal") or item.get("availableBal") or item.get("cashBal") or "0"
+                return {
+                    "success": True,
+                    "available": float(available_raw or 0),
+                    "error": None,
+                    "response": response_payload
+                }
+
+        return {"success": True, "available": 0.0, "error": None, "response": response_payload}
+
+    except Exception as e:
+        return {"success": False, "available": 0.0, "error": str(e), "response": response_payload}
+
+def has_successful_okx_live_entry(cur, trade_id):
+    if not ENABLE_ORDER_LOGGING:
+        return False
+
+    ensure_okx_order_log_table(cur)
+
+    cur.execute("""
+        SELECT COUNT(*)
+        FROM okx_order_log
+        WHERE trade_id = %s
+          AND action = 'entry'
+          AND COALESCE(dry_run, FALSE) = FALSE
+          AND COALESCE(success, FALSE) = TRUE
+          AND error_message IS NULL
+          AND COALESCE(response_payload::text, '') NOT ILIKE '%%skipped%%'
+          AND COALESCE(response_payload::text, '') NOT ILIKE '%%dry_run%%'
+    """, (str(trade_id),))
+
+    return (cur.fetchone()[0] or 0) > 0
+
+def log_okx_exit_skip_no_live_entry(cur, trade_id, symbol, direction, price=None):
+    okx_inst_id = okx_symbol_to_inst_id(symbol)
+    request_payload = {
+        "skipped": True,
+        "reason": "no_successful_okx_live_entry_for_trade",
+        "symbol": symbol,
+        "okx_inst_id": okx_inst_id,
+        "direction": direction,
+        "action": "exit",
+        "price": price
+    }
+    response_payload = {
+        "skipped": True,
+        "message": "OKX exit skipped because this bot trade has no successful live OKX entry order.",
+        "reason": "no_successful_okx_live_entry_for_trade"
+    }
+
+    log_okx_order(
+        cur,
+        trade_id,
+        symbol,
+        okx_inst_id,
+        "exit",
+        "sell",
+        direction,
+        False,
+        request_payload,
+        response_payload,
+        True,
+        "okx_exit_skipped_no_successful_live_entry"
+    )
+
+    print(f"🛡️ OKX EXIT SKIPPED | {symbol} | no successful live entry", flush=True)
+
+def calculate_exit_base_size(entry_price, trade_size_quote):
+    if entry_price <= 0:
+        return 0
+    return round(float(trade_size_quote) / float(entry_price), 8)
+
+def okx_place_market_order(cur, trade_id, symbol, direction, action, price=None, entry_price=None, trade_size_quote=None):
+    okx_inst_id = okx_symbol_to_inst_id(symbol)
+
+    if direction != "LONG":
+        request_payload = {
+            "blocked": True,
+            "reason": "live_execution_only_supports_long_spot_orders",
+            "symbol": symbol,
+            "direction": direction,
+            "action": action
+        }
+        log_okx_order(
+            cur, trade_id, symbol, okx_inst_id, action, None, direction,
+            True, request_payload, None, False,
+            "live_execution_only_supports_long_spot_orders"
+        )
+        return {
+            "success": False,
+            "dry_run": True,
+            "blocked": True,
+            "reason": "live_execution_only_supports_long_spot_orders"
+        }
+
+    quote_size = float(trade_size_quote or CORE_TRADE_SIZE_GBP)
+
+    if action == "entry":
+        side = "buy"
+        payload = {
+            "instId": okx_inst_id,
+            "tdMode": OKX_TD_MODE,
+            "side": side,
+            "ordType": OKX_ORDER_TYPE,
+            "sz": str(quote_size),
+            "tgtCcy": "quote_ccy"
+        }
+
+    elif action == "exit":
+        side = "sell"
+        base_ccy = okx_inst_id_to_base_ccy(okx_inst_id)
+
+        if ENABLE_LIVE_ORDERS:
+            balance_result = okx_get_available_balance(base_ccy)
+            if not balance_result.get("success"):
+                request_payload = {
+                    "blocked": True,
+                    "reason": "could_not_fetch_okx_available_balance",
+                    "symbol": symbol,
+                    "okx_inst_id": okx_inst_id,
+                    "base_ccy": base_ccy,
+                    "action": action,
+                    "balance_error": balance_result.get("error")
+                }
+                log_okx_order(
+                    cur, trade_id, symbol, okx_inst_id, action, side, direction,
+                    False, request_payload, balance_result.get("response"), False,
+                    f"could_not_fetch_okx_available_balance: {balance_result.get('error')}"
+                )
+                return {
+                    "success": False,
+                    "dry_run": False,
+                    "blocked": True,
+                    "reason": "could_not_fetch_okx_available_balance",
+                    "error": balance_result.get("error")
+                }
+
+            available_balance = float(balance_result.get("available") or 0)
+            reference_price = entry_price or price or 0
+            theoretical_trade_size = calculate_exit_base_size(reference_price, quote_size)
+            desired_trade_sell_size = theoretical_trade_size * OKX_EXIT_SIZE_BUFFER
+            max_safe_available_size = available_balance * OKX_EXIT_SIZE_BUFFER
+            sell_size = round(min(desired_trade_sell_size, max_safe_available_size), 8)
+
+            if sell_size <= 0:
+                request_payload = {
+                    "skipped": True,
+                    "reason": "no_available_okx_balance_to_sell",
+                    "symbol": symbol,
+                    "okx_inst_id": okx_inst_id,
+                    "base_ccy": base_ccy,
+                    "available_balance": available_balance,
+                    "theoretical_trade_size": theoretical_trade_size,
+                    "desired_trade_sell_size": desired_trade_sell_size,
+                    "action": action
+                }
+                response_payload = {
+                    "skipped": True,
+                    "message": "OKX exit skipped because available balance is zero/dust.",
+                    "available_balance": available_balance,
+                    "base_ccy": base_ccy
+                }
+                log_okx_order(
+                    cur, trade_id, symbol, okx_inst_id, action, side, direction,
+                    False, request_payload, response_payload, True,
+                    "okx_exit_skipped_no_available_balance"
+                )
+                return {
+                    "success": True,
+                    "dry_run": False,
+                    "skipped": True,
+                    "reason": "no_available_okx_balance_to_sell",
+                    "available_balance": available_balance
+                }
+
+        else:
+            reference_price = entry_price or price or 0
+            sell_size = calculate_exit_base_size(reference_price, quote_size)
+
+        payload = {
+            "instId": okx_inst_id,
+            "tdMode": OKX_TD_MODE,
+            "side": side,
+            "ordType": OKX_ORDER_TYPE,
+            "sz": str(sell_size)
+        }
+
+    else:
+        payload = {
+            "blocked": True,
+            "reason": "unknown_okx_action",
+            "symbol": symbol,
+            "direction": direction,
+            "action": action
+        }
+        log_okx_order(
+            cur, trade_id, symbol, okx_inst_id, action, None, direction,
+            True, payload, None, False, "unknown_okx_action"
+        )
+        return {"success": False, "dry_run": True, "blocked": True, "reason": "unknown_okx_action"}
+
+    dry_run = not ENABLE_LIVE_ORDERS
+
+    if dry_run:
+        response_payload = {
+            "dry_run": True,
+            "message": "OKX live orders disabled. No order sent.",
+            "payload": payload
+        }
+        log_okx_order(
+            cur, trade_id, symbol, okx_inst_id, action, side, direction,
+            True, payload, response_payload, True, None
+        )
+        print(f"🧪 OKX DRY RUN | {action.upper()} | {symbol}->{okx_inst_id} | size={payload.get('sz')}", flush=True)
+        return {"success": True, "dry_run": True, "response": response_payload}
+
+    if not okx_api_ready():
+        error_message = "OKX API credentials missing or incomplete"
+        log_okx_order(
+            cur, trade_id, symbol, okx_inst_id, action, side, direction,
+            False, payload, None, False, error_message
+        )
+        return {"success": False, "dry_run": False, "error": error_message}
+
+    tradable, tradability_reason = is_okx_symbol_live_tradable(symbol)
+    if not tradable:
+        response_payload = {
+            "skipped": True,
+            "message": "Live OKX order skipped because symbol is not confirmed tradable for this account.",
+            "reason": tradability_reason,
+            "symbol": symbol,
+            "okx_inst_id": okx_inst_id,
+            "payload": payload
+        }
+        log_okx_order(
+            cur, trade_id, symbol, okx_inst_id, action, side, direction,
+            False, payload, response_payload, True, f"okx_live_order_skipped_{tradability_reason}"
+        )
+        send_telegram_alert(
+            f"🛡️ <b>OKX ORDER SKIPPED</b>\n"
+            f"{action.upper()} | {symbol} → {okx_inst_id}\n"
+            f"Reason: {tradability_reason}"
+        )
+        return {
+            "success": True,
+            "dry_run": False,
+            "skipped": True,
+            "reason": tradability_reason,
+            "response": response_payload
+        }
+
+    if action == "entry":
+        live_open_count = get_live_real_open_count(cur)
+        if live_open_count > MAX_LIVE_OPEN_TRADES:
+            error_message = f"MAX_LIVE_OPEN_TRADES exceeded: {live_open_count} > {MAX_LIVE_OPEN_TRADES}"
+            log_okx_order(
+                cur, trade_id, symbol, okx_inst_id, action, side, direction,
+                False, payload, None, False, error_message
+            )
+            return {"success": False, "dry_run": False, "blocked": True, "error": error_message}
+
+    request_path = "/api/v5/trade/order"
+    method = "POST"
+    body = json.dumps(payload, separators=(",", ":"))
+
+    try:
+        headers = okx_headers(method, request_path, body)
+        response = requests.post(
+            f"{OKX_BASE_URL}{request_path}",
+            headers=headers,
+            data=body,
+            timeout=10
+        )
+
+        try:
+            response_payload = response.json()
+        except Exception:
+            response_payload = {"status_code": response.status_code, "text": response.text}
+
+        okx_code = str(response_payload.get("code")) if isinstance(response_payload, dict) else None
+        success = response.status_code == 200 and okx_code == "0"
+
+        log_okx_order(
+            cur, trade_id, symbol, okx_inst_id, action, side, direction,
+            False, payload, response_payload, success,
+            None if success else f"OKX order failed: {response_payload}"
+        )
+
+        if success:
+            print(f"✅ OKX LIVE ORDER SENT | {action.upper()} | {symbol}->{okx_inst_id} | size={payload.get('sz')}", flush=True)
+            send_telegram_alert(
+                f"✅ <b>OKX LIVE ORDER SENT</b>\n"
+                f"{action.upper()} | {symbol} → {okx_inst_id}\n"
+                f"Side: {side}\n"
+                f"Size: {payload.get('sz')}"
+            )
+        else:
+            print(f"❌ OKX LIVE ORDER FAILED | {action.upper()} | {symbol}->{okx_inst_id} | {response_payload}", flush=True)
+            send_telegram_alert(
+                f"❌ <b>OKX LIVE ORDER FAILED</b>\n"
+                f"{action.upper()} | {symbol} → {okx_inst_id}\n"
+                f"Response: {response_payload}"
+            )
+
+        return {
+            "success": success,
+            "dry_run": False,
+            "status_code": response.status_code,
+            "response": response_payload
+        }
+
+    except Exception as e:
+        error_message = str(e)
+        log_okx_order(
+            cur, trade_id, symbol, okx_inst_id, action, side, direction,
+            False, payload, None, False, error_message
+        )
+        return {"success": False, "dry_run": False, "error": error_message}
+
+# =========================
+# LEADERSHIP CONTEXT
+# =========================
+
+def get_leadership_context(cur, symbol):
+    ensure_signal_leadership_scores_table(cur)
+
+    cur.execute("""
+        SELECT
+            COUNT(*) FILTER (
+                WHERE future_peak_percent >= 0.75
+            ) AS prior_successes,
+
+            COUNT(*) FILTER (
+                WHERE future_peak_percent >= 2.00
+            ) AS prior_runners,
+
+            AVG(future_peak_percent) AS prior_avg_peak
+
+        FROM signal_leadership_scores
+
+        WHERE symbol = %s
+          AND signal_timestamp >= NOW() - (%s || ' minutes')::INTERVAL
+          AND signal_timestamp < NOW()
+    """, (symbol, LEADERSHIP_LOOKBACK_MINUTES))
+
+    row = cur.fetchone() or (0, 0, 0)
+
+    return {
+        "prior_successes": row[0] or 0,
+        "prior_runners": row[1] or 0,
+        "prior_avg_peak": float(row[2] or 0)
+    }
+
+def passes_leadership_engine(cur, symbol, momentum, trend):
+    if not ENABLE_LEADERSHIP_ENGINE:
+        return False, None, "leadership_engine_disabled"
+
+    if trend < LEADERSHIP_MIN_TREND:
+        return False, None, "leadership_trend_too_low"
+
+    if momentum <= LEADERSHIP_MIN_MOMENTUM:
+        return False, None, "leadership_momentum_not_positive"
+
+    leadership = get_leadership_context(cur, symbol)
+    prior_avg_peak = leadership["prior_avg_peak"]
+
+    if prior_avg_peak < LEADERSHIP_MIN_PRIOR_AVG_PEAK:
+        return False, leadership, "leadership_gate_failed"
+
+    return True, leadership, "leadership_allowed"
+
+def classify_leadership_tier(prior_avg_peak):
+    if prior_avg_peak >= MONSTER_MIN_PRIOR_PEAK:
+        return "LEADERSHIP_MONSTER"
+    if prior_avg_peak >= AGGRESSIVE_MIN_PRIOR_PEAK:
+        return "LEADERSHIP_AGGRESSIVE"
+    return "LEADERSHIP_CORE"
+
+def get_trade_size_for_quality(entry_quality):
+    if entry_quality == "LEADERSHIP_MONSTER":
+        return MONSTER_TRADE_SIZE_GBP
+    if entry_quality == "LEADERSHIP_AGGRESSIVE":
+        return AGGRESSIVE_TRADE_SIZE_GBP
+    return CORE_TRADE_SIZE_GBP
+
+def get_trade_size_quote_for_quality(entry_quality):
+    return get_trade_size_for_quality(entry_quality)
+
+# =========================
+# TRADE HELPERS
+# =========================
+
+def log_trade_event(cur, trade_id, symbol, event_type, price, pnl_percent,
+                    peak_pnl_percent, minutes_in_trade, momentum, trend, is_entry=False):
+    cur.execute("""
+        INSERT INTO trade_events (
+            trade_id,
+            symbol,
+            event_time,
+            event_type,
+            price,
+            pnl_percent,
+            peak_pnl_percent,
+            minutes_in_trade,
+            momentum,
+            trend,
+            is_entry
+        )
+        VALUES (%s,%s,NOW(),%s,%s,%s,%s,%s,%s,%s,%s)
+    """, (
+        str(trade_id),
+        symbol,
+        event_type,
+        price,
+        pnl_percent,
+        peak_pnl_percent,
+        minutes_in_trade,
+        momentum,
+        trend,
+        is_entry
+    ))
+
+def open_trade(cur, symbol, direction, price, momentum, trend, quality,
+               signal_id, signal_time, leadership_context):
     cur.execute("""
         INSERT INTO bot_trades_v4 (
             symbol,
@@ -385,20 +945,9 @@ def open_trade(
             entry_quality,
             peak_pnl_percent,
             signal_id,
-            signal_timestamp,
-            leadership_prior_successes,
-            leadership_prior_runners,
-            leadership_prior_avg_peak
+            signal_timestamp
         )
-        VALUES (
-            %s,%s,%s,
-            'OPEN',
-            NOW(),
-            %s,%s,%s,%s,
-            0,
-            %s,%s,
-            %s,%s,%s
-        )
+        VALUES (%s,%s,%s,'OPEN',NOW(),%s,%s,%s,%s,0,%s,%s)
         RETURNING id
     """, (
         symbol,
@@ -409,13 +958,164 @@ def open_trade(
         trend,
         quality,
         signal_id,
-        signal_time,
-        leadership_context["prior_successes"],
-        leadership_context["prior_runners"],
-        leadership_context["prior_avg_peak"]
+        signal_time
     ))
 
-    return cur.fetchone()[0]
+    trade_id = cur.fetchone()[0]
+
+    safe_update_trade_telemetry(cur, trade_id, {
+        "entry_architecture": quality,
+        "trade_size_gbp": get_trade_size_for_quality(quality),
+        "dynamic_trade_size_gbp": get_trade_size_for_quality(quality),
+        "leadership_prior_successes": leadership_context.get("prior_successes"),
+        "leadership_prior_runners": leadership_context.get("prior_runners"),
+        "leadership_prior_avg_peak": leadership_context.get("prior_avg_peak"),
+        "leadership_tier": quality,
+        "leadership_mode": quality,
+        "leadership_score": leadership_context.get("prior_avg_peak")
+    })
+
+    try:
+        log_trade_event(
+            cur,
+            trade_id,
+            symbol,
+            "entry",
+            price,
+            0,
+            0,
+            0,
+            momentum,
+            trend,
+            True
+        )
+    except Exception as e:
+        print(f"⚠️ trade_events entry log failed: {e}", flush=True)
+
+    return trade_id
+
+# =========================
+# SIGNAL LEADERSHIP SCORER
+# =========================
+
+@app.route("/score_signal_leadership", methods=["GET"])
+def score_signal_leadership():
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        ensure_signal_leadership_scores_table(cur)
+
+        cur.execute("""
+            SELECT
+                s.id,
+                s.symbol,
+                s.timestamp,
+                s.price,
+                s.momentum,
+                s.trend
+
+            FROM signals_raw s
+            LEFT JOIN signal_leadership_scores sls
+                ON sls.signal_id = s.id
+
+            WHERE sls.signal_id IS NULL
+              AND s.timestamp <= NOW() - (%s || ' minutes')::INTERVAL
+              AND s.decision = 'LONG'
+              AND s.trend >= %s
+              AND s.momentum > %s
+
+            ORDER BY s.timestamp
+            LIMIT %s
+        """, (
+            LEADERSHIP_SIGNAL_FORWARD_MINUTES,
+            LEADERSHIP_MIN_TREND,
+            LEADERSHIP_MIN_MOMENTUM,
+            LEADERSHIP_SCORER_LIMIT
+        ))
+
+        signals = cur.fetchall()
+        scored_count = 0
+        skipped_count = 0
+
+        for signal_id, symbol, signal_timestamp, price, momentum, trend in signals:
+            cur.execute("""
+                SELECT
+                    MAX(price) AS future_max_price,
+                    MIN(price) AS future_min_price
+                FROM signals_raw
+                WHERE symbol = %s
+                  AND timestamp > %s
+                  AND timestamp <= %s + (%s || ' minutes')::INTERVAL
+            """, (
+                symbol,
+                signal_timestamp,
+                signal_timestamp,
+                LEADERSHIP_SIGNAL_FORWARD_MINUTES
+            ))
+
+            future_max_price, future_min_price = cur.fetchone() or (None, None)
+
+            if future_max_price is None or future_min_price is None or not price:
+                skipped_count += 1
+                continue
+
+            price_f = float(price)
+            future_max_f = float(future_max_price)
+            future_min_f = float(future_min_price)
+
+            if price_f <= 0:
+                skipped_count += 1
+                continue
+
+            future_peak_percent = ((future_max_f - price_f) / price_f) * 100
+            future_worst_percent = ((future_min_f - price_f) / price_f) * 100
+
+            cur.execute("""
+                INSERT INTO signal_leadership_scores (
+                    signal_id,
+                    symbol,
+                    signal_timestamp,
+                    price,
+                    momentum,
+                    trend,
+                    future_max_price,
+                    future_min_price,
+                    future_peak_percent,
+                    future_worst_percent
+                )
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (signal_id) DO NOTHING
+            """, (
+                signal_id,
+                symbol,
+                signal_timestamp,
+                price,
+                momentum,
+                trend,
+                future_max_price,
+                future_min_price,
+                future_peak_percent,
+                future_worst_percent
+            ))
+
+            scored_count += 1
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        print(f"🧠 SIGNAL LEADERSHIP SCORED | scored={scored_count} skipped={skipped_count}", flush=True)
+
+        return jsonify({
+            "status": "ok",
+            "version": DATA_VERSION,
+            "scored_signals": scored_count,
+            "skipped_signals": skipped_count
+        }), 200
+
+    except Exception as e:
+        print("❌ SIGNAL LEADERSHIP ERROR:", e, flush=True)
+        return jsonify({"error": str(e), "version": DATA_VERSION}), 400
 
 # =========================
 # WEBHOOK
@@ -423,34 +1123,35 @@ def open_trade(
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
+    conn = None
+    cur = None
 
     try:
-
         print(f"\n📩 WEBHOOK HIT | {DATA_VERSION}", flush=True)
 
         data = request.get_json(force=True)
 
         symbol = data.get("symbol")
-
         price = float(data.get("price", 0) or 0)
-
-        decision = (
-            data.get("decision_model") or ""
-        ).upper()
+        decision = (data.get("decision_model") or "").upper()
 
         momentum = float(data.get("momentum_strength") or 0)
-
         trend = float(data.get("trend_strength") or 0)
+
+        if decision in ["", "NONE", "NULL", "UPDATE"]:
+            decision = None
 
         now = datetime.utcnow()
 
         conn = get_db()
         cur = conn.cursor()
 
-        # =========================
-        # RAW SIGNAL STORAGE
-        # =========================
+        if ENABLE_ORDER_LOGGING:
+            ensure_okx_order_log_table(cur)
 
+        ensure_signal_leadership_scores_table(cur)
+
+        # ================= RAW SIGNAL — ALWAYS STORE =================
         cur.execute("""
             INSERT INTO signals_raw (
                 symbol,
@@ -473,18 +1174,14 @@ def webhook():
 
         signal_id, signal_time = cur.fetchone()
 
-        # =========================
-        # ENTRY ENGINE
-        # =========================
-
+        # ================= ENTRY ENGINE =================
         entry_allowed = False
         leadership_context = None
         entry_quality = None
         block_reason = None
 
         if decision == "LONG":
-
-            entry_allowed, leadership_context = passes_leadership_engine(
+            entry_allowed, leadership_context, block_reason = passes_leadership_engine(
                 cur,
                 symbol,
                 momentum,
@@ -492,96 +1189,107 @@ def webhook():
             )
 
             if entry_allowed:
+                entry_quality = classify_leadership_tier(leadership_context["prior_avg_peak"])
 
-                entry_quality = classify_leadership_tier(
-                    leadership_context["prior_avg_peak"]
-                )
-
-                cur.execute("""
-                    SELECT COUNT(*)
-                    FROM bot_trades_v4
-                    WHERE status = 'OPEN'
-                      AND COALESCE(is_shadow, FALSE) = FALSE
-                """)
-
-                open_count = cur.fetchone()[0] or 0
-
+                open_count = get_live_real_open_count(cur)
                 if open_count >= MAX_OPEN_TRADES:
                     entry_allowed = False
                     block_reason = "max_open_trades"
 
                 if entry_allowed and ENABLE_SAME_SYMBOL_STACKING_LIMIT:
-
-                    cur.execute("""
-                        SELECT COUNT(*)
-                        FROM bot_trades_v4
-                        WHERE status = 'OPEN'
-                          AND COALESCE(is_shadow, FALSE) = FALSE
-                          AND symbol = %s
-                    """, (symbol,))
-
-                    same_symbol_count = cur.fetchone()[0] or 0
+                    same_symbol_count = get_open_same_symbol_real_count(cur, symbol)
 
                     if same_symbol_count >= MAX_SAME_SYMBOL_OPEN:
                         entry_allowed = False
                         block_reason = "max_same_symbol_open"
 
-            else:
-                block_reason = "leadership_gate_failed"
-
-        # =========================
-        # ENTRY EXECUTION
-        # =========================
-
-        if entry_allowed:
-
-            trade_id = open_trade(
-                cur,
-                symbol,
-                "LONG",
-                price,
-                momentum,
-                trend,
-                entry_quality,
-                signal_id,
-                signal_time,
-                leadership_context
-            )
-
-            trade_size = get_trade_size_for_quality(entry_quality)
-
-            print(
-                f"🚀 OPEN REAL | {symbol} | "
-                f"{entry_quality} | "
-                f"size=£{trade_size} | "
-                f"prior_avg_peak={round(leadership_context['prior_avg_peak'],3)}",
-                flush=True
-            )
-
-            send_telegram_alert(
-                f"🚀 <b>LEADERSHIP ENTRY</b>\n"
-                f"{symbol}\n"
-                f"Tier: {entry_quality}\n"
-                f"Size: £{trade_size}\n"
-                f"Trend: {fmt_num(trend)}\n"
-                f"Momentum: {fmt_num(momentum)}\n"
-                f"Prior avg peak: {fmt_num(leadership_context['prior_avg_peak'])}%\n"
-                f"Prior runners: {leadership_context['prior_runners']}\n"
-                f"Trade ID: {trade_id}"
-            )
-
+        elif decision == "SHORT":
+            block_reason = "shorts_disabled_v6_1_long_only"
         else:
+            block_reason = None
 
+        # ================= UPDATE RAW SIGNAL INTELLIGENCE =================
+        try:
+            cur.execute("""
+                UPDATE signals_raw
+                SET
+                    entry_allowed = %s,
+                    block_reason = %s
+                WHERE id = %s
+            """, (
+                entry_allowed,
+                block_reason,
+                signal_id
+            ))
+        except Exception as e:
+            print(f"⚠️ signals_raw intelligence update skipped: {e}", flush=True)
+
+        # ================= REAL ENTRY EXECUTION =================
+        if decision in ["LONG", "SHORT"]:
+            if entry_allowed:
+                trade_id = open_trade(
+                    cur,
+                    symbol,
+                    "LONG",
+                    price,
+                    momentum,
+                    trend,
+                    entry_quality,
+                    signal_id,
+                    signal_time,
+                    leadership_context
+                )
+
+                entry_trade_size = get_trade_size_for_quality(entry_quality)
+                entry_quote_size = get_trade_size_quote_for_quality(entry_quality)
+
+                print(
+                    f"🚀 OPEN REAL | {symbol} | LONG | id={trade_id} | "
+                    f"tier={entry_quality} | size=£{entry_trade_size} | "
+                    f"prior_avg_peak={round(leadership_context.get('prior_avg_peak', 0), 3)} | "
+                    f"prior_runners={leadership_context.get('prior_runners')}",
+                    flush=True
+                )
+
+                send_telegram_alert(
+                    f"🚀 <b>LEADERSHIP ENTRY</b>\n"
+                    f"{symbol} | LONG\n"
+                    f"Tier: {entry_quality}\n"
+                    f"Size: £{entry_trade_size}\n"
+                    f"Entry: {price}\n"
+                    f"Trend: {fmt_num(trend)}\n"
+                    f"Momentum: {fmt_num(momentum)}\n"
+                    f"Prior avg peak: {fmt_num(leadership_context.get('prior_avg_peak'))}%\n"
+                    f"Prior successes: {leadership_context.get('prior_successes')}\n"
+                    f"Prior runners: {leadership_context.get('prior_runners')}\n"
+                    f"Trade ID: {trade_id}"
+                )
+
+                okx_place_market_order(
+                    cur=cur,
+                    trade_id=trade_id,
+                    symbol=symbol,
+                    direction="LONG",
+                    action="entry",
+                    price=price,
+                    entry_price=price,
+                    trade_size_quote=entry_quote_size
+                )
+
+            else:
+                print(
+                    f"⛔ BLOCKED | {symbol} | {decision} | "
+                    f"mom={round(momentum,3)} trend={round(trend,3)} | "
+                    f"reason={block_reason}",
+                    flush=True
+                )
+        else:
             print(
-                f"⛔ BLOCKED | {symbol} | "
-                f"reason={block_reason}",
+                f"⛔ BLOCKED | {symbol} | reason=None",
                 flush=True
             )
 
-        # =========================
-        # EXIT ENGINE
-        # =========================
-
+        # ================= EXIT ENGINE =================
         cur.execute("""
             SELECT
                 id,
@@ -590,6 +1298,7 @@ def webhook():
                 entry_price,
                 opened_at,
                 peak_pnl_percent,
+                COALESCE(is_shadow, FALSE) AS is_shadow,
                 entry_quality
             FROM bot_trades_v4
             WHERE status = 'OPEN'
@@ -598,139 +1307,143 @@ def webhook():
 
         open_trades = cur.fetchall()
 
-        for (
-            tid,
-            sym,
-            direction,
-            entry_price,
-            opened_at,
-            peak_pnl,
-            entry_quality
-        ) in open_trades:
-
+        for (tid, sym, direction, entry_price, opened_at, peak_pnl, is_shadow, entry_quality) in open_trades:
             if sym != symbol:
                 continue
 
+            if direction != "LONG":
+                continue
+
             pnl = ((price - entry_price) / entry_price)
-
             pnl_percent = pnl * 100
-
             mins = (now - opened_at).total_seconds() / 60
-
             current_peak = peak_pnl or 0
 
             if pnl_percent > current_peak:
-
                 current_peak = pnl_percent
+                if column_exists(cur, "bot_trades_v4", "peak_time_minutes"):
+                    cur.execute("""
+                        UPDATE bot_trades_v4
+                        SET peak_pnl_percent = %s,
+                            peak_time_minutes = %s
+                        WHERE id = %s
+                    """, (current_peak, mins, tid))
+                else:
+                    cur.execute("""
+                        UPDATE bot_trades_v4
+                        SET peak_pnl_percent = %s
+                        WHERE id = %s
+                    """, (current_peak, tid))
 
-                cur.execute("""
-                    UPDATE bot_trades_v4
-                    SET peak_pnl_percent = %s
-                    WHERE id = %s
-                """, (
+            try:
+                log_trade_event(
+                    cur,
+                    tid,
+                    sym,
+                    "update",
+                    price,
+                    pnl_percent,
                     current_peak,
-                    tid
-                ))
+                    mins,
+                    momentum,
+                    trend,
+                    False
+                )
+            except Exception as e:
+                print(f"⚠️ trade_events update log failed: {e}", flush=True)
 
             close_reason = None
-
+            exit_architecture = None
+            decay_triggered = False
+            adaptive_exit_triggered = False
+            slot_recycle_candidate = False
             drawdown_from_peak = current_peak - pnl_percent
 
-            # =========================
-            # DEAD LEADER RECYCLER
-            # =========================
-
             if (
-                mins >= DEAD_LEADER_MINUTES
+                not close_reason
+                and ENABLE_DEAD_LEADER_RECYCLER
+                and mins >= DEAD_LEADER_MINUTES
                 and current_peak < DEAD_LEADER_MAX_PEAK
                 and trend < DEAD_LEADER_TREND_THRESHOLD
             ):
                 close_reason = "dead_leader_recycle_exit"
+                exit_architecture = "leadership_dead_recycler"
+                decay_triggered = True
+                slot_recycle_candidate = True
 
-            # =========================
-            # ADAPTIVE WINNER PROTECTION
-            # =========================
-
-            if not close_reason:
-
+            if (
+                not close_reason
+                and ENABLE_ADAPTIVE_WINNER_PROTECTION
+            ):
                 if (
                     current_peak >= ADAPTIVE_LARGE_PEAK_TRIGGER
                     and trend < ADAPTIVE_TREND_WEAK_THRESHOLD
                     and drawdown_from_peak >= ADAPTIVE_LARGE_DRAWDOWN
                 ):
                     close_reason = "adaptive_winner_protect_large"
+                    exit_architecture = "leadership_adaptive_winner_protection"
+                    adaptive_exit_triggered = True
 
                 elif (
                     current_peak >= ADAPTIVE_MEDIUM_PEAK_TRIGGER
+                    and current_peak < ADAPTIVE_LARGE_PEAK_TRIGGER
                     and trend < ADAPTIVE_TREND_WEAK_THRESHOLD
                     and drawdown_from_peak >= ADAPTIVE_MEDIUM_DRAWDOWN
                 ):
                     close_reason = "adaptive_winner_protect_medium"
+                    exit_architecture = "leadership_adaptive_winner_protection"
+                    adaptive_exit_triggered = True
 
                 elif (
                     current_peak >= ADAPTIVE_SMALL_PEAK_TRIGGER
+                    and current_peak < ADAPTIVE_MEDIUM_PEAK_TRIGGER
                     and trend < ADAPTIVE_TREND_WEAK_THRESHOLD
                     and drawdown_from_peak >= ADAPTIVE_SMALL_DRAWDOWN
                 ):
                     close_reason = "adaptive_winner_protect_small"
+                    exit_architecture = "leadership_adaptive_winner_protection"
+                    adaptive_exit_triggered = True
 
-            # =========================
-            # PROFIT LOCKS
-            # =========================
-
-            if not close_reason:
-
+            if not close_reason and ENABLE_PROFIT_LOCKS:
                 if current_peak >= LONG_LOCK_4_TRIGGER:
-
                     lock_floor = current_peak * LONG_LOCK_4_RATIO
-
                     if pnl_percent <= lock_floor:
                         close_reason = "long_lock_4"
+                        exit_architecture = "long_profit_lock"
 
                 elif current_peak >= LONG_LOCK_3_TRIGGER:
-
                     lock_floor = current_peak * LONG_LOCK_3_RATIO
-
                     if pnl_percent <= lock_floor:
                         close_reason = "long_lock_3"
+                        exit_architecture = "long_profit_lock"
 
                 elif current_peak >= LONG_LOCK_2_TRIGGER:
-
                     lock_floor = current_peak * LONG_LOCK_2_RATIO
-
                     if pnl_percent <= lock_floor:
                         close_reason = "long_lock_2"
+                        exit_architecture = "long_profit_lock"
 
                 elif current_peak >= LONG_LOCK_1_TRIGGER:
-
                     lock_floor = current_peak * LONG_LOCK_1_RATIO
-
                     if pnl_percent <= lock_floor:
                         close_reason = "long_lock_1"
+                        exit_architecture = "long_profit_lock"
 
-            # =========================
-            # HARD STOP
-            # =========================
+            if not close_reason and current_peak >= LONG_NO_RED_AFTER_WIN_TRIGGER and pnl_percent < 0:
+                close_reason = "long_gave_back_winner"
+                exit_architecture = "long_no_red_after_win"
 
             if not close_reason and pnl_percent <= LONG_HARD_STOP:
                 close_reason = "long_hard_stop"
-
-            # =========================
-            # CLOSE TRADE
-            # =========================
+                exit_architecture = "long_hard_stop"
 
             if close_reason:
-
-                trade_size = get_trade_size_for_quality(entry_quality)
-
-                pnl_gbp = (
-                    pnl_percent / 100
-                ) * trade_size
+                trade_size_for_pnl = get_trade_size_for_quality(entry_quality)
+                pnl_gbp = (pnl_percent / 100) * trade_size_for_pnl
 
                 cur.execute("""
                     UPDATE bot_trades_v4
-                    SET
-                        status = 'CLOSED',
+                    SET status = 'CLOSED',
                         closed_at = NOW(),
                         close_price = %s,
                         pnl_percent = %s,
@@ -745,49 +1458,349 @@ def webhook():
                     tid
                 ))
 
+                safe_update_trade_telemetry(cur, tid, {
+                    "decay_triggered": decay_triggered,
+                    "decay_checked_at_minutes": mins if decay_triggered else None,
+                    "decay_peak_at_check": current_peak if decay_triggered else None,
+                    "decay_trend_at_check": trend if decay_triggered else None,
+                    "decay_momentum_at_check": momentum if decay_triggered else None,
+                    "slot_recycle_candidate": slot_recycle_candidate,
+                    "exit_architecture": exit_architecture,
+                    "adaptive_exit_triggered": adaptive_exit_triggered,
+                    "drawdown_from_peak_at_exit": drawdown_from_peak,
+                    "leadership_trend_at_exit": trend,
+                    "leadership_momentum_at_exit": momentum
+                })
+
+                try:
+                    log_trade_event(
+                        cur,
+                        tid,
+                        sym,
+                        f"exit_{close_reason}",
+                        price,
+                        pnl_percent,
+                        current_peak,
+                        mins,
+                        momentum,
+                        trend,
+                        False
+                    )
+                except Exception as e:
+                    print(f"⚠️ trade_events exit log failed: {e}", flush=True)
+
+                if has_successful_okx_live_entry(cur, tid):
+                    okx_place_market_order(
+                        cur=cur,
+                        trade_id=tid,
+                        symbol=sym,
+                        direction=direction,
+                        action="exit",
+                        price=price,
+                        entry_price=entry_price,
+                        trade_size_quote=get_trade_size_quote_for_quality(entry_quality)
+                    )
+                else:
+                    log_okx_exit_skip_no_live_entry(
+                        cur=cur,
+                        trade_id=tid,
+                        symbol=sym,
+                        direction=direction,
+                        price=price
+                    )
+
                 print(
-                    f"💰 CLOSED | {sym} | "
-                    f"{round(pnl_percent,3)}% | "
-                    f"peak={round(current_peak,3)} | "
-                    f"{close_reason}",
+                    f"💰 CLOSED REAL | {sym} | LONG | "
+                    f"{round(pnl_percent,3)}% | peak={round(current_peak,3)} | "
+                    f"dd_from_peak={round(drawdown_from_peak,3)} | {close_reason}",
                     flush=True
                 )
 
                 send_telegram_alert(
-                    f"💰 <b>CLOSED</b>\n"
-                    f"{sym}\n"
+                    f"💰 <b>CLOSED REAL</b>\n"
+                    f"{sym} | LONG\n"
                     f"PnL: {fmt_num(pnl_percent)}%\n"
                     f"Peak: {fmt_num(current_peak)}%\n"
-                    f"Reason: {close_reason}"
+                    f"Drawdown from peak: {fmt_num(drawdown_from_peak)}%\n"
+                    f"Trend at exit: {fmt_num(trend)}\n"
+                    f"Reason: {close_reason}\n"
+                    f"Exit architecture: {exit_architecture}"
                 )
 
         conn.commit()
-
         cur.close()
         conn.close()
 
+        return jsonify({"status": "ok", "version": DATA_VERSION}), 200
+
+    except Exception as e:
+        print("❌ ERROR:", e, flush=True)
+
+        try:
+            if conn:
+                conn.rollback()
+            if cur:
+                cur.close()
+            if conn:
+                conn.close()
+        except Exception:
+            pass
+
+        return jsonify({"error": str(e), "version": DATA_VERSION}), 400
+
+# =========================
+# TELEGRAM / STATUS ROUTES
+# =========================
+
+def require_summary_secret():
+    if not TELEGRAM_COMMAND_SECRET:
+        return True
+    return request.args.get("secret") == TELEGRAM_COMMAND_SECRET
+
+def build_telegram_health_message(cur):
+    cur.execute("""
+        SELECT
+            MAX(timestamp),
+            COUNT(*) FILTER (WHERE timestamp >= NOW() - INTERVAL '1 hour')
+        FROM signals_raw
+    """)
+    last_signal, signals_1h = cur.fetchone() or (None, 0)
+
+    cur.execute("""
+        SELECT
+            MAX(opened_at),
+            COUNT(*) FILTER (WHERE opened_at >= NOW() - INTERVAL '24 hours'),
+            COUNT(*) FILTER (WHERE status = 'OPEN' AND COALESCE(is_shadow, FALSE) = FALSE)
+        FROM bot_trades_v4
+        WHERE COALESCE(is_shadow, FALSE) = FALSE
+    """)
+    last_trade, trades_24h, open_real = cur.fetchone() or (None, 0, 0)
+
+    cur.execute("""
+        SELECT COUNT(*)
+        FROM signal_leadership_scores
+        WHERE scored_at >= NOW() - INTERVAL '24 hours'
+    """)
+    scored_24h = cur.fetchone()[0] or 0
+
+    return (
+        f"🩺 <b>Bot Health</b>\n"
+        f"Version: {DATA_VERSION}\n"
+        f"Engine: LEADERSHIP_SIGNAL_SCORED\n"
+        f"Live orders: {ENABLE_LIVE_ORDERS}\n"
+        f"Last signal: {last_signal}\n"
+        f"Signals 1h: {signals_1h}\n"
+        f"Last real trade: {last_trade}\n"
+        f"Real trades 24h: {trades_24h}\n"
+        f"Open real: {open_real}\n"
+        f"Scored leadership signals 24h: {scored_24h}\n"
+        f"Leadership threshold: {LEADERSHIP_MIN_PRIOR_AVG_PEAK}\n"
+        f"Max same symbol: {MAX_SAME_SYMBOL_OPEN}\n"
+        f"OKX tradable cache: {len(OKX_TRADABLE_SPOT_INST_IDS)} pairs"
+    )
+
+def build_telegram_summary_message(cur, hours=24):
+    cur.execute("""
+        WITH closed AS (
+            SELECT
+                entry_quality AS engine,
+                pnl_percent,
+                pnl_gbp,
+                peak_pnl_percent,
+                close_reason
+            FROM bot_trades_v4
+            WHERE closed_at >= NOW() - (%s || ' hours')::INTERVAL
+              AND COALESCE(is_shadow, FALSE) = FALSE
+              AND status = 'CLOSED'
+        )
+        SELECT
+            engine,
+            COUNT(*) AS trades,
+            COALESCE(ROUND(SUM(pnl_gbp)::numeric, 3), 0) AS pnl_gbp,
+            COALESCE(ROUND(AVG(pnl_percent)::numeric, 3), 0) AS avg_pnl,
+            COALESCE(ROUND(AVG(peak_pnl_percent)::numeric, 3), 0) AS avg_peak,
+            COUNT(*) FILTER (WHERE pnl_percent > 0) AS winners,
+            COUNT(*) FILTER (WHERE peak_pnl_percent >= 2.0) AS runners,
+            COUNT(*) FILTER (WHERE peak_pnl_percent >= 5.0) AS monsters
+        FROM closed
+        GROUP BY engine
+        ORDER BY engine
+    """, (hours,))
+    closed_rows = cur.fetchall()
+
+    cur.execute("""
+        SELECT
+            COUNT(*) FILTER (WHERE status = 'OPEN') AS open_total
+        FROM bot_trades_v4
+        WHERE COALESCE(is_shadow, FALSE) = FALSE
+    """)
+    open_total = (cur.fetchone() or (0,))[0] or 0
+
+    total_pnl = sum(float(r[2] or 0) for r in closed_rows)
+    total_trades = sum(int(r[1] or 0) for r in closed_rows)
+
+    lines = []
+    lines.append(f"📊 <b>Trading Bot {hours}h Summary</b>")
+    lines.append(f"Version: <b>{DATA_VERSION}</b>")
+    lines.append(f"Closed trades: <b>{total_trades}</b>")
+    lines.append(f"Realized PnL: <b>{fmt_money(total_pnl)}</b>")
+    lines.append(f"Open real: <b>{open_total}</b>")
+
+    if closed_rows:
+        lines.append("\n<b>Engine breakdown</b>")
+        for engine, trades, pnl_gbp, avg_pnl, avg_peak, winners, runners, monsters in closed_rows:
+            win_rate = (float(winners or 0) / float(trades or 1)) * 100
+            lines.append(
+                f"{engine}: {trades} trades | {fmt_money(pnl_gbp)} | avg {fmt_num(avg_pnl)}% | "
+                f"peak {fmt_num(avg_peak)}% | win {fmt_num(win_rate,1)}% | R {runners} M {monsters}"
+            )
+    else:
+        lines.append("\nNo closed real trades in this window.")
+
+    return "\n".join(lines)
+
+def handle_telegram_command(text):
+    cmd = (text or "").strip().lower().split()[0] if text else "/help"
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        ensure_signal_leadership_scores_table(cur)
+        if cmd in ["/status", "/daily", "/summary", "/pnl"]:
+            return build_telegram_summary_message(cur, 24)
+        if cmd == "/health":
+            return build_telegram_health_message(cur)
+        if cmd == "/help":
+            return (
+                "🤖 <b>Trading Bot Commands</b>\n"
+                "/status - rolling 24h summary\n"
+                "/daily - rolling 24h summary\n"
+                "/health - webhook/server health\n"
+                "/help - command list"
+            )
+        return "Unknown command. Send /help."
+    finally:
+        cur.close()
+        conn.close()
+
+def is_authorized_telegram_chat(chat_id):
+    if not TELEGRAM_CHAT_ID:
+        return False
+    return str(chat_id) == str(TELEGRAM_CHAT_ID)
+
+@app.route("/telegram_summary_24h", methods=["GET"])
+def telegram_summary_24h():
+    try:
+        if not require_summary_secret():
+            return jsonify({"error": "unauthorized"}), 403
+
+        conn = get_db()
+        cur = conn.cursor()
+        message = build_telegram_summary_message(cur, 24)
+        cur.close()
+        conn.close()
+
+        sent = send_telegram_alert(message)
+        return jsonify({"status": "ok", "version": DATA_VERSION, "sent": sent, "hours": 24}), 200
+
+    except Exception as e:
+        print("❌ TELEGRAM SUMMARY ERROR:", e, flush=True)
+        return jsonify({"error": str(e)}), 400
+
+@app.route("/telegram_webhook", methods=["POST"])
+def telegram_webhook():
+    try:
+        if not ENABLE_TELEGRAM_COMMANDS:
+            return jsonify({"status": "commands_disabled"}), 200
+
+        if TELEGRAM_WEBHOOK_SECRET:
+            supplied_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+            if supplied_secret != TELEGRAM_WEBHOOK_SECRET:
+                return jsonify({"error": "unauthorized"}), 403
+
+        payload = request.get_json(force=True) or {}
+        message = payload.get("message") or payload.get("edited_message") or {}
+        chat = message.get("chat") or {}
+        chat_id = chat.get("id")
+        text = message.get("text") or ""
+
+        if not is_authorized_telegram_chat(chat_id):
+            telegram_send_message(chat_id, "Unauthorized chat.")
+            return jsonify({"status": "unauthorized_chat"}), 200
+
+        response_text = handle_telegram_command(text)
+        telegram_send_message(chat_id, response_text)
+
+        return jsonify({"status": "ok"}), 200
+
+    except Exception as e:
+        print("❌ TELEGRAM WEBHOOK ERROR:", e, flush=True)
+        return jsonify({"error": str(e)}), 400
+
+@app.route("/telegram_test", methods=["GET"])
+def telegram_test():
+    try:
+        sent = send_telegram_alert(
+            f"📲 <b>Telegram test successful</b>\n"
+            f"Bot version: {DATA_VERSION}\n"
+            f"Live orders: {ENABLE_LIVE_ORDERS}\n"
+            f"Leadership threshold: {LEADERSHIP_MIN_PRIOR_AVG_PEAK}"
+        )
         return jsonify({
             "status": "ok",
-            "version": DATA_VERSION
+            "telegram_enabled": ENABLE_TELEGRAM_ALERTS,
+            "telegram_configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
+            "sent": sent
+        }), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+@app.route("/okx_tradability_status", methods=["GET"])
+def okx_tradability_status():
+    try:
+        force = request.args.get("force", "false").lower() == "true"
+        result = refresh_okx_tradable_spot_instruments(force=force)
+
+        return jsonify({
+            "status": "ok",
+            "version": DATA_VERSION,
+            "result": result,
+            "okx_execution": bool_status()
         }), 200
 
     except Exception as e:
+        print("❌ OKX TRADABILITY STATUS ERROR:", e, flush=True)
+        return jsonify({"error": str(e)}), 400
 
-        print("❌ ERROR:", e, flush=True)
-
-        return jsonify({
-            "error": str(e)
-        }), 400
-
-# =========================
-# HEALTH
-# =========================
+def bool_status():
+    return {
+        "DATA_VERSION": DATA_VERSION,
+        "MAX_OPEN_TRADES": MAX_OPEN_TRADES,
+        "MAX_SAME_SYMBOL_OPEN": MAX_SAME_SYMBOL_OPEN,
+        "ENABLE_LIVE_ORDERS": ENABLE_LIVE_ORDERS,
+        "ENABLE_ORDER_LOGGING": ENABLE_ORDER_LOGGING,
+        "MAX_LIVE_OPEN_TRADES": MAX_LIVE_OPEN_TRADES,
+        "CORE_TRADE_SIZE_GBP": CORE_TRADE_SIZE_GBP,
+        "AGGRESSIVE_TRADE_SIZE_GBP": AGGRESSIVE_TRADE_SIZE_GBP,
+        "MONSTER_TRADE_SIZE_GBP": MONSTER_TRADE_SIZE_GBP,
+        "LEADERSHIP_MIN_PRIOR_AVG_PEAK": LEADERSHIP_MIN_PRIOR_AVG_PEAK,
+        "LEADERSHIP_LOOKBACK_MINUTES": LEADERSHIP_LOOKBACK_MINUTES,
+        "LEADERSHIP_SIGNAL_FORWARD_MINUTES": LEADERSHIP_SIGNAL_FORWARD_MINUTES,
+        "OKX_BASE_URL": OKX_BASE_URL,
+        "OKX_TD_MODE": OKX_TD_MODE,
+        "ENABLE_OKX_TRADABILITY_FILTER": ENABLE_OKX_TRADABILITY_FILTER,
+        "OKX_TRADABLE_SPOT_COUNT": len(OKX_TRADABLE_SPOT_INST_IDS),
+        "OKX_TRADABILITY_CACHE_UPDATED_AT": OKX_TRADABILITY_CACHE_UPDATED_AT.isoformat() if OKX_TRADABILITY_CACHE_UPDATED_AT else None,
+        "OKX_TRADABILITY_LAST_ERROR": OKX_TRADABILITY_LAST_ERROR,
+        "ENABLE_TELEGRAM_ALERTS": ENABLE_TELEGRAM_ALERTS,
+        "ENABLE_TELEGRAM_COMMANDS": ENABLE_TELEGRAM_COMMANDS,
+        "TELEGRAM_CONFIGURED": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
+    }
 
 @app.route("/", methods=["GET"])
 def home():
-
     return jsonify({
         "status": "running",
         "version": DATA_VERSION,
-        "engine": "LEADERSHIP_PERSISTENCE"
+        "engine": "LEADERSHIP_SIGNAL_SCORED",
+        "okx_execution": bool_status()
     }), 200
