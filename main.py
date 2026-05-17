@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v6.1.1
-# TITLE: LEADERSHIP-PERSISTENCE MAIN ENGINE + 240M SIGNAL LEADERSHIP LOOKBACK + OKX EXECUTION + ADAPTIVE LIFECYCLE
+# VERSION: v6.1.2
+# TITLE: LEADERSHIP-PERSISTENCE MAIN ENGINE + 240M LOOKBACK + LEADERSHIP STATE HISTORY + OKX EXECUTION
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v6.1.1 SIGNAL-LEADERSHIP ENGINE + 240M LOOKBACK RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v6.1.2 SIGNAL-LEADERSHIP + STATE HISTORY RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -14,6 +14,7 @@ print("🔥🔥🔥 MAIN.PY v6.1.1 SIGNAL-LEADERSHIP ENGINE + 240M LOOKBACK RUNN
 # ✅ Keeps v6.0 leadership-persistence main engine
 # ✅ Adds rolling signal_leadership_scores table support
 # ✅ v6.1.1 changes leadership lookback default from 120m → 240m after rolling-window sweep
+# ✅ v6.1.2 adds leadership_state_history snapshots on every scorer cron run
 # ✅ Leadership context now uses scored historical signals, not only prior real trades
 # ✅ Restores OKX live/dry-run execution layer for entries and exits
 # ✅ Keeps dynamic sizing:
@@ -51,7 +52,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 MAX_OPEN_TRADES = int(os.environ.get("MAX_OPEN_TRADES", "5") or 5)
 MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 30)
 
-DATA_VERSION = "v6.1.1"
+DATA_VERSION = "v6.1.2"
 
 MAX_SAME_SYMBOL_OPEN = int(os.environ.get("MAX_SAME_SYMBOL_OPEN", "2") or 2)
 ENABLE_SAME_SYMBOL_STACKING_LIMIT = os.environ.get("ENABLE_SAME_SYMBOL_STACKING_LIMIT", "true").lower() == "true"
@@ -238,6 +239,34 @@ def ensure_signal_leadership_scores_table(cur):
     cur.execute("""
         CREATE INDEX IF NOT EXISTS idx_signal_leadership_symbol_time
         ON signal_leadership_scores(symbol, signal_timestamp)
+    """)
+
+
+def ensure_leadership_state_history_table(cur):
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS leadership_state_history (
+            id BIGSERIAL PRIMARY KEY,
+            snapshot_time TIMESTAMPTZ DEFAULT NOW(),
+            symbol TEXT,
+            leadership_score NUMERIC,
+            successful_signals INTEGER,
+            runners INTEGER,
+            monsters INTEGER,
+            avg_peak NUMERIC,
+            avg_worst NUMERIC,
+            tradable BOOLEAN,
+            leadership_mode TEXT
+        )
+    """)
+
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_leadership_state_history_symbol_time
+        ON leadership_state_history(symbol, snapshot_time)
+    """)
+
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_leadership_state_history_snapshot_time
+        ON leadership_state_history(snapshot_time)
     """)
 
 # =========================
@@ -995,6 +1024,109 @@ def open_trade(cur, symbol, direction, price, momentum, trend, quality,
 
     return trade_id
 
+
+def write_leadership_state_snapshots(cur):
+    """
+    Stores a point-in-time leadership map after each scorer run.
+    Uses the same live leadership logic as the bot:
+    - signal_leadership_scores
+    - rolling LEADERSHIP_LOOKBACK_MINUTES window
+    - leadership_score = avg future_peak_percent
+    """
+    ensure_leadership_state_history_table(cur)
+
+    cur.execute("""
+        WITH anchor AS (
+            SELECT MAX(signal_timestamp) AS latest_scored_time
+            FROM signal_leadership_scores
+        ),
+
+        leadership AS (
+            SELECT
+                s.symbol,
+
+                COUNT(*) FILTER (
+                    WHERE s.future_peak_percent >= 0.75
+                ) AS successful_signals,
+
+                COUNT(*) FILTER (
+                    WHERE s.future_peak_percent >= 2.00
+                ) AS runners,
+
+                COUNT(*) FILTER (
+                    WHERE s.future_peak_percent >= 5.00
+                ) AS monsters,
+
+                AVG(s.future_peak_percent) AS leadership_score,
+                AVG(s.future_peak_percent) AS avg_peak,
+                AVG(s.future_worst_percent) AS avg_worst
+
+            FROM signal_leadership_scores s
+            CROSS JOIN anchor a
+            WHERE a.latest_scored_time IS NOT NULL
+              AND s.signal_timestamp >= a.latest_scored_time - (%s || ' minutes')::INTERVAL
+              AND s.signal_timestamp <= a.latest_scored_time
+            GROUP BY s.symbol
+        ),
+
+        classified AS (
+            SELECT
+                symbol,
+                leadership_score,
+                successful_signals,
+                runners,
+                monsters,
+                avg_peak,
+                avg_worst,
+
+                CASE
+                    WHEN leadership_score >= %s THEN TRUE
+                    ELSE FALSE
+                END AS tradable,
+
+                CASE
+                    WHEN leadership_score >= 2.00 THEN 'LEADERSHIP_MONSTER'
+                    WHEN leadership_score >= 1.50 THEN 'LEADERSHIP_AGGRESSIVE'
+                    WHEN leadership_score >= %s THEN 'LEADERSHIP_CORE'
+                    WHEN leadership_score >= 0.90 THEN 'NEAR_TRIGGER'
+                    WHEN leadership_score >= 0.75 THEN 'WATCH'
+                    ELSE 'WEAK'
+                END AS leadership_mode
+
+            FROM leadership
+        )
+
+        INSERT INTO leadership_state_history (
+            symbol,
+            leadership_score,
+            successful_signals,
+            runners,
+            monsters,
+            avg_peak,
+            avg_worst,
+            tradable,
+            leadership_mode
+        )
+        SELECT
+            symbol,
+            leadership_score,
+            successful_signals,
+            runners,
+            monsters,
+            avg_peak,
+            avg_worst,
+            tradable,
+            leadership_mode
+        FROM classified
+    """, (
+        LEADERSHIP_LOOKBACK_MINUTES,
+        LEADERSHIP_MIN_PRIOR_AVG_PEAK,
+        LEADERSHIP_MIN_PRIOR_AVG_PEAK
+    ))
+
+    return cur.rowcount or 0
+
+
 # =========================
 # SIGNAL LEADERSHIP SCORER
 # =========================
@@ -1005,6 +1137,7 @@ def score_signal_leadership():
         conn = get_db()
         cur = conn.cursor()
         ensure_signal_leadership_scores_table(cur)
+        ensure_leadership_state_history_table(cur)
 
         cur.execute("""
             SELECT
@@ -1101,17 +1234,24 @@ def score_signal_leadership():
 
             scored_count += 1
 
+        snapshot_count = write_leadership_state_snapshots(cur)
+
         conn.commit()
         cur.close()
         conn.close()
 
-        print(f"🧠 SIGNAL LEADERSHIP SCORED | scored={scored_count} skipped={skipped_count}", flush=True)
+        print(
+            f"🧠 SIGNAL LEADERSHIP SCORED | scored={scored_count} "
+            f"skipped={skipped_count} snapshots={snapshot_count}",
+            flush=True
+        )
 
         return jsonify({
             "status": "ok",
             "version": DATA_VERSION,
             "scored_signals": scored_count,
-            "skipped_signals": skipped_count
+            "skipped_signals": skipped_count,
+            "leadership_snapshots": snapshot_count
         }), 200
 
     except Exception as e:
@@ -1584,6 +1724,17 @@ def build_telegram_health_message(cur):
     """)
     scored_24h = cur.fetchone()[0] or 0
 
+    try:
+        ensure_leadership_state_history_table(cur)
+        cur.execute("""
+            SELECT COUNT(*)
+            FROM leadership_state_history
+            WHERE snapshot_time >= NOW() - INTERVAL '24 hours'
+        """)
+        snapshots_24h = cur.fetchone()[0] or 0
+    except Exception:
+        snapshots_24h = 0
+
     return (
         f"🩺 <b>Bot Health</b>\n"
         f"Version: {DATA_VERSION}\n"
@@ -1595,6 +1746,7 @@ def build_telegram_health_message(cur):
         f"Real trades 24h: {trades_24h}\n"
         f"Open real: {open_real}\n"
         f"Scored leadership signals 24h: {scored_24h}\n"
+        f"Leadership snapshots 24h: {snapshots_24h}\n"
         f"Leadership threshold: {LEADERSHIP_MIN_PRIOR_AVG_PEAK}\n"
         f"Max same symbol: {MAX_SAME_SYMBOL_OPEN}\n"
         f"OKX tradable cache: {len(OKX_TRADABLE_SPOT_INST_IDS)} pairs"
