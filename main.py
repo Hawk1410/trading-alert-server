@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v6.1.3
-# TITLE: LEADERSHIP-PERSISTENCE MAIN ENGINE + SIZE SYNC + ENHANCED TELEGRAM OPS + OKX EXECUTION
+# VERSION: v6.1.4
+# TITLE: STABLE LEADERSHIP PHASE ENGINE + OKX PRE-ENTRY TRADABILITY + TELEGRAM OPS
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v6.1.3 SIZE-SYNC + ENHANCED TELEGRAM OPS RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v6.1.4 STABLE LEADERSHIP PHASE ENGINE RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -16,6 +16,7 @@ print("🔥🔥🔥 MAIN.PY v6.1.3 SIZE-SYNC + ENHANCED TELEGRAM OPS RUNNING �
 # ✅ v6.1.1 changes leadership lookback default from 120m → 240m after rolling-window sweep
 # ✅ v6.1.2 adds leadership_state_history snapshots on every scorer cron run
 # ✅ v6.1.3 hardens trade-size sync and improves Telegram operator visibility
+# ✅ v6.1.4 switches entries to stable-leadership phase gating and pre-entry OKX tradability filtering
 # ✅ Leadership context now uses scored historical signals, not only prior real trades
 # ✅ Restores OKX live/dry-run execution layer for entries and exits
 # ✅ Keeps dynamic sizing:
@@ -53,9 +54,9 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 MAX_OPEN_TRADES = int(os.environ.get("MAX_OPEN_TRADES", "5") or 5)
 MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 30)
 
-DATA_VERSION = "v6.1.3"
+DATA_VERSION = "v6.1.4"
 
-MAX_SAME_SYMBOL_OPEN = int(os.environ.get("MAX_SAME_SYMBOL_OPEN", "2") or 2)
+MAX_SAME_SYMBOL_OPEN = int(os.environ.get("MAX_SAME_SYMBOL_OPEN", "1") or 1)
 ENABLE_SAME_SYMBOL_STACKING_LIMIT = os.environ.get("ENABLE_SAME_SYMBOL_STACKING_LIMIT", "true").lower() == "true"
 
 # =========================
@@ -71,6 +72,32 @@ LEADERSHIP_SCORER_LIMIT = int(os.environ.get("LEADERSHIP_SCORER_LIMIT", "500") o
 LEADERSHIP_MIN_TREND = float(os.environ.get("LEADERSHIP_MIN_TREND", "0.20") or 0.20)
 LEADERSHIP_MIN_MOMENTUM = float(os.environ.get("LEADERSHIP_MIN_MOMENTUM", "0.00") or 0.00)
 LEADERSHIP_MIN_PRIOR_AVG_PEAK = float(os.environ.get("LEADERSHIP_MIN_PRIOR_AVG_PEAK", "1.25") or 1.25)
+
+# v6.1.4 phase gating:
+# Live data showed explosive score acceleration was climax/exhaustion.
+# Preferred entry state is stable dominant leadership.
+ENABLE_STABLE_LEADERSHIP_PHASE_FILTER = os.environ.get(
+    "ENABLE_STABLE_LEADERSHIP_PHASE_FILTER",
+    "true"
+).lower() == "true"
+
+STABLE_LEADER_MIN_SCORE = float(os.environ.get("STABLE_LEADER_MIN_SCORE", "2.0") or 2.0)
+STABLE_LEADER_DELTA_MIN = float(os.environ.get("STABLE_LEADER_DELTA_MIN", "-0.20") or -0.20)
+STABLE_LEADER_DELTA_MAX = float(os.environ.get("STABLE_LEADER_DELTA_MAX", "0.20") or 0.20)
+
+# Explicitly avoid late-stage blowoff/climax leadership.
+CLIMAX_LEADER_DELTA_BLOCK = float(os.environ.get("CLIMAX_LEADER_DELTA_BLOCK", "1.0") or 1.0)
+
+# Keep emerging-leader live trading off until larger samples validate it.
+ENABLE_EMERGING_LEADER_ENTRIES = os.environ.get(
+    "ENABLE_EMERGING_LEADER_ENTRIES",
+    "false"
+).lower() == "true"
+EMERGING_LEADER_MIN_SCORE = float(os.environ.get("EMERGING_LEADER_MIN_SCORE", "1.50") or 1.50)
+EMERGING_LEADER_MAX_SCORE = float(os.environ.get("EMERGING_LEADER_MAX_SCORE", "2.00") or 2.00)
+EMERGING_LEADER_DELTA_MIN = float(os.environ.get("EMERGING_LEADER_DELTA_MIN", "0.20") or 0.20)
+EMERGING_LEADER_DELTA_MAX = float(os.environ.get("EMERGING_LEADER_DELTA_MAX", "0.50") or 0.50)
+
 
 # Dynamic sizing tiers.
 CORE_TRADE_SIZE_GBP = float(os.environ.get("CORE_TRADE_SIZE_GBP", "10") or 10)
@@ -865,33 +892,123 @@ def okx_place_market_order(cur, trade_id, symbol, direction, action, price=None,
 # =========================
 
 def get_leadership_context(cur, symbol):
-    ensure_signal_leadership_scores_table(cur)
+    """
+    v6.1.4 source of truth for live entry:
+    leadership_state_history latest snapshot + 30m delta.
+
+    Keeps legacy keys prior_successes/prior_runners/prior_avg_peak so the rest
+    of the bot, DB insert, sizing, and Telegram remain compatible.
+    """
+    ensure_leadership_state_history_table(cur)
 
     cur.execute("""
+        WITH latest AS (
+            SELECT
+                symbol,
+                snapshot_time,
+                leadership_score,
+                successful_signals,
+                runners,
+                monsters,
+                avg_peak,
+                avg_worst,
+                leadership_mode
+            FROM leadership_state_history
+            WHERE symbol = %s
+            ORDER BY snapshot_time DESC
+            LIMIT 1
+        )
         SELECT
-            COUNT(*) FILTER (
-                WHERE future_peak_percent >= 0.75
-            ) AS prior_successes,
+            l.symbol,
+            l.snapshot_time,
+            l.leadership_score,
+            l.successful_signals,
+            l.runners,
+            l.monsters,
+            l.avg_peak,
+            l.avg_worst,
+            l.leadership_mode,
+            (
+                SELECT p.leadership_score
+                FROM leadership_state_history p
+                WHERE p.symbol = l.symbol
+                  AND p.snapshot_time <= l.snapshot_time - INTERVAL '30 minutes'
+                ORDER BY p.snapshot_time DESC
+                LIMIT 1
+            ) AS score_30m_ago
+        FROM latest l
+    """, (symbol,))
 
-            COUNT(*) FILTER (
-                WHERE future_peak_percent >= 2.00
-            ) AS prior_runners,
+    row = cur.fetchone()
 
-            AVG(future_peak_percent) AS prior_avg_peak
+    if not row:
+        return {
+            "prior_successes": 0,
+            "prior_runners": 0,
+            "prior_avg_peak": 0.0,
+            "leadership_score": 0.0,
+            "score_30m_ago": None,
+            "delta_30m": None,
+            "leadership_phase": "NO_LEADERSHIP_SNAPSHOT",
+            "leadership_mode": None,
+            "avg_worst": None,
+            "snapshot_time": None
+        }
 
-        FROM signal_leadership_scores
+    (
+        _symbol,
+        snapshot_time,
+        leadership_score,
+        successful_signals,
+        runners,
+        monsters,
+        avg_peak,
+        avg_worst,
+        leadership_mode,
+        score_30m_ago
+    ) = row
 
-        WHERE symbol = %s
-          AND signal_timestamp >= NOW() - (%s || ' minutes')::INTERVAL
-          AND signal_timestamp < NOW()
-    """, (symbol, LEADERSHIP_LOOKBACK_MINUTES))
+    leadership_score = float(leadership_score or 0)
+    score_30m_ago_float = float(score_30m_ago) if score_30m_ago is not None else None
+    delta_30m = (
+        leadership_score - score_30m_ago_float
+        if score_30m_ago_float is not None
+        else None
+    )
 
-    row = cur.fetchone() or (0, 0, 0)
+    if score_30m_ago_float is None:
+        phase = "NO_PRIOR"
+    elif (
+        leadership_score >= STABLE_LEADER_MIN_SCORE
+        and STABLE_LEADER_DELTA_MIN <= delta_30m <= STABLE_LEADER_DELTA_MAX
+    ):
+        phase = "STABLE_LEADER"
+    elif delta_30m > CLIMAX_LEADER_DELTA_BLOCK:
+        phase = "CLIMAX_LEADER"
+    elif (
+        ENABLE_EMERGING_LEADER_ENTRIES
+        and EMERGING_LEADER_MIN_SCORE <= leadership_score < EMERGING_LEADER_MAX_SCORE
+        and EMERGING_LEADER_DELTA_MIN <= delta_30m <= EMERGING_LEADER_DELTA_MAX
+    ):
+        phase = "EMERGING_LEADER"
+    elif leadership_score >= STABLE_LEADER_MIN_SCORE and delta_30m < STABLE_LEADER_DELTA_MIN:
+        phase = "DECAYING_LEADER"
+    else:
+        phase = "OTHER"
 
     return {
-        "prior_successes": row[0] or 0,
-        "prior_runners": row[1] or 0,
-        "prior_avg_peak": float(row[2] or 0)
+        "prior_successes": successful_signals or 0,
+        "prior_runners": runners or 0,
+        "prior_avg_peak": leadership_score,
+        "leadership_score": leadership_score,
+        "score_30m_ago": score_30m_ago_float,
+        "delta_30m": delta_30m,
+        "leadership_phase": phase,
+        "leadership_mode": leadership_mode,
+        "avg_peak": float(avg_peak or 0),
+        "avg_worst": float(avg_worst or 0),
+        "monsters": monsters or 0,
+        "snapshot_time": snapshot_time
     }
 
 def passes_leadership_engine(cur, symbol, momentum, trend):
@@ -905,12 +1022,37 @@ def passes_leadership_engine(cur, symbol, momentum, trend):
         return False, None, "leadership_momentum_not_positive"
 
     leadership = get_leadership_context(cur, symbol)
-    prior_avg_peak = leadership["prior_avg_peak"]
 
-    if prior_avg_peak < LEADERSHIP_MIN_PRIOR_AVG_PEAK:
-        return False, leadership, "leadership_gate_failed"
+    # Fallback legacy mode can be enabled in env if needed.
+    if not ENABLE_STABLE_LEADERSHIP_PHASE_FILTER:
+        prior_avg_peak = leadership["prior_avg_peak"]
+        if prior_avg_peak < LEADERSHIP_MIN_PRIOR_AVG_PEAK:
+            return False, leadership, "leadership_gate_failed"
+        return True, leadership, "leadership_allowed"
 
-    return True, leadership, "leadership_allowed"
+    phase = leadership.get("leadership_phase")
+    delta = leadership.get("delta_30m")
+    score = leadership.get("leadership_score", 0)
+
+    if phase == "NO_LEADERSHIP_SNAPSHOT":
+        return False, leadership, "leadership_no_snapshot"
+
+    if phase == "NO_PRIOR":
+        return False, leadership, "leadership_no_30m_prior"
+
+    if phase == "CLIMAX_LEADER":
+        return False, leadership, "leadership_climax_delta_blocked"
+
+    if phase == "DECAYING_LEADER":
+        return False, leadership, "leadership_decaying_blocked"
+
+    if phase == "STABLE_LEADER":
+        return True, leadership, "leadership_stable_allowed"
+
+    if phase == "EMERGING_LEADER":
+        return True, leadership, "leadership_emerging_allowed"
+
+    return False, leadership, "leadership_phase_not_tradable"
 
 def classify_leadership_tier(prior_avg_peak):
     if prior_avg_peak >= MONSTER_MIN_PRIOR_PEAK:
@@ -1521,10 +1663,17 @@ def webhook():
             if entry_allowed:
                 entry_quality = classify_leadership_tier(leadership_context["prior_avg_peak"])
 
-                open_count = get_live_real_open_count(cur)
-                if open_count >= MAX_OPEN_TRADES:
+                # v6.1.4: check OKX tradability BEFORE creating DB trade / consuming slot.
+                okx_tradable, okx_tradability_reason = is_okx_symbol_live_tradable(symbol)
+                if not okx_tradable:
                     entry_allowed = False
-                    block_reason = "max_open_trades"
+                    block_reason = f"okx_not_tradable_{okx_tradability_reason}"
+
+                if entry_allowed:
+                    open_count = get_live_real_open_count(cur)
+                    if open_count >= MAX_OPEN_TRADES:
+                        entry_allowed = False
+                        block_reason = "max_open_trades"
 
                 if entry_allowed and ENABLE_SAME_SYMBOL_STACKING_LIMIT:
                     same_symbol_count = get_open_same_symbol_real_count(cur, symbol)
@@ -1595,6 +1744,7 @@ def webhook():
                     f"Entry: {price}\n"
                     f"Trend/Momentum: {fmt_num(trend)} / {fmt_num(momentum)}\n"
                     f"Entry leadership score: {fmt_num(leadership_context.get('prior_avg_peak'))}\n"
+                    f"Phase: {leadership_context.get('leadership_phase')} | Δ30m: {fmt_num(leadership_context.get('delta_30m'))}\n"
                     f"Prior successes/runners: {leadership_context.get('prior_successes')} / {leadership_context.get('prior_runners')}\n"
                     f"Current {format_leadership_state_for_telegram(current_leadership_state)}\n"
                     f"Slots: {live_open_after_entry}/{MAX_OPEN_TRADES} | Same symbol: {same_symbol_after_entry}/{MAX_SAME_SYMBOL_OPEN}\n"
@@ -2153,6 +2303,12 @@ def bool_status():
         "AGGRESSIVE_TRADE_SIZE_GBP": AGGRESSIVE_TRADE_SIZE_GBP,
         "MONSTER_TRADE_SIZE_GBP": MONSTER_TRADE_SIZE_GBP,
         "LEADERSHIP_MIN_PRIOR_AVG_PEAK": LEADERSHIP_MIN_PRIOR_AVG_PEAK,
+        "ENABLE_STABLE_LEADERSHIP_PHASE_FILTER": ENABLE_STABLE_LEADERSHIP_PHASE_FILTER,
+        "STABLE_LEADER_MIN_SCORE": STABLE_LEADER_MIN_SCORE,
+        "STABLE_LEADER_DELTA_MIN": STABLE_LEADER_DELTA_MIN,
+        "STABLE_LEADER_DELTA_MAX": STABLE_LEADER_DELTA_MAX,
+        "CLIMAX_LEADER_DELTA_BLOCK": CLIMAX_LEADER_DELTA_BLOCK,
+        "ENABLE_EMERGING_LEADER_ENTRIES": ENABLE_EMERGING_LEADER_ENTRIES,
         "LEADERSHIP_LOOKBACK_MINUTES": LEADERSHIP_LOOKBACK_MINUTES,
         "LEADERSHIP_SIGNAL_FORWARD_MINUTES": LEADERSHIP_SIGNAL_FORWARD_MINUTES,
         "OKX_BASE_URL": OKX_BASE_URL,
