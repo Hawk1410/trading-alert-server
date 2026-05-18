@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v6.1.2
-# TITLE: LEADERSHIP-PERSISTENCE MAIN ENGINE + 240M LOOKBACK + LEADERSHIP STATE HISTORY + OKX EXECUTION
+# VERSION: v6.1.3
+# TITLE: LEADERSHIP-PERSISTENCE MAIN ENGINE + SIZE SYNC + ENHANCED TELEGRAM OPS + OKX EXECUTION
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v6.1.2 SIGNAL-LEADERSHIP + STATE HISTORY RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v6.1.3 SIZE-SYNC + ENHANCED TELEGRAM OPS RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -15,6 +15,7 @@ print("🔥🔥🔥 MAIN.PY v6.1.2 SIGNAL-LEADERSHIP + STATE HISTORY RUNNING �
 # ✅ Adds rolling signal_leadership_scores table support
 # ✅ v6.1.1 changes leadership lookback default from 120m → 240m after rolling-window sweep
 # ✅ v6.1.2 adds leadership_state_history snapshots on every scorer cron run
+# ✅ v6.1.3 hardens trade-size sync and improves Telegram operator visibility
 # ✅ Leadership context now uses scored historical signals, not only prior real trades
 # ✅ Restores OKX live/dry-run execution layer for entries and exits
 # ✅ Keeps dynamic sizing:
@@ -52,7 +53,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 MAX_OPEN_TRADES = int(os.environ.get("MAX_OPEN_TRADES", "5") or 5)
 MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 30)
 
-DATA_VERSION = "v6.1.2"
+DATA_VERSION = "v6.1.3"
 
 MAX_SAME_SYMBOL_OPEN = int(os.environ.get("MAX_SAME_SYMBOL_OPEN", "2") or 2)
 ENABLE_SAME_SYMBOL_STACKING_LIMIT = os.environ.get("ENABLE_SAME_SYMBOL_STACKING_LIMIT", "true").lower() == "true"
@@ -633,7 +634,7 @@ def okx_place_market_order(cur, trade_id, symbol, direction, action, price=None,
             "reason": "live_execution_only_supports_long_spot_orders"
         }
 
-    quote_size = float(trade_size_quote or CORE_TRADE_SIZE_GBP)
+    quote_size = float(trade_size_quote if trade_size_quote is not None else CORE_TRADE_SIZE_GBP)
 
     if action == "entry":
         side = "buy"
@@ -745,7 +746,8 @@ def okx_place_market_order(cur, trade_id, symbol, direction, action, price=None,
         response_payload = {
             "dry_run": True,
             "message": "OKX live orders disabled. No order sent.",
-            "payload": payload
+            "payload": payload,
+            "requested_quote_size": quote_size
         }
         log_okx_order(
             cur, trade_id, symbol, okx_inst_id, action, side, direction,
@@ -770,7 +772,8 @@ def okx_place_market_order(cur, trade_id, symbol, direction, action, price=None,
             "reason": tradability_reason,
             "symbol": symbol,
             "okx_inst_id": okx_inst_id,
-            "payload": payload
+            "payload": payload,
+            "requested_quote_size": quote_size
         }
         log_okx_order(
             cur, trade_id, symbol, okx_inst_id, action, side, direction,
@@ -925,6 +928,192 @@ def get_trade_size_for_quality(entry_quality):
 
 def get_trade_size_quote_for_quality(entry_quality):
     return get_trade_size_for_quality(entry_quality)
+
+
+def get_latest_leadership_state(cur, symbol):
+    try:
+        ensure_leadership_state_history_table(cur)
+        cur.execute("""
+            SELECT
+                leadership_score,
+                successful_signals,
+                runners,
+                monsters,
+                avg_peak,
+                avg_worst,
+                tradable,
+                leadership_mode,
+                snapshot_time
+            FROM leadership_state_history
+            WHERE symbol = %s
+            ORDER BY snapshot_time DESC
+            LIMIT 1
+        """, (symbol,))
+        row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            "leadership_score": float(row[0] or 0),
+            "successful_signals": row[1] or 0,
+            "runners": row[2] or 0,
+            "monsters": row[3] or 0,
+            "avg_peak": float(row[4] or 0),
+            "avg_worst": float(row[5] or 0),
+            "tradable": bool(row[6]),
+            "leadership_mode": row[7],
+            "snapshot_time": row[8]
+        }
+    except Exception as e:
+        print(f"⚠️ latest leadership state lookup failed for {symbol}: {e}", flush=True)
+        return None
+
+def format_leadership_state_for_telegram(state):
+    if not state:
+        return "Leadership: n/a"
+    return (
+        f"Leadership: {fmt_num(state.get('leadership_score'))} | "
+        f"{state.get('leadership_mode')} | "
+        f"S {state.get('successful_signals')} R {state.get('runners')} M {state.get('monsters')} | "
+        f"worst {fmt_num(state.get('avg_worst'))}%"
+    )
+
+def get_top_leaders_text(cur, limit=5):
+    try:
+        ensure_leadership_state_history_table(cur)
+        cur.execute("""
+            WITH latest AS (
+                SELECT MAX(snapshot_time) AS snapshot_time
+                FROM leadership_state_history
+            )
+            SELECT
+                l.symbol,
+                ROUND(l.leadership_score::numeric, 3),
+                l.leadership_mode,
+                l.successful_signals,
+                l.runners,
+                l.tradable
+            FROM leadership_state_history l
+            JOIN latest x
+              ON x.snapshot_time = l.snapshot_time
+            ORDER BY l.leadership_score DESC NULLS LAST
+            LIMIT %s
+        """, (limit,))
+        rows = cur.fetchall()
+        if not rows:
+            return "Top leaders: n/a"
+        parts = []
+        for symbol, score, mode, successes, runners, tradable in rows:
+            icon = "✅" if tradable else "👀"
+            parts.append(f"{icon} {symbol} {score} {mode} S{successes} R{runners}")
+        return "\n".join(parts)
+    except Exception as e:
+        print(f"⚠️ top leaders lookup failed: {e}", flush=True)
+        return "Top leaders: n/a"
+
+def get_latest_signal_state(cur, symbol):
+    try:
+        cur.execute("""
+            SELECT
+                timestamp,
+                price,
+                momentum,
+                trend,
+                decision,
+                block_reason
+            FROM signals_raw
+            WHERE symbol = %s
+            ORDER BY timestamp DESC
+            LIMIT 1
+        """, (symbol,))
+        row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            "timestamp": row[0],
+            "price": float(row[1] or 0),
+            "momentum": float(row[2] or 0),
+            "trend": float(row[3] or 0),
+            "decision": row[4],
+            "block_reason": row[5]
+        }
+    except Exception as e:
+        print(f"⚠️ latest signal lookup failed for {symbol}: {e}", flush=True)
+        return None
+
+def build_telegram_open_trades_message(cur):
+    cur.execute("""
+        WITH latest_price AS (
+            SELECT DISTINCT ON (symbol)
+                symbol,
+                price,
+                momentum,
+                trend,
+                decision,
+                block_reason,
+                timestamp AS latest_signal_time
+            FROM signals_raw
+            WHERE timestamp >= NOW() - INTERVAL '12 hours'
+            ORDER BY symbol, timestamp DESC
+        )
+        SELECT
+            b.id,
+            b.symbol,
+            b.entry_quality,
+            b.entry_price,
+            b.opened_at,
+            COALESCE(b.peak_pnl_percent, 0) AS peak_pnl_percent,
+            COALESCE(b.leadership_prior_avg_peak, b.leadership_score, 0) AS entry_leadership,
+            COALESCE(b.dynamic_trade_size_gbp, b.trade_size_gbp, 0) AS trade_size_gbp,
+            lp.price AS current_price,
+            lp.momentum AS latest_momentum,
+            lp.trend AS latest_trend,
+            lp.decision AS latest_decision,
+            lp.block_reason AS latest_block_reason,
+            lp.latest_signal_time
+        FROM bot_trades_v4 b
+        LEFT JOIN latest_price lp
+          ON lp.symbol = b.symbol
+        WHERE b.status = 'OPEN'
+          AND COALESCE(b.is_shadow, FALSE) = FALSE
+        ORDER BY b.opened_at
+        LIMIT 20
+    """)
+    rows = cur.fetchall()
+
+    if not rows:
+        return "📭 <b>Open Trades</b>\nNo open real trades."
+
+    lines = ["📈 <b>Open Trades</b>"]
+    for (
+        trade_id, symbol, quality, entry_price, opened_at, peak,
+        entry_leadership, trade_size_gbp, current_price, latest_momentum,
+        latest_trend, latest_decision, latest_block_reason, latest_signal_time
+    ) in rows:
+        if current_price and entry_price:
+            current_pnl = ((float(current_price) - float(entry_price)) / float(entry_price)) * 100
+        else:
+            current_pnl = None
+
+        age_mins = None
+        try:
+            now_utc = datetime.now(timezone.utc)
+            opened = opened_at if opened_at.tzinfo else opened_at.replace(tzinfo=timezone.utc)
+            age_mins = (now_utc - opened).total_seconds() / 60
+        except Exception:
+            pass
+
+        leadership_state = get_latest_leadership_state(cur, symbol)
+
+        lines.append(
+            f"\n<b>{symbol}</b> | {quality} | ID {trade_id}\n"
+            f"Size: {fmt_money(trade_size_gbp)} | Age: {fmt_num(age_mins,1)}m\n"
+            f"PnL: {fmt_num(current_pnl)}% | Peak: {fmt_num(peak)}%\n"
+            f"Entry leadership: {fmt_num(entry_leadership)} | Current {format_leadership_state_for_telegram(leadership_state)}\n"
+            f"Latest signal: mom {fmt_num(latest_momentum)} trend {fmt_num(latest_trend)} | "
+            f"{latest_decision or 'NONE'} / {latest_block_reason or 'no_reason'}"
+        )
+
+    return "\n".join(lines)
 
 # =========================
 # TRADE HELPERS
@@ -1392,18 +1581,25 @@ def webhook():
                     flush=True
                 )
 
+                live_open_after_entry = get_live_real_open_count(cur)
+                same_symbol_after_entry = get_open_same_symbol_real_count(cur, symbol)
+                current_leadership_state = get_latest_leadership_state(cur, symbol)
+                top_leaders_text = get_top_leaders_text(cur, 4)
+
                 send_telegram_alert(
                     f"🚀 <b>LEADERSHIP ENTRY</b>\n"
                     f"{symbol} | LONG\n"
-                    f"Tier: {entry_quality}\n"
-                    f"Size: £{entry_trade_size}\n"
+                    f"Tier: <b>{entry_quality}</b>\n"
+                    f"DB/Telegram size: <b>{fmt_money(entry_trade_size)}</b>\n"
+                    f"OKX quote requested: <b>{fmt_money(entry_quote_size)}</b>\n"
                     f"Entry: {price}\n"
-                    f"Trend: {fmt_num(trend)}\n"
-                    f"Momentum: {fmt_num(momentum)}\n"
-                    f"Prior avg peak: {fmt_num(leadership_context.get('prior_avg_peak'))}%\n"
-                    f"Prior successes: {leadership_context.get('prior_successes')}\n"
-                    f"Prior runners: {leadership_context.get('prior_runners')}\n"
-                    f"Trade ID: {trade_id}"
+                    f"Trend/Momentum: {fmt_num(trend)} / {fmt_num(momentum)}\n"
+                    f"Entry leadership score: {fmt_num(leadership_context.get('prior_avg_peak'))}\n"
+                    f"Prior successes/runners: {leadership_context.get('prior_successes')} / {leadership_context.get('prior_runners')}\n"
+                    f"Current {format_leadership_state_for_telegram(current_leadership_state)}\n"
+                    f"Slots: {live_open_after_entry}/{MAX_OPEN_TRADES} | Same symbol: {same_symbol_after_entry}/{MAX_SAME_SYMBOL_OPEN}\n"
+                    f"Trade ID: {trade_id}\n\n"
+                    f"<b>Top leaders now</b>\n{top_leaders_text}"
                 )
 
                 okx_place_market_order(
@@ -1657,15 +1853,23 @@ def webhook():
                     flush=True
                 )
 
+                exit_leadership_state = get_latest_leadership_state(cur, sym)
+                latest_signal_state = get_latest_signal_state(cur, sym)
+
                 send_telegram_alert(
                     f"💰 <b>CLOSED REAL</b>\n"
                     f"{sym} | LONG\n"
-                    f"PnL: {fmt_num(pnl_percent)}%\n"
+                    f"PnL: <b>{fmt_num(pnl_percent)}%</b> | £{fmt_num(pnl_gbp, 3)}\n"
                     f"Peak: {fmt_num(current_peak)}%\n"
                     f"Drawdown from peak: {fmt_num(drawdown_from_peak)}%\n"
-                    f"Trend at exit: {fmt_num(trend)}\n"
                     f"Reason: {close_reason}\n"
-                    f"Exit architecture: {exit_architecture}"
+                    f"Exit architecture: {exit_architecture}\n"
+                    f"Exit trend/momentum: {fmt_num(trend)} / {fmt_num(momentum)}\n"
+                    f"{format_leadership_state_for_telegram(exit_leadership_state)}\n"
+                    f"Latest signal: mom {fmt_num((latest_signal_state or {}).get('momentum'))} "
+                    f"trend {fmt_num((latest_signal_state or {}).get('trend'))} | "
+                    f"{(latest_signal_state or {}).get('decision') or 'NONE'} / "
+                    f"{(latest_signal_state or {}).get('block_reason') or 'no_reason'}"
                 )
 
         conn.commit()
@@ -1810,6 +2014,13 @@ def build_telegram_summary_message(cur, hours=24):
     else:
         lines.append("\nNo closed real trades in this window.")
 
+    lines.append("\n<b>Top leaders</b>")
+    lines.append(get_top_leaders_text(cur, 5))
+
+    open_message = build_telegram_open_trades_message(cur)
+    if "No open real trades" not in open_message:
+        lines.append("\n" + open_message)
+
     return "\n".join(lines)
 
 def handle_telegram_command(text):
@@ -1820,13 +2031,19 @@ def handle_telegram_command(text):
         ensure_signal_leadership_scores_table(cur)
         if cmd in ["/status", "/daily", "/summary", "/pnl"]:
             return build_telegram_summary_message(cur, 24)
+        if cmd in ["/open", "/trades"]:
+            return build_telegram_open_trades_message(cur)
+        if cmd in ["/leaders", "/leadership"]:
+            return "🧠 <b>Top Leadership States</b>\n" + get_top_leaders_text(cur, 10)
         if cmd == "/health":
             return build_telegram_health_message(cur)
         if cmd == "/help":
             return (
                 "🤖 <b>Trading Bot Commands</b>\n"
-                "/status - rolling 24h summary\n"
-                "/daily - rolling 24h summary\n"
+                "/status - rolling 24h summary + leaders\n"
+                "/daily - rolling 24h summary + leaders\n"
+                "/open - open trades with latest signal/leadership\n"
+                "/leaders - current leadership leaderboard\n"
                 "/health - webhook/server health\n"
                 "/help - command list"
             )
