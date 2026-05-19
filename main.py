@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v6.1.4
-# TITLE: STABLE LEADERSHIP PHASE ENGINE + OKX PRE-ENTRY TRADABILITY + TELEGRAM OPS
+# VERSION: v6.1.5
+# TITLE: LEADERSHIP LIFECYCLE TELEMETRY + SHADOW EMERGENCE SCANNER + CLEAN TELEGRAM OPS
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v6.1.4 STABLE LEADERSHIP PHASE ENGINE RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v6.1.5 LIFECYCLE TELEMETRY + SHADOW EMERGENCE RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -17,6 +17,7 @@ print("🔥🔥🔥 MAIN.PY v6.1.4 STABLE LEADERSHIP PHASE ENGINE RUNNING 🔥�
 # ✅ v6.1.2 adds leadership_state_history snapshots on every scorer cron run
 # ✅ v6.1.3 hardens trade-size sync and improves Telegram operator visibility
 # ✅ v6.1.4 switches entries to stable-leadership phase gating and pre-entry OKX tradability filtering
+# ✅ v6.1.5 adds lifecycle telemetry, shadow emergence scanner fields, phase-at-entry/exit data, and cleaner Telegram ops
 # ✅ Leadership context now uses scored historical signals, not only prior real trades
 # ✅ Restores OKX live/dry-run execution layer for entries and exits
 # ✅ Keeps dynamic sizing:
@@ -54,7 +55,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 MAX_OPEN_TRADES = int(os.environ.get("MAX_OPEN_TRADES", "5") or 5)
 MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 30)
 
-DATA_VERSION = "v6.1.4"
+DATA_VERSION = "v6.1.5"
 
 MAX_SAME_SYMBOL_OPEN = int(os.environ.get("MAX_SAME_SYMBOL_OPEN", "1") or 1)
 ENABLE_SAME_SYMBOL_STACKING_LIMIT = os.environ.get("ENABLE_SAME_SYMBOL_STACKING_LIMIT", "true").lower() == "true"
@@ -97,6 +98,18 @@ EMERGING_LEADER_MIN_SCORE = float(os.environ.get("EMERGING_LEADER_MIN_SCORE", "1
 EMERGING_LEADER_MAX_SCORE = float(os.environ.get("EMERGING_LEADER_MAX_SCORE", "2.00") or 2.00)
 EMERGING_LEADER_DELTA_MIN = float(os.environ.get("EMERGING_LEADER_DELTA_MIN", "0.20") or 0.20)
 EMERGING_LEADER_DELTA_MAX = float(os.environ.get("EMERGING_LEADER_DELTA_MAX", "0.50") or 0.50)
+
+# v6.1.5 shadow-only controlled ignition scanner.
+# This does NOT make live entries unless ENABLE_EMERGING_LEADER_ENTRIES is also true.
+ENABLE_SHADOW_EMERGENCE_TELEMETRY = os.environ.get(
+    "ENABLE_SHADOW_EMERGENCE_TELEMETRY",
+    "true"
+).lower() == "true"
+
+CONTROLLED_IGNITION_MIN_SCORE = float(os.environ.get("CONTROLLED_IGNITION_MIN_SCORE", "0.90") or 0.90)
+CONTROLLED_IGNITION_MAX_SCORE = float(os.environ.get("CONTROLLED_IGNITION_MAX_SCORE", "1.50") or 1.50)
+CONTROLLED_IGNITION_DELTA_MIN = float(os.environ.get("CONTROLLED_IGNITION_DELTA_MIN", "0.25") or 0.25)
+CONTROLLED_IGNITION_DELTA_MAX = float(os.environ.get("CONTROLLED_IGNITION_DELTA_MAX", "0.50") or 0.50)
 
 
 # Dynamic sizing tiers.
@@ -219,6 +232,24 @@ def safe_update_trade_telemetry(cur, tid, telemetry):
 
     cur.execute(f"""
         UPDATE bot_trades_v4
+        SET {set_sql}
+        WHERE id = %s
+    """, values)
+
+def safe_update_signal_telemetry(cur, signal_id, telemetry):
+    allowed = {}
+    for col, val in telemetry.items():
+        if column_exists(cur, "signals_raw", col):
+            allowed[col] = val
+
+    if not allowed:
+        return
+
+    set_sql = ", ".join([f"{col} = %s" for col in allowed.keys()])
+    values = list(allowed.values()) + [signal_id]
+
+    cur.execute(f"""
+        UPDATE signals_raw
         SET {set_sql}
         WHERE id = %s
     """, values)
@@ -996,6 +1027,9 @@ def get_leadership_context(cur, symbol):
     else:
         phase = "OTHER"
 
+    lifecycle_ctx = get_lifecycle_context(cur, symbol)
+    lifecycle_phase = lifecycle_ctx.get("lifecycle_phase") or phase
+
     return {
         "prior_successes": successful_signals or 0,
         "prior_runners": runners or 0,
@@ -1004,6 +1038,23 @@ def get_leadership_context(cur, symbol):
         "score_30m_ago": score_30m_ago_float,
         "delta_30m": delta_30m,
         "leadership_phase": phase,
+        "lifecycle_phase": lifecycle_phase,
+        "prior_lifecycle_phase": lifecycle_ctx.get("prior_lifecycle_phase"),
+        "leadership_transition": lifecycle_ctx.get("leadership_transition"),
+        "leadership_delta_5m": lifecycle_ctx.get("leadership_delta_5m"),
+        "leadership_delta_15m": lifecycle_ctx.get("leadership_delta_15m"),
+        "leadership_delta_30m": lifecycle_ctx.get("leadership_delta_30m"),
+        "leadership_delta_60m": lifecycle_ctx.get("leadership_delta_60m"),
+        "leadership_score_30m_ago": lifecycle_ctx.get("leadership_score_30m_ago"),
+        "leadership_age_minutes": lifecycle_ctx.get("leadership_age_minutes"),
+        "leadership_peak_score_last_4h": lifecycle_ctx.get("leadership_peak_score_last_4h"),
+        "leadership_rank": lifecycle_ctx.get("leadership_rank"),
+        "market_near_count": lifecycle_ctx.get("market_near_count"),
+        "market_core_count": lifecycle_ctx.get("market_core_count"),
+        "market_aggressive_count": lifecycle_ctx.get("market_aggressive_count"),
+        "market_monster_count": lifecycle_ctx.get("market_monster_count"),
+        "shadow_emergence_detected": lifecycle_ctx.get("shadow_emergence_detected"),
+        "shadow_emergence_reason": lifecycle_ctx.get("shadow_emergence_reason"),
         "leadership_mode": leadership_mode,
         "avg_peak": float(avg_peak or 0),
         "avg_worst": float(avg_worst or 0),
@@ -1071,6 +1122,256 @@ def get_trade_size_for_quality(entry_quality):
 def get_trade_size_quote_for_quality(entry_quality):
     return get_trade_size_for_quality(entry_quality)
 
+
+def phase_from_score(score):
+    try:
+        score = float(score or 0)
+    except Exception:
+        score = 0
+    if score >= 2.0:
+        return "MONSTER"
+    if score >= 1.5:
+        return "AGGRESSIVE"
+    if score >= 1.25:
+        return "CORE"
+    if score >= 0.9:
+        return "NEAR"
+    return "WEAK"
+
+def get_score_at_or_before(cur, symbol, anchor_time, minutes_back):
+    try:
+        cur.execute("""
+            SELECT leadership_score
+            FROM leadership_state_history
+            WHERE symbol = %s
+              AND snapshot_time <= %s - (%s || ' minutes')::INTERVAL
+            ORDER BY snapshot_time DESC
+            LIMIT 1
+        """, (symbol, anchor_time, minutes_back))
+        row = cur.fetchone()
+        return float(row[0]) if row and row[0] is not None else None
+    except Exception as e:
+        print(f"⚠️ score lookup failed for {symbol}/{minutes_back}m: {e}", flush=True)
+        return None
+
+def get_lifecycle_context(cur, symbol):
+    ensure_leadership_state_history_table(cur)
+    cur.execute("""
+        SELECT symbol, snapshot_time, leadership_score, successful_signals,
+               runners, monsters, avg_peak, avg_worst, leadership_mode
+        FROM leadership_state_history
+        WHERE symbol = %s
+        ORDER BY snapshot_time DESC
+        LIMIT 1
+    """, (symbol,))
+    row = cur.fetchone()
+    if not row:
+        return {
+            "lifecycle_phase": "NO_SNAPSHOT",
+            "prior_lifecycle_phase": None,
+            "leadership_transition": None,
+            "leadership_score": 0.0,
+            "leadership_score_30m_ago": None,
+            "leadership_delta_30m": None,
+            "shadow_emergence_detected": False,
+            "shadow_emergence_reason": None,
+        }
+
+    (_symbol, snapshot_time, score, successes, runners, monsters, avg_peak, avg_worst, mode) = row
+    score = float(score or 0)
+    score_5 = get_score_at_or_before(cur, symbol, snapshot_time, 5)
+    score_15 = get_score_at_or_before(cur, symbol, snapshot_time, 15)
+    score_30 = get_score_at_or_before(cur, symbol, snapshot_time, 30)
+    score_60 = get_score_at_or_before(cur, symbol, snapshot_time, 60)
+
+    delta_5 = score - score_5 if score_5 is not None else None
+    delta_15 = score - score_15 if score_15 is not None else None
+    delta_30 = score - score_30 if score_30 is not None else None
+    delta_60 = score - score_60 if score_60 is not None else None
+
+    current_phase = phase_from_score(score)
+    prior_phase = phase_from_score(score_30) if score_30 is not None else None
+    transition = f"{prior_phase}->{current_phase}" if prior_phase else None
+
+    if delta_30 is None:
+        lifecycle_phase = "NO_PRIOR"
+    elif (CONTROLLED_IGNITION_MIN_SCORE <= score <= CONTROLLED_IGNITION_MAX_SCORE
+          and CONTROLLED_IGNITION_DELTA_MIN <= delta_30 <= CONTROLLED_IGNITION_DELTA_MAX
+          and prior_phase in ["NEAR", "WEAK"]
+          and current_phase in ["NEAR", "CORE", "AGGRESSIVE"]):
+        lifecycle_phase = "CONTROLLED_IGNITION"
+    elif score >= STABLE_LEADER_MIN_SCORE and STABLE_LEADER_DELTA_MIN <= delta_30 <= STABLE_LEADER_DELTA_MAX:
+        lifecycle_phase = "STABLE_LEADER"
+    elif delta_30 > CLIMAX_LEADER_DELTA_BLOCK:
+        lifecycle_phase = "CLIMAX_LEADER"
+    elif score >= 1.25 and delta_30 < -0.30:
+        lifecycle_phase = "DECAYING_LEADER"
+    elif score >= 0.75:
+        lifecycle_phase = "WATCH"
+    else:
+        lifecycle_phase = "WEAK"
+
+    leadership_age_minutes = None
+    try:
+        threshold = 1.25 if score >= 1.25 else 0.90
+        cur.execute("""
+            SELECT MIN(snapshot_time)
+            FROM leadership_state_history
+            WHERE symbol = %s
+              AND snapshot_time >= %s - INTERVAL '6 hours'
+              AND leadership_score >= %s
+        """, (symbol, snapshot_time, threshold))
+        r = cur.fetchone()
+        if r and r[0]:
+            leadership_age_minutes = (snapshot_time - r[0]).total_seconds() / 60
+    except Exception as e:
+        print(f"⚠️ leadership age lookup failed for {symbol}: {e}", flush=True)
+
+    peak_4h = None
+    try:
+        cur.execute("""
+            SELECT MAX(leadership_score)
+            FROM leadership_state_history
+            WHERE symbol = %s
+              AND snapshot_time >= %s - INTERVAL '4 hours'
+              AND snapshot_time <= %s
+        """, (symbol, snapshot_time, snapshot_time))
+        r = cur.fetchone()
+        peak_4h = float(r[0]) if r and r[0] is not None else None
+    except Exception as e:
+        print(f"⚠️ peak score lookup failed for {symbol}: {e}", flush=True)
+
+    rank = None
+    breadth = {"market_near_count": 0, "market_core_count": 0, "market_aggressive_count": 0, "market_monster_count": 0}
+    try:
+        cur.execute("""
+            WITH latest AS (SELECT MAX(snapshot_time) AS snapshot_time FROM leadership_state_history),
+            ranked AS (
+                SELECT symbol, leadership_score,
+                       RANK() OVER (ORDER BY leadership_score DESC NULLS LAST) AS leadership_rank,
+                       COUNT(*) FILTER (WHERE leadership_score >= 0.90) OVER () AS near_count,
+                       COUNT(*) FILTER (WHERE leadership_score >= 1.25) OVER () AS core_count,
+                       COUNT(*) FILTER (WHERE leadership_score >= 1.50) OVER () AS aggressive_count,
+                       COUNT(*) FILTER (WHERE leadership_score >= 2.00) OVER () AS monster_count
+                FROM leadership_state_history l
+                JOIN latest x ON x.snapshot_time = l.snapshot_time
+            )
+            SELECT leadership_rank, near_count, core_count, aggressive_count, monster_count
+            FROM ranked WHERE symbol = %s LIMIT 1
+        """, (symbol,))
+        r = cur.fetchone()
+        if r:
+            rank = int(r[0]) if r[0] is not None else None
+            breadth = {"market_near_count": int(r[1] or 0), "market_core_count": int(r[2] or 0), "market_aggressive_count": int(r[3] or 0), "market_monster_count": int(r[4] or 0)}
+    except Exception as e:
+        print(f"⚠️ rank/breadth lookup failed for {symbol}: {e}", flush=True)
+
+    shadow_emergence = ENABLE_SHADOW_EMERGENCE_TELEMETRY and lifecycle_phase == "CONTROLLED_IGNITION"
+    return {
+        "lifecycle_phase": lifecycle_phase,
+        "prior_lifecycle_phase": prior_phase,
+        "current_score_phase": current_phase,
+        "leadership_transition": transition,
+        "leadership_score": score,
+        "leadership_score_5m_ago": score_5,
+        "leadership_score_15m_ago": score_15,
+        "leadership_score_30m_ago": score_30,
+        "leadership_score_60m_ago": score_60,
+        "leadership_delta_5m": delta_5,
+        "leadership_delta_15m": delta_15,
+        "leadership_delta_30m": delta_30,
+        "leadership_delta_60m": delta_60,
+        "leadership_age_minutes": leadership_age_minutes,
+        "leadership_peak_score_last_4h": peak_4h,
+        "leadership_rank": rank,
+        "successful_signals": successes or 0,
+        "runners": runners or 0,
+        "monsters": monsters or 0,
+        "avg_peak": float(avg_peak or 0),
+        "avg_worst": float(avg_worst or 0),
+        "leadership_mode": mode,
+        "snapshot_time": snapshot_time,
+        "shadow_emergence_detected": shadow_emergence,
+        "shadow_emergence_reason": "controlled_ignition_candidate" if shadow_emergence else None,
+        **breadth,
+    }
+
+def short_phase(phase):
+    mapping = {
+        "CONTROLLED_IGNITION": "IGNITION",
+        "STABLE_LEADER": "STABLE",
+        "CLIMAX_LEADER": "CLIMAX",
+        "DECAYING_LEADER": "DECAY",
+        "NO_PRIOR": "NO_PRIOR",
+        "NO_SNAPSHOT": "NO_SNAPSHOT",
+    }
+    return mapping.get(phase, phase or "n/a")
+
+def format_leadership_compact(ctx):
+    if not ctx:
+        return "Leadership: n/a"
+    return (
+        f"{short_phase(ctx.get('lifecycle_phase'))} | "
+        f"score {fmt_num(ctx.get('leadership_score'))} | "
+        f"Δ30 {fmt_num(ctx.get('leadership_delta_30m'))} | "
+        f"rank #{ctx.get('leadership_rank') or 'n/a'}"
+    )
+
+def get_lifecycle_dashboard_text(cur, limit=10):
+    try:
+        ensure_leadership_state_history_table(cur)
+        cur.execute("""
+            WITH latest AS (
+                SELECT DISTINCT ON (symbol) symbol, snapshot_time, leadership_score,
+                       successful_signals, runners, monsters, avg_worst, leadership_mode
+                FROM leadership_state_history
+                ORDER BY symbol, snapshot_time DESC
+            ), lagged AS (
+                SELECT l.*, (
+                    SELECT p.leadership_score
+                    FROM leadership_state_history p
+                    WHERE p.symbol = l.symbol
+                      AND p.snapshot_time <= l.snapshot_time - INTERVAL '30 minutes'
+                    ORDER BY p.snapshot_time DESC
+                    LIMIT 1
+                ) AS score_30m_ago
+                FROM latest l
+            ), classified AS (
+                SELECT *, leadership_score - score_30m_ago AS delta_30m,
+                    CASE
+                        WHEN score_30m_ago IS NULL THEN 'NO_PRIOR'
+                        WHEN leadership_score BETWEEN %s AND %s AND (leadership_score - score_30m_ago) BETWEEN %s AND %s THEN 'IGNITION'
+                        WHEN leadership_score >= %s AND (leadership_score - score_30m_ago) BETWEEN %s AND %s THEN 'STABLE'
+                        WHEN (leadership_score - score_30m_ago) > %s THEN 'CLIMAX'
+                        WHEN leadership_score >= 1.25 AND (leadership_score - score_30m_ago) < -0.30 THEN 'DECAY'
+                        WHEN leadership_score >= 0.75 THEN 'WATCH'
+                        ELSE 'WEAK'
+                    END AS lifecycle_phase
+                FROM lagged
+            )
+            SELECT symbol, lifecycle_phase, ROUND(leadership_score::numeric,3),
+                   ROUND(delta_30m::numeric,3), successful_signals, runners, ROUND(avg_worst::numeric,3)
+            FROM classified
+            ORDER BY CASE lifecycle_phase WHEN 'IGNITION' THEN 1 WHEN 'STABLE' THEN 2 WHEN 'WATCH' THEN 3 WHEN 'CLIMAX' THEN 4 WHEN 'DECAY' THEN 5 ELSE 6 END,
+                     leadership_score DESC
+            LIMIT %s
+        """, (
+            CONTROLLED_IGNITION_MIN_SCORE, CONTROLLED_IGNITION_MAX_SCORE,
+            CONTROLLED_IGNITION_DELTA_MIN, CONTROLLED_IGNITION_DELTA_MAX,
+            STABLE_LEADER_MIN_SCORE, STABLE_LEADER_DELTA_MIN, STABLE_LEADER_DELTA_MAX,
+            CLIMAX_LEADER_DELTA_BLOCK, limit,
+        ))
+        rows = cur.fetchall()
+        if not rows:
+            return "Lifecycle: n/a"
+        lines = []
+        for sym, phase, score, delta, successes, runners, avg_worst in rows:
+            icon = {"IGNITION":"🚀", "STABLE":"✅", "CLIMAX":"🔥", "DECAY":"📉", "WATCH":"👀", "WEAK":"⚪"}.get(phase, "⚪")
+            lines.append(f"{icon} {sym} {phase} | {score} | Δ{delta} | S{successes} R{runners} | W{avg_worst}")
+        return "\n".join(lines)
+    except Exception as e:
+        print(f"⚠️ lifecycle dashboard failed: {e}", flush=True)
+        return "Lifecycle: n/a"
 
 def get_latest_leadership_state(cur, symbol):
     try:
@@ -1244,16 +1545,16 @@ def build_telegram_open_trades_message(cur):
         except Exception:
             pass
 
-        leadership_state = get_latest_leadership_state(cur, symbol)
+        lifecycle_ctx = get_lifecycle_context(cur, symbol)
 
         lines.append(
-            f"\n<b>{symbol}</b> | {quality} | ID {trade_id}\n"
-            f"Size: {fmt_money(trade_size_gbp)} | Age: {fmt_num(age_mins,1)}m\n"
-            f"PnL: {fmt_num(current_pnl)}% | Peak: {fmt_num(peak)}%\n"
-            f"Entry leadership: {fmt_num(entry_leadership)} | Current {format_leadership_state_for_telegram(leadership_state)}\n"
-            f"Latest signal: mom {fmt_num(latest_momentum)} trend {fmt_num(latest_trend)} | "
+            f"\n<b>{symbol}</b> | {quality}\n"
+            f"Size {fmt_money(trade_size_gbp)} | Age {fmt_num(age_mins,1)}m | PnL {fmt_num(current_pnl)}% | Peak {fmt_num(peak)}%\n"
+            f"Entry score {fmt_num(entry_leadership)} | {format_leadership_compact(lifecycle_ctx)}\n"
+            f"Latest T/M {fmt_num(latest_trend)} / {fmt_num(latest_momentum)} | "
             f"{latest_decision or 'NONE'} / {latest_block_reason or 'no_reason'}"
         )
+
 
     return "\n".join(lines)
 
@@ -1332,8 +1633,25 @@ def open_trade(cur, symbol, direction, price, momentum, trend, quality,
         "leadership_prior_runners": leadership_context.get("prior_runners"),
         "leadership_prior_avg_peak": leadership_context.get("prior_avg_peak"),
         "leadership_tier": quality,
-        "leadership_mode": quality,
-        "leadership_score": leadership_context.get("prior_avg_peak")
+        "leadership_mode": leadership_context.get("leadership_mode") or quality,
+        "leadership_score": leadership_context.get("prior_avg_peak"),
+        "lifecycle_phase_at_entry": leadership_context.get("lifecycle_phase") or leadership_context.get("leadership_phase"),
+        "prior_lifecycle_phase_at_entry": leadership_context.get("prior_lifecycle_phase"),
+        "leadership_transition_at_entry": leadership_context.get("leadership_transition"),
+        "leadership_delta_5m_at_entry": leadership_context.get("leadership_delta_5m"),
+        "leadership_delta_15m_at_entry": leadership_context.get("leadership_delta_15m"),
+        "leadership_delta_30m_at_entry": leadership_context.get("leadership_delta_30m") or leadership_context.get("delta_30m"),
+        "leadership_delta_60m_at_entry": leadership_context.get("leadership_delta_60m"),
+        "leadership_score_30m_ago_at_entry": leadership_context.get("leadership_score_30m_ago") or leadership_context.get("score_30m_ago"),
+        "leadership_age_minutes_at_entry": leadership_context.get("leadership_age_minutes"),
+        "leadership_peak_score_last_4h_at_entry": leadership_context.get("leadership_peak_score_last_4h"),
+        "leadership_rank_at_entry": leadership_context.get("leadership_rank"),
+        "market_near_count_at_entry": leadership_context.get("market_near_count"),
+        "market_core_count_at_entry": leadership_context.get("market_core_count"),
+        "market_aggressive_count_at_entry": leadership_context.get("market_aggressive_count"),
+        "market_monster_count_at_entry": leadership_context.get("market_monster_count"),
+        "shadow_emergence_detected_at_entry": leadership_context.get("shadow_emergence_detected"),
+        "shadow_emergence_reason_at_entry": leadership_context.get("shadow_emergence_reason")
     })
 
     try:
@@ -1700,6 +2018,28 @@ def webhook():
                 block_reason,
                 signal_id
             ))
+
+            if leadership_context:
+                safe_update_signal_telemetry(cur, signal_id, {
+                    "lifecycle_phase": leadership_context.get("lifecycle_phase") or leadership_context.get("leadership_phase"),
+                    "leadership_phase": leadership_context.get("leadership_phase"),
+                    "prior_lifecycle_phase": leadership_context.get("prior_lifecycle_phase"),
+                    "leadership_transition": leadership_context.get("leadership_transition"),
+                    "leadership_score_at_signal": leadership_context.get("prior_avg_peak"),
+                    "leadership_score_30m_ago_at_signal": leadership_context.get("leadership_score_30m_ago") or leadership_context.get("score_30m_ago"),
+                    "leadership_delta_5m_at_signal": leadership_context.get("leadership_delta_5m"),
+                    "leadership_delta_15m_at_signal": leadership_context.get("leadership_delta_15m"),
+                    "leadership_delta_30m_at_signal": leadership_context.get("leadership_delta_30m") or leadership_context.get("delta_30m"),
+                    "leadership_delta_60m_at_signal": leadership_context.get("leadership_delta_60m"),
+                    "leadership_age_minutes_at_signal": leadership_context.get("leadership_age_minutes"),
+                    "leadership_rank_at_signal": leadership_context.get("leadership_rank"),
+                    "market_near_count_at_signal": leadership_context.get("market_near_count"),
+                    "market_core_count_at_signal": leadership_context.get("market_core_count"),
+                    "market_aggressive_count_at_signal": leadership_context.get("market_aggressive_count"),
+                    "market_monster_count_at_signal": leadership_context.get("market_monster_count"),
+                    "shadow_emergence_detected": leadership_context.get("shadow_emergence_detected"),
+                    "shadow_emergence_reason": leadership_context.get("shadow_emergence_reason")
+                })
         except Exception as e:
             print(f"⚠️ signals_raw intelligence update skipped: {e}", flush=True)
 
@@ -1736,20 +2076,23 @@ def webhook():
                 top_leaders_text = get_top_leaders_text(cur, 4)
 
                 send_telegram_alert(
-                    f"🚀 <b>LEADERSHIP ENTRY</b>\n"
-                    f"{symbol} | LONG\n"
-                    f"Tier: <b>{entry_quality}</b>\n"
-                    f"DB/Telegram size: <b>{fmt_money(entry_trade_size)}</b>\n"
-                    f"OKX quote requested: <b>{fmt_money(entry_quote_size)}</b>\n"
-                    f"Entry: {price}\n"
-                    f"Trend/Momentum: {fmt_num(trend)} / {fmt_num(momentum)}\n"
-                    f"Entry leadership score: {fmt_num(leadership_context.get('prior_avg_peak'))}\n"
-                    f"Phase: {leadership_context.get('leadership_phase')} | Δ30m: {fmt_num(leadership_context.get('delta_30m'))}\n"
-                    f"Prior successes/runners: {leadership_context.get('prior_successes')} / {leadership_context.get('prior_runners')}\n"
-                    f"Current {format_leadership_state_for_telegram(current_leadership_state)}\n"
-                    f"Slots: {live_open_after_entry}/{MAX_OPEN_TRADES} | Same symbol: {same_symbol_after_entry}/{MAX_SAME_SYMBOL_OPEN}\n"
-                    f"Trade ID: {trade_id}\n\n"
-                    f"<b>Top leaders now</b>\n{top_leaders_text}"
+                    f"🚀 <b>ENTRY</b> | {symbol} LONG\n"
+                    f"{entry_quality} | {fmt_money(entry_trade_size)} | OKX {fmt_money(entry_quote_size)}\n"
+                    f"Entry {price} | T/M {fmt_num(trend)} / {fmt_num(momentum)}\n"
+                    f"Phase: {short_phase(leadership_context.get('lifecycle_phase') or leadership_context.get('leadership_phase'))} "
+                    f"({leadership_context.get('leadership_transition') or 'n/a'})\n"
+                    f"Score {fmt_num(leadership_context.get('prior_avg_peak'))} | "
+                    f"Δ30 {fmt_num(leadership_context.get('leadership_delta_30m') or leadership_context.get('delta_30m'))} | "
+                    f"Age {fmt_num(leadership_context.get('leadership_age_minutes'), 1)}m | "
+                    f"Rank #{leadership_context.get('leadership_rank') or 'n/a'}\n"
+                    f"S/R/M: {leadership_context.get('prior_successes')} / {leadership_context.get('prior_runners')} / {leadership_context.get('monsters') or 0}\n"
+                    f"Breadth N/C/A/M: {leadership_context.get('market_near_count') or 0}/"
+                    f"{leadership_context.get('market_core_count') or 0}/"
+                    f"{leadership_context.get('market_aggressive_count') or 0}/"
+                    f"{leadership_context.get('market_monster_count') or 0}\n"
+                    f"Slots {live_open_after_entry}/{MAX_OPEN_TRADES} | Same {same_symbol_after_entry}/{MAX_SAME_SYMBOL_OPEN}\n"
+                    f"ID {trade_id}\n\n"
+                    f"<b>Leaders</b>\n{top_leaders_text}"
                 )
 
                 okx_place_market_order(
@@ -1945,6 +2288,8 @@ def webhook():
                     tid
                 ))
 
+                exit_lifecycle_context = get_lifecycle_context(cur, sym)
+
                 safe_update_trade_telemetry(cur, tid, {
                     "decay_triggered": decay_triggered,
                     "decay_checked_at_minutes": mins if decay_triggered else None,
@@ -1956,7 +2301,13 @@ def webhook():
                     "adaptive_exit_triggered": adaptive_exit_triggered,
                     "drawdown_from_peak_at_exit": drawdown_from_peak,
                     "leadership_trend_at_exit": trend,
-                    "leadership_momentum_at_exit": momentum
+                    "leadership_momentum_at_exit": momentum,
+                    "lifecycle_phase_at_exit": exit_lifecycle_context.get("lifecycle_phase"),
+                    "prior_lifecycle_phase_at_exit": exit_lifecycle_context.get("prior_lifecycle_phase"),
+                    "leadership_transition_at_exit": exit_lifecycle_context.get("leadership_transition"),
+                    "leadership_score_at_exit": exit_lifecycle_context.get("leadership_score"),
+                    "leadership_delta_30m_at_exit": exit_lifecycle_context.get("leadership_delta_30m"),
+                    "leadership_rank_at_exit": exit_lifecycle_context.get("leadership_rank")
                 })
 
                 try:
@@ -2007,20 +2358,17 @@ def webhook():
                 latest_signal_state = get_latest_signal_state(cur, sym)
 
                 send_telegram_alert(
-                    f"💰 <b>CLOSED REAL</b>\n"
-                    f"{sym} | LONG\n"
-                    f"PnL: <b>{fmt_num(pnl_percent)}%</b> | £{fmt_num(pnl_gbp, 3)}\n"
-                    f"Peak: {fmt_num(current_peak)}%\n"
-                    f"Drawdown from peak: {fmt_num(drawdown_from_peak)}%\n"
-                    f"Reason: {close_reason}\n"
-                    f"Exit architecture: {exit_architecture}\n"
-                    f"Exit trend/momentum: {fmt_num(trend)} / {fmt_num(momentum)}\n"
-                    f"{format_leadership_state_for_telegram(exit_leadership_state)}\n"
-                    f"Latest signal: mom {fmt_num((latest_signal_state or {}).get('momentum'))} "
+                    f"💰 <b>CLOSED</b> | {sym} LONG\n"
+                    f"PnL <b>{fmt_num(pnl_percent)}%</b> | {fmt_money(pnl_gbp)} | Peak {fmt_num(current_peak)}%\n"
+                    f"DD {fmt_num(drawdown_from_peak)}% | {close_reason}\n"
+                    f"Exit T/M {fmt_num(trend)} / {fmt_num(momentum)}\n"
+                    f"Phase: {format_leadership_compact(exit_lifecycle_context)}\n"
+                    f"Latest: mom {fmt_num((latest_signal_state or {}).get('momentum'))} "
                     f"trend {fmt_num((latest_signal_state or {}).get('trend'))} | "
                     f"{(latest_signal_state or {}).get('decision') or 'NONE'} / "
                     f"{(latest_signal_state or {}).get('block_reason') or 'no_reason'}"
                 )
+
 
         conn.commit()
         cur.close()
@@ -2092,7 +2440,7 @@ def build_telegram_health_message(cur):
     return (
         f"🩺 <b>Bot Health</b>\n"
         f"Version: {DATA_VERSION}\n"
-        f"Engine: LEADERSHIP_SIGNAL_SCORED\n"
+        f"Engine: LIFECYCLE_PHASE_STABLE_LIVE + SHADOW_EMERGENCE\n"
         f"Live orders: {ENABLE_LIVE_ORDERS}\n"
         f"Last signal: {last_signal}\n"
         f"Signals 1h: {signals_1h}\n"
@@ -2101,7 +2449,8 @@ def build_telegram_health_message(cur):
         f"Open real: {open_real}\n"
         f"Scored leadership signals 24h: {scored_24h}\n"
         f"Leadership snapshots 24h: {snapshots_24h}\n"
-        f"Leadership threshold: {LEADERSHIP_MIN_PRIOR_AVG_PEAK}\n"
+        f"Stable: score>={STABLE_LEADER_MIN_SCORE}, Δ{STABLE_LEADER_DELTA_MIN}..{STABLE_LEADER_DELTA_MAX}\n"
+        f"Shadow ignition: {ENABLE_SHADOW_EMERGENCE_TELEMETRY} | Δ{CONTROLLED_IGNITION_DELTA_MIN}..{CONTROLLED_IGNITION_DELTA_MAX}\n"
         f"Max same symbol: {MAX_SAME_SYMBOL_OPEN}\n"
         f"OKX tradable cache: {len(OKX_TRADABLE_SPOT_INST_IDS)} pairs"
     )
@@ -2185,6 +2534,8 @@ def handle_telegram_command(text):
             return build_telegram_open_trades_message(cur)
         if cmd in ["/leaders", "/leadership"]:
             return "🧠 <b>Top Leadership States</b>\n" + get_top_leaders_text(cur, 10)
+        if cmd in ["/lifecycle", "/phases"]:
+            return "🧬 <b>Leadership Lifecycle</b>\n" + get_lifecycle_dashboard_text(cur, 12)
         if cmd == "/health":
             return build_telegram_health_message(cur)
         if cmd == "/help":
@@ -2194,6 +2545,7 @@ def handle_telegram_command(text):
                 "/daily - rolling 24h summary + leaders\n"
                 "/open - open trades with latest signal/leadership\n"
                 "/leaders - current leadership leaderboard\n"
+                "/lifecycle - lifecycle phases + deltas\n"
                 "/health - webhook/server health\n"
                 "/help - command list"
             )
@@ -2309,6 +2661,11 @@ def bool_status():
         "STABLE_LEADER_DELTA_MAX": STABLE_LEADER_DELTA_MAX,
         "CLIMAX_LEADER_DELTA_BLOCK": CLIMAX_LEADER_DELTA_BLOCK,
         "ENABLE_EMERGING_LEADER_ENTRIES": ENABLE_EMERGING_LEADER_ENTRIES,
+        "ENABLE_SHADOW_EMERGENCE_TELEMETRY": ENABLE_SHADOW_EMERGENCE_TELEMETRY,
+        "CONTROLLED_IGNITION_MIN_SCORE": CONTROLLED_IGNITION_MIN_SCORE,
+        "CONTROLLED_IGNITION_MAX_SCORE": CONTROLLED_IGNITION_MAX_SCORE,
+        "CONTROLLED_IGNITION_DELTA_MIN": CONTROLLED_IGNITION_DELTA_MIN,
+        "CONTROLLED_IGNITION_DELTA_MAX": CONTROLLED_IGNITION_DELTA_MAX,
         "LEADERSHIP_LOOKBACK_MINUTES": LEADERSHIP_LOOKBACK_MINUTES,
         "LEADERSHIP_SIGNAL_FORWARD_MINUTES": LEADERSHIP_SIGNAL_FORWARD_MINUTES,
         "OKX_BASE_URL": OKX_BASE_URL,
