@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v6.1.5
-# TITLE: LEADERSHIP LIFECYCLE TELEMETRY + SHADOW EMERGENCE SCANNER + CLEAN TELEGRAM OPS
+# VERSION: v6.1.6
+# TITLE: LEADERSHIP LIVE ENGINE + SHADOW CQE CONTINUATION QUALITY ENGINE + TELEGRAM OPS
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v6.1.5 LIFECYCLE TELEMETRY + SHADOW EMERGENCE RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v6.1.6 SHADOW CQE + LEADERSHIP LIVE RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -18,6 +18,7 @@ print("🔥🔥🔥 MAIN.PY v6.1.5 LIFECYCLE TELEMETRY + SHADOW EMERGENCE RUNNIN
 # ✅ v6.1.3 hardens trade-size sync and improves Telegram operator visibility
 # ✅ v6.1.4 switches entries to stable-leadership phase gating and pre-entry OKX tradability filtering
 # ✅ v6.1.5 adds lifecycle telemetry, shadow emergence scanner fields, phase-at-entry/exit data, and cleaner Telegram ops
+# ✅ v6.1.6 adds SHADOW_CQE_V1 paper-trade engine, Telegram shadow alerts, and richer blocked-signal telemetry
 # ✅ Leadership context now uses scored historical signals, not only prior real trades
 # ✅ Restores OKX live/dry-run execution layer for entries and exits
 # ✅ Keeps dynamic sizing:
@@ -55,7 +56,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 MAX_OPEN_TRADES = int(os.environ.get("MAX_OPEN_TRADES", "5") or 5)
 MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 30)
 
-DATA_VERSION = "v6.1.5"
+DATA_VERSION = "v6.1.6"
 
 MAX_SAME_SYMBOL_OPEN = int(os.environ.get("MAX_SAME_SYMBOL_OPEN", "1") or 1)
 ENABLE_SAME_SYMBOL_STACKING_LIMIT = os.environ.get("ENABLE_SAME_SYMBOL_STACKING_LIMIT", "true").lower() == "true"
@@ -110,6 +111,36 @@ CONTROLLED_IGNITION_MIN_SCORE = float(os.environ.get("CONTROLLED_IGNITION_MIN_SC
 CONTROLLED_IGNITION_MAX_SCORE = float(os.environ.get("CONTROLLED_IGNITION_MAX_SCORE", "1.50") or 1.50)
 CONTROLLED_IGNITION_DELTA_MIN = float(os.environ.get("CONTROLLED_IGNITION_DELTA_MIN", "0.25") or 0.25)
 CONTROLLED_IGNITION_DELTA_MAX = float(os.environ.get("CONTROLLED_IGNITION_DELTA_MAX", "0.50") or 0.50)
+
+# v6.1.6 shadow-only quiet continuation scanner.
+# This does NOT make live entries. It tags signals that look like the clean continuation
+# opportunities found in SQL: low leadership score, moderate trend, moderate momentum,
+# and no explosive/climax leadership acceleration.
+ENABLE_SHADOW_QUIET_CONTINUATION = os.environ.get(
+    "ENABLE_SHADOW_QUIET_CONTINUATION",
+    "true"
+).lower() == "true"
+
+QUIET_CONTINUATION_MAX_SCORE = float(os.environ.get("QUIET_CONTINUATION_MAX_SCORE", "0.50") or 0.50)
+QUIET_CONTINUATION_MIN_TREND = float(os.environ.get("QUIET_CONTINUATION_MIN_TREND", "0.25") or 0.25)
+QUIET_CONTINUATION_MIN_MOMENTUM = float(os.environ.get("QUIET_CONTINUATION_MIN_MOMENTUM", "0.50") or 0.50)
+QUIET_CONTINUATION_MAX_DELTA_30M = float(os.environ.get("QUIET_CONTINUATION_MAX_DELTA_30M", "1.00") or 1.00)
+
+# v6.1.6 CQE shadow-only engine.
+# This creates PAPER/SHADOW trades only. It never sends OKX orders.
+ENABLE_SHADOW_CQE = os.environ.get("ENABLE_SHADOW_CQE", "true").lower() == "true"
+ENABLE_SHADOW_CQE_TELEGRAM_ALERTS = os.environ.get(
+    "ENABLE_SHADOW_CQE_TELEGRAM_ALERTS",
+    "true"
+).lower() == "true"
+CQE_MIN_QUALITY_SCORE = int(os.environ.get("CQE_MIN_QUALITY_SCORE", "8") or 8)
+CQE_SHADOW_HOLD_MINUTES = float(os.environ.get("CQE_SHADOW_HOLD_MINUTES", "120") or 120)
+CQE_SHADOW_TRADE_SIZE_GBP = float(os.environ.get("CQE_SHADOW_TRADE_SIZE_GBP", "10") or 10)
+CQE_MAX_OPEN_SHADOW_TRADES = int(os.environ.get("CQE_MAX_OPEN_SHADOW_TRADES", "20") or 20)
+CQE_MAX_SAME_SYMBOL_SHADOW_OPEN = int(os.environ.get("CQE_MAX_SAME_SYMBOL_SHADOW_OPEN", "1") or 1)
+CQE_PEAK_ALERT_TRIGGER = float(os.environ.get("CQE_PEAK_ALERT_TRIGGER", "0.75") or 0.75)
+CQE_RUNNER_ALERT_TRIGGER = float(os.environ.get("CQE_RUNNER_ALERT_TRIGGER", "2.00") or 2.00)
+
 
 
 # Dynamic sizing tiers.
@@ -1062,17 +1093,375 @@ def get_leadership_context(cur, symbol):
         "snapshot_time": snapshot_time
     }
 
+def is_shadow_quiet_continuation_candidate(leadership, momentum, trend):
+    if not ENABLE_SHADOW_QUIET_CONTINUATION or not leadership:
+        return False, None
+
+    score = float(leadership.get("leadership_score") or leadership.get("prior_avg_peak") or 0)
+    delta_30m = leadership.get("leadership_delta_30m")
+    if delta_30m is None:
+        delta_30m = leadership.get("delta_30m")
+    delta_30m = float(delta_30m or 0)
+
+    if score >= QUIET_CONTINUATION_MAX_SCORE:
+        return False, None
+    if trend < QUIET_CONTINUATION_MIN_TREND:
+        return False, None
+    if momentum < QUIET_CONTINUATION_MIN_MOMENTUM:
+        return False, None
+    if delta_30m > QUIET_CONTINUATION_MAX_DELTA_30M:
+        return False, None
+
+    return True, "low_score_healthy_trend_momentum_no_climax"
+
+
+
+def get_cqe_context(cur, symbol, signal_time, momentum, trend, leadership_context=None):
+    """
+    SHADOW_CQE_V1 no-leakage continuation quality model.
+    Uses only data known at signal time:
+    - current trend/momentum
+    - prior 30m trend/momentum stats
+    - leadership delta only as anti-noise/context, not primary edge
+    """
+    if not ENABLE_SHADOW_CQE:
+        return {"cqe_detected": False, "cqe_reason": "cqe_disabled", "cqe_quality_score": 0}
+
+    try:
+        cur.execute("""
+            SELECT
+                AVG(momentum),
+                AVG(trend),
+                STDDEV(trend),
+                MIN(trend),
+                MAX(trend),
+                COUNT(*) FILTER (WHERE trend > 0),
+                COUNT(*)
+            FROM signals_raw
+            WHERE symbol = %s
+              AND timestamp >= %s - INTERVAL '30 minutes'
+              AND timestamp < %s
+        """, (symbol, signal_time, signal_time))
+
+        row = cur.fetchone() or (None, None, None, None, None, 0, 0)
+        avg_momentum_30m, avg_trend_30m, trend_std_30m, min_trend_30m, max_trend_30m, positive_count, total_count = row
+
+        if not total_count or total_count < 3 or avg_momentum_30m is None or avg_trend_30m is None:
+            return {
+                "cqe_detected": False,
+                "cqe_reason": "insufficient_prior_30m_data",
+                "cqe_quality_score": 0,
+                "cqe_total_trend_count_30m": total_count or 0,
+            }
+
+        avg_momentum_30m = float(avg_momentum_30m or 0)
+        avg_trend_30m = float(avg_trend_30m or 0)
+        trend_std_30m = float(trend_std_30m or 0)
+        min_trend_30m = float(min_trend_30m or 0)
+        max_trend_30m = float(max_trend_30m or 0)
+        trend_range_30m = max_trend_30m - min_trend_30m
+        positive_trend_ratio = float(positive_count or 0) / float(total_count or 1)
+        momentum_accel_30m = float(momentum or 0) - avg_momentum_30m
+        trend_accel_30m = float(trend or 0) - avg_trend_30m
+
+        delta_30m = 0.0
+        if leadership_context:
+            raw_delta = leadership_context.get("leadership_delta_30m")
+            if raw_delta is None:
+                raw_delta = leadership_context.get("delta_30m")
+            delta_30m = float(raw_delta or 0)
+
+        q = 0
+        checks = {}
+        checks["trend_ge_035"] = float(trend or 0) >= 0.35
+        checks["momentum_ge_090"] = float(momentum or 0) >= 0.90
+        checks["momentum_accel_025_050"] = 0.25 <= momentum_accel_30m <= 0.50
+        checks["trend_accel_008_015"] = 0.08 <= trend_accel_30m <= 0.15
+        checks["trend_std_lt_008"] = trend_std_30m < 0.08
+        checks["trend_range_lt_020"] = trend_range_30m < 0.20
+        checks["positive_trend_ratio_ge_095"] = positive_trend_ratio >= 0.95
+        checks["min_trend_gt_015"] = min_trend_30m > 0.15
+        checks["delta_abs_le_050"] = abs(delta_30m) <= 0.50
+
+        for passed in checks.values():
+            q += 1 if passed else 0
+
+        detected = q >= CQE_MIN_QUALITY_SCORE
+        reason = "cqe_quality_8_plus" if detected else f"cqe_quality_too_low_{q}"
+
+        return {
+            "cqe_detected": detected,
+            "cqe_reason": reason,
+            "cqe_quality_score": q,
+            "cqe_avg_momentum_30m": avg_momentum_30m,
+            "cqe_avg_trend_30m": avg_trend_30m,
+            "cqe_momentum_accel_30m": momentum_accel_30m,
+            "cqe_trend_accel_30m": trend_accel_30m,
+            "cqe_trend_std_30m": trend_std_30m,
+            "cqe_min_trend_30m": min_trend_30m,
+            "cqe_max_trend_30m": max_trend_30m,
+            "cqe_trend_range_30m": trend_range_30m,
+            "cqe_positive_trend_ratio_30m": positive_trend_ratio,
+            "cqe_total_trend_count_30m": total_count,
+            "cqe_delta_30m": delta_30m,
+            **{f"cqe_check_{k}": v for k, v in checks.items()}
+        }
+
+    except Exception as e:
+        print(f"⚠️ CQE context failed for {symbol}: {e}", flush=True)
+        return {"cqe_detected": False, "cqe_reason": f"cqe_error_{e}", "cqe_quality_score": 0}
+
+
+def get_open_shadow_cqe_count(cur):
+    cur.execute("""
+        SELECT COUNT(*)
+        FROM bot_trades_v4
+        WHERE status = 'OPEN'
+          AND COALESCE(is_shadow, FALSE) = TRUE
+          AND entry_quality = 'SHADOW_CQE_V1'
+    """)
+    return cur.fetchone()[0] or 0
+
+
+def get_open_same_symbol_shadow_cqe_count(cur, symbol):
+    cur.execute("""
+        SELECT COUNT(*)
+        FROM bot_trades_v4
+        WHERE status = 'OPEN'
+          AND COALESCE(is_shadow, FALSE) = TRUE
+          AND entry_quality = 'SHADOW_CQE_V1'
+          AND symbol = %s
+    """, (symbol,))
+    return cur.fetchone()[0] or 0
+
+
+def open_shadow_cqe_trade(cur, symbol, price, momentum, trend, signal_id, signal_time, cqe_context, leadership_context=None):
+    cur.execute("""
+        INSERT INTO bot_trades_v4 (
+            symbol,
+            direction,
+            entry_price,
+            status,
+            opened_at,
+            data_version,
+            momentum_strength,
+            trend_strength,
+            entry_quality,
+            peak_pnl_percent,
+            signal_id,
+            signal_timestamp
+        )
+        VALUES (%s,%s,%s,'OPEN',NOW(),%s,%s,%s,%s,0,%s,%s)
+        RETURNING id
+    """, (
+        symbol,
+        "LONG",
+        price,
+        DATA_VERSION,
+        momentum,
+        trend,
+        "SHADOW_CQE_V1",
+        signal_id,
+        signal_time,
+    ))
+    trade_id = cur.fetchone()[0]
+
+    safe_update_trade_telemetry(cur, trade_id, {
+        "is_shadow": True,
+        "entry_architecture": "SHADOW_CQE_V1",
+        "trade_size_gbp": CQE_SHADOW_TRADE_SIZE_GBP,
+        "dynamic_trade_size_gbp": CQE_SHADOW_TRADE_SIZE_GBP,
+        "shadow_cqe_detected_at_entry": cqe_context.get("cqe_detected"),
+        "shadow_cqe_reason_at_entry": cqe_context.get("cqe_reason"),
+        "cqe_quality_score_at_entry": cqe_context.get("cqe_quality_score"),
+        "cqe_momentum_accel_30m_at_entry": cqe_context.get("cqe_momentum_accel_30m"),
+        "cqe_trend_accel_30m_at_entry": cqe_context.get("cqe_trend_accel_30m"),
+        "cqe_trend_std_30m_at_entry": cqe_context.get("cqe_trend_std_30m"),
+        "cqe_min_trend_30m_at_entry": cqe_context.get("cqe_min_trend_30m"),
+        "cqe_trend_range_30m_at_entry": cqe_context.get("cqe_trend_range_30m"),
+        "cqe_positive_trend_ratio_30m_at_entry": cqe_context.get("cqe_positive_trend_ratio_30m"),
+        "cqe_avg_momentum_30m_at_entry": cqe_context.get("cqe_avg_momentum_30m"),
+        "cqe_avg_trend_30m_at_entry": cqe_context.get("cqe_avg_trend_30m"),
+        "lifecycle_phase_at_entry": (leadership_context or {}).get("lifecycle_phase") or (leadership_context or {}).get("leadership_phase"),
+        "leadership_score": (leadership_context or {}).get("prior_avg_peak"),
+        "leadership_delta_30m_at_entry": (leadership_context or {}).get("leadership_delta_30m") or (leadership_context or {}).get("delta_30m"),
+    })
+
+    try:
+        log_trade_event(cur, trade_id, symbol, "shadow_cqe_entry", price, 0, 0, 0, momentum, trend, True)
+    except Exception as e:
+        print(f"⚠️ shadow CQE trade_events entry log failed: {e}", flush=True)
+
+    return trade_id
+
+
+def maybe_open_shadow_cqe_trade(cur, symbol, price, momentum, trend, signal_id, signal_time, cqe_context, leadership_context=None):
+    if not ENABLE_SHADOW_CQE or not cqe_context or not cqe_context.get("cqe_detected"):
+        return None
+
+    open_shadow_count = get_open_shadow_cqe_count(cur)
+    if open_shadow_count >= CQE_MAX_OPEN_SHADOW_TRADES:
+        return None
+
+    same_symbol_count = get_open_same_symbol_shadow_cqe_count(cur, symbol)
+    if same_symbol_count >= CQE_MAX_SAME_SYMBOL_SHADOW_OPEN:
+        return None
+
+    trade_id = open_shadow_cqe_trade(
+        cur, symbol, price, momentum, trend, signal_id, signal_time, cqe_context, leadership_context
+    )
+
+    print(
+        f"🧪 OPEN SHADOW CQE | {symbol} | id={trade_id} | "
+        f"q={cqe_context.get('cqe_quality_score')} | "
+        f"T/M={round(trend,3)}/{round(momentum,3)} | "
+        f"m_acc={fmt_num(cqe_context.get('cqe_momentum_accel_30m'))} | "
+        f"t_acc={fmt_num(cqe_context.get('cqe_trend_accel_30m'))}",
+        flush=True
+    )
+
+    if ENABLE_SHADOW_CQE_TELEGRAM_ALERTS:
+        send_telegram_alert(
+            f"🧪 <b>SHADOW CQE ENTRY</b> | {symbol} LONG\n"
+            f"Quality: <b>{cqe_context.get('cqe_quality_score')}/9</b> | Paper size {fmt_money(CQE_SHADOW_TRADE_SIZE_GBP)}\n"
+            f"Entry {price} | T/M {fmt_num(trend)} / {fmt_num(momentum)}\n"
+            f"Accel M/T: {fmt_num(cqe_context.get('cqe_momentum_accel_30m'))} / {fmt_num(cqe_context.get('cqe_trend_accel_30m'))}\n"
+            f"Trend health: min {fmt_num(cqe_context.get('cqe_min_trend_30m'))} | "
+            f"std {fmt_num(cqe_context.get('cqe_trend_std_30m'))} | "
+            f"pos {fmt_num(cqe_context.get('cqe_positive_trend_ratio_30m'))}\n"
+            f"Reason: {cqe_context.get('cqe_reason')}\n"
+            f"Shadow ID {trade_id}"
+        )
+
+    return trade_id
+
+
+def process_shadow_cqe_trades(cur, symbol, price, momentum, trend, now):
+    """Updates and closes CQE paper trades. No OKX orders are sent."""
+    cur.execute("""
+        SELECT
+            id,
+            symbol,
+            direction,
+            entry_price,
+            opened_at,
+            peak_pnl_percent,
+            entry_quality
+        FROM bot_trades_v4
+        WHERE status = 'OPEN'
+          AND COALESCE(is_shadow, FALSE) = TRUE
+          AND entry_quality = 'SHADOW_CQE_V1'
+          AND symbol = %s
+    """, (symbol,))
+
+    rows = cur.fetchall()
+    for tid, sym, direction, entry_price, opened_at, peak_pnl, entry_quality in rows:
+        if direction != "LONG":
+            continue
+
+        pnl_percent = ((price - entry_price) / entry_price) * 100
+        mins = (now - opened_at).total_seconds() / 60
+        current_peak = peak_pnl or 0
+        old_peak = current_peak
+
+        if pnl_percent > current_peak:
+            current_peak = pnl_percent
+            if column_exists(cur, "bot_trades_v4", "peak_time_minutes"):
+                cur.execute("""
+                    UPDATE bot_trades_v4
+                    SET peak_pnl_percent = %s,
+                        peak_time_minutes = %s
+                    WHERE id = %s
+                """, (current_peak, mins, tid))
+            else:
+                cur.execute("""
+                    UPDATE bot_trades_v4
+                    SET peak_pnl_percent = %s
+                    WHERE id = %s
+                """, (current_peak, tid))
+
+        try:
+            log_trade_event(cur, tid, sym, "shadow_cqe_update", price, pnl_percent, current_peak, mins, momentum, trend, False)
+        except Exception as e:
+            print(f"⚠️ shadow CQE trade_events update log failed: {e}", flush=True)
+
+        if (
+            ENABLE_SHADOW_CQE_TELEGRAM_ALERTS
+            and old_peak < CQE_PEAK_ALERT_TRIGGER <= current_peak
+        ):
+            send_telegram_alert(
+                f"🟢 <b>SHADOW CQE PEAK</b> | {sym}\n"
+                f"Peak {fmt_num(current_peak)}% | Current {fmt_num(pnl_percent)}% | Age {fmt_num(mins,1)}m\n"
+                f"T/M {fmt_num(trend)} / {fmt_num(momentum)} | ID {tid}"
+            )
+
+        if (
+            ENABLE_SHADOW_CQE_TELEGRAM_ALERTS
+            and old_peak < CQE_RUNNER_ALERT_TRIGGER <= current_peak
+        ):
+            send_telegram_alert(
+                f"🚀 <b>SHADOW CQE RUNNER</b> | {sym}\n"
+                f"Peak {fmt_num(current_peak)}% | Current {fmt_num(pnl_percent)}% | Age {fmt_num(mins,1)}m\n"
+                f"ID {tid}"
+            )
+
+        close_reason = None
+        if mins >= CQE_SHADOW_HOLD_MINUTES:
+            close_reason = "shadow_cqe_120m_time_exit"
+
+        if close_reason:
+            pnl_gbp = (pnl_percent / 100) * CQE_SHADOW_TRADE_SIZE_GBP
+            cur.execute("""
+                UPDATE bot_trades_v4
+                SET status = 'CLOSED',
+                    closed_at = NOW(),
+                    close_price = %s,
+                    pnl_percent = %s,
+                    pnl_gbp = %s,
+                    close_reason = %s
+                WHERE id = %s
+            """, (price, pnl_percent, pnl_gbp, close_reason, tid))
+
+            safe_update_trade_telemetry(cur, tid, {
+                "exit_architecture": "SHADOW_CQE_V1",
+                "drawdown_from_peak_at_exit": current_peak - pnl_percent,
+                "leadership_trend_at_exit": trend,
+                "leadership_momentum_at_exit": momentum,
+            })
+
+            try:
+                log_trade_event(cur, tid, sym, f"exit_{close_reason}", price, pnl_percent, current_peak, mins, momentum, trend, False)
+            except Exception as e:
+                print(f"⚠️ shadow CQE trade_events exit log failed: {e}", flush=True)
+
+            print(
+                f"🧪 CLOSED SHADOW CQE | {sym} | {round(pnl_percent,3)}% | "
+                f"peak={round(current_peak,3)} | {close_reason}",
+                flush=True
+            )
+
+            if ENABLE_SHADOW_CQE_TELEGRAM_ALERTS:
+                send_telegram_alert(
+                    f"🧪 <b>SHADOW CQE CLOSED</b> | {sym}\n"
+                    f"Paper PnL <b>{fmt_num(pnl_percent)}%</b> | {fmt_money(pnl_gbp)}\n"
+                    f"Peak {fmt_num(current_peak)}% | DD {fmt_num(current_peak - pnl_percent)}%\n"
+                    f"Age {fmt_num(mins,1)}m | Reason {close_reason}\n"
+                    f"ID {tid}"
+                )
+
 def passes_leadership_engine(cur, symbol, momentum, trend):
     if not ENABLE_LEADERSHIP_ENGINE:
         return False, None, "leadership_engine_disabled"
 
+    # v6.1.6: always fetch context first so blocked early signals still get lifecycle telemetry.
+    leadership = get_leadership_context(cur, symbol)
+
     if trend < LEADERSHIP_MIN_TREND:
-        return False, None, "leadership_trend_too_low"
+        return False, leadership, "leadership_trend_too_low"
 
     if momentum <= LEADERSHIP_MIN_MOMENTUM:
-        return False, None, "leadership_momentum_not_positive"
+        return False, leadership, "leadership_momentum_not_positive"
 
-    leadership = get_leadership_context(cur, symbol)
 
     # Fallback legacy mode can be enabled in env if needed.
     if not ENABLE_STABLE_LEADERSHIP_PHASE_FILTER:
@@ -1175,6 +1564,8 @@ def get_lifecycle_context(cur, symbol):
             "leadership_delta_30m": None,
             "shadow_emergence_detected": False,
             "shadow_emergence_reason": None,
+            "shadow_quiet_continuation_detected": False,
+            "shadow_quiet_continuation_reason": None,
         }
 
     (_symbol, snapshot_time, score, successes, runners, monsters, avg_peak, avg_worst, mode) = row
@@ -1651,7 +2042,9 @@ def open_trade(cur, symbol, direction, price, momentum, trend, quality,
         "market_aggressive_count_at_entry": leadership_context.get("market_aggressive_count"),
         "market_monster_count_at_entry": leadership_context.get("market_monster_count"),
         "shadow_emergence_detected_at_entry": leadership_context.get("shadow_emergence_detected"),
-        "shadow_emergence_reason_at_entry": leadership_context.get("shadow_emergence_reason")
+        "shadow_emergence_reason_at_entry": leadership_context.get("shadow_emergence_reason"),
+        "shadow_quiet_continuation_detected_at_entry": leadership_context.get("shadow_quiet_continuation_detected"),
+        "shadow_quiet_continuation_reason_at_entry": leadership_context.get("shadow_quiet_continuation_reason")
     })
 
     try:
@@ -1978,6 +2371,21 @@ def webhook():
                 trend
             )
 
+            if leadership_context:
+                quiet_shadow, quiet_reason = is_shadow_quiet_continuation_candidate(
+                    leadership_context,
+                    momentum,
+                    trend
+                )
+                leadership_context["shadow_quiet_continuation_detected"] = quiet_shadow
+                leadership_context["shadow_quiet_continuation_reason"] = quiet_reason
+
+                cqe_context = get_cqe_context(cur, symbol, signal_time, momentum, trend, leadership_context)
+                leadership_context["shadow_cqe_detected"] = cqe_context.get("cqe_detected")
+                leadership_context["shadow_cqe_reason"] = cqe_context.get("cqe_reason")
+                leadership_context["cqe_quality_score"] = cqe_context.get("cqe_quality_score")
+                leadership_context["cqe_context"] = cqe_context
+
             if entry_allowed:
                 entry_quality = classify_leadership_tier(leadership_context["prior_avg_peak"])
 
@@ -2038,10 +2446,38 @@ def webhook():
                     "market_aggressive_count_at_signal": leadership_context.get("market_aggressive_count"),
                     "market_monster_count_at_signal": leadership_context.get("market_monster_count"),
                     "shadow_emergence_detected": leadership_context.get("shadow_emergence_detected"),
-                    "shadow_emergence_reason": leadership_context.get("shadow_emergence_reason")
+                    "shadow_emergence_reason": leadership_context.get("shadow_emergence_reason"),
+                    "shadow_quiet_continuation_detected": leadership_context.get("shadow_quiet_continuation_detected"),
+                    "shadow_quiet_continuation_reason": leadership_context.get("shadow_quiet_continuation_reason"),
+                    "shadow_cqe_detected": leadership_context.get("shadow_cqe_detected"),
+                    "shadow_cqe_reason": leadership_context.get("shadow_cqe_reason"),
+                    "cqe_quality_score": leadership_context.get("cqe_quality_score"),
+                    "cqe_momentum_accel_30m": (leadership_context.get("cqe_context") or {}).get("cqe_momentum_accel_30m"),
+                    "cqe_trend_accel_30m": (leadership_context.get("cqe_context") or {}).get("cqe_trend_accel_30m"),
+                    "cqe_trend_std_30m": (leadership_context.get("cqe_context") or {}).get("cqe_trend_std_30m"),
+                    "cqe_min_trend_30m": (leadership_context.get("cqe_context") or {}).get("cqe_min_trend_30m"),
+                    "cqe_trend_range_30m": (leadership_context.get("cqe_context") or {}).get("cqe_trend_range_30m"),
+                    "cqe_positive_trend_ratio_30m": (leadership_context.get("cqe_context") or {}).get("cqe_positive_trend_ratio_30m")
                 })
         except Exception as e:
             print(f"⚠️ signals_raw intelligence update skipped: {e}", flush=True)
+
+        # ================= SHADOW CQE ENTRY ENGINE =================
+        try:
+            if decision == "LONG" and leadership_context:
+                maybe_open_shadow_cqe_trade(
+                    cur,
+                    symbol,
+                    price,
+                    momentum,
+                    trend,
+                    signal_id,
+                    signal_time,
+                    leadership_context.get("cqe_context"),
+                    leadership_context,
+                )
+        except Exception as e:
+            print(f"⚠️ shadow CQE entry skipped: {e}", flush=True)
 
         # ================= REAL ENTRY EXECUTION =================
         if decision in ["LONG", "SHORT"]:
@@ -2118,6 +2554,12 @@ def webhook():
                 f"⛔ BLOCKED | {symbol} | reason=None",
                 flush=True
             )
+
+        # ================= SHADOW CQE EXIT / UPDATE ENGINE =================
+        try:
+            process_shadow_cqe_trades(cur, symbol, price, momentum, trend, now)
+        except Exception as e:
+            print(f"⚠️ shadow CQE processing skipped: {e}", flush=True)
 
         # ================= EXIT ENGINE =================
         cur.execute("""
@@ -2440,7 +2882,7 @@ def build_telegram_health_message(cur):
     return (
         f"🩺 <b>Bot Health</b>\n"
         f"Version: {DATA_VERSION}\n"
-        f"Engine: LIFECYCLE_PHASE_STABLE_LIVE + SHADOW_EMERGENCE\n"
+        f"Engine: LEADERSHIP_LIVE + SHADOW_CQE_V1 + SHADOW_EMERGENCE\n"
         f"Live orders: {ENABLE_LIVE_ORDERS}\n"
         f"Last signal: {last_signal}\n"
         f"Signals 1h: {signals_1h}\n"
@@ -2451,6 +2893,7 @@ def build_telegram_health_message(cur):
         f"Leadership snapshots 24h: {snapshots_24h}\n"
         f"Stable: score>={STABLE_LEADER_MIN_SCORE}, Δ{STABLE_LEADER_DELTA_MIN}..{STABLE_LEADER_DELTA_MAX}\n"
         f"Shadow ignition: {ENABLE_SHADOW_EMERGENCE_TELEMETRY} | Δ{CONTROLLED_IGNITION_DELTA_MIN}..{CONTROLLED_IGNITION_DELTA_MAX}\n"
+        f"Shadow CQE: {ENABLE_SHADOW_CQE} | Q>={CQE_MIN_QUALITY_SCORE} | hold {CQE_SHADOW_HOLD_MINUTES}m\n"
         f"Max same symbol: {MAX_SAME_SYMBOL_OPEN}\n"
         f"OKX tradable cache: {len(OKX_TRADABLE_SPOT_INST_IDS)} pairs"
     )
@@ -2522,6 +2965,99 @@ def build_telegram_summary_message(cur, hours=24):
 
     return "\n".join(lines)
 
+
+
+def build_telegram_shadow_watch_message(cur, hours=12):
+    try:
+        cur.execute("""
+            SELECT
+                COUNT(*) FILTER (WHERE COALESCE(shadow_quiet_continuation_detected, FALSE) = TRUE) AS quiet_count,
+                COUNT(*) FILTER (WHERE COALESCE(shadow_emergence_detected, FALSE) = TRUE) AS ignition_count,
+                COUNT(*) FILTER (WHERE COALESCE(shadow_cqe_detected, FALSE) = TRUE) AS cqe_count,
+                COUNT(*) FILTER (WHERE decision = 'LONG') AS long_count
+            FROM signals_raw
+            WHERE timestamp >= NOW() - (%s || ' hours')::INTERVAL
+        """, (hours,))
+        quiet_count, ignition_count, cqe_count, long_count = cur.fetchone() or (0, 0, 0, 0)
+
+        cur.execute("""
+            SELECT
+                COUNT(*) FILTER (WHERE status = 'OPEN') AS open_cqe,
+                COUNT(*) FILTER (WHERE status = 'CLOSED') AS closed_cqe,
+                COALESCE(ROUND(AVG(pnl_percent) FILTER (WHERE status = 'CLOSED')::numeric, 3), 0) AS avg_closed_pnl,
+                COALESCE(ROUND(SUM(pnl_gbp) FILTER (WHERE status = 'CLOSED')::numeric, 3), 0) AS closed_pnl_gbp,
+                COALESCE(ROUND(AVG(peak_pnl_percent)::numeric, 3), 0) AS avg_peak
+            FROM bot_trades_v4
+            WHERE COALESCE(is_shadow, FALSE) = TRUE
+              AND entry_quality = 'SHADOW_CQE_V1'
+              AND opened_at >= NOW() - (%s || ' hours')::INTERVAL
+        """, (hours,))
+        open_cqe, closed_cqe, avg_closed_pnl, closed_pnl_gbp, avg_peak = cur.fetchone() or (0, 0, 0, 0, 0)
+
+        cur.execute("""
+            SELECT
+                id,
+                symbol,
+                opened_at,
+                entry_price,
+                peak_pnl_percent,
+                COALESCE(cqe_quality_score_at_entry, 0) AS q
+            FROM bot_trades_v4
+            WHERE COALESCE(is_shadow, FALSE) = TRUE
+              AND entry_quality = 'SHADOW_CQE_V1'
+              AND status = 'OPEN'
+            ORDER BY opened_at DESC
+            LIMIT 10
+        """)
+        open_rows = cur.fetchall()
+
+        cur.execute("""
+            SELECT
+                timestamp,
+                symbol,
+                momentum,
+                trend,
+                COALESCE(cqe_quality_score, 0) AS q,
+                COALESCE(cqe_momentum_accel_30m, 0) AS m_acc,
+                COALESCE(cqe_trend_accel_30m, 0) AS t_acc,
+                block_reason
+            FROM signals_raw
+            WHERE timestamp >= NOW() - (%s || ' hours')::INTERVAL
+              AND COALESCE(shadow_cqe_detected, FALSE) = TRUE
+            ORDER BY timestamp DESC
+            LIMIT 8
+        """, (hours,))
+        cqe_signal_rows = cur.fetchall()
+
+        lines = [
+            f"🕵️ <b>Shadow Watch {hours}h</b>",
+            f"LONG signals: <b>{long_count}</b>",
+            f"CQE signals: <b>{cqe_count}</b> | Open shadow CQE: <b>{open_cqe}</b> | Closed: <b>{closed_cqe}</b>",
+            f"CQE closed avg: <b>{fmt_num(avg_closed_pnl)}%</b> | {fmt_money(closed_pnl_gbp)} | Avg peak {fmt_num(avg_peak)}%",
+            f"Quiet old shadows: {quiet_count} | Ignition shadows: {ignition_count}",
+        ]
+
+        if open_rows:
+            lines.append("\n<b>Open CQE shadow trades</b>")
+            for tid, sym, opened_at, entry_price, peak, q in open_rows:
+                lines.append(f"{sym} | Q{q} | peak {fmt_num(peak)}% | ID {tid}")
+
+        if cqe_signal_rows:
+            lines.append("\n<b>Latest CQE signals</b>")
+            for ts, sym, mom, tr, q, m_acc, t_acc, block in cqe_signal_rows:
+                lines.append(
+                    f"{sym} | Q{q} | T/M {fmt_num(tr)}/{fmt_num(mom)} | "
+                    f"acc {fmt_num(t_acc)}/{fmt_num(m_acc)} | {block or 'no_block'}"
+                )
+        else:
+            lines.append("\nNo CQE candidates in this window.")
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        print(f"⚠️ shadow watch failed: {e}", flush=True)
+        return f"🕵️ <b>Shadow Watch</b>\nUnavailable: {e}"
+
 def handle_telegram_command(text):
     cmd = (text or "").strip().lower().split()[0] if text else "/help"
     conn = get_db()
@@ -2536,6 +3072,8 @@ def handle_telegram_command(text):
             return "🧠 <b>Top Leadership States</b>\n" + get_top_leaders_text(cur, 10)
         if cmd in ["/lifecycle", "/phases"]:
             return "🧬 <b>Leadership Lifecycle</b>\n" + get_lifecycle_dashboard_text(cur, 12)
+        if cmd in ["/shadows", "/shadow", "/cqe"]:
+            return build_telegram_shadow_watch_message(cur, 12)
         if cmd == "/health":
             return build_telegram_health_message(cur)
         if cmd == "/help":
@@ -2546,6 +3084,7 @@ def handle_telegram_command(text):
                 "/open - open trades with latest signal/leadership\n"
                 "/leaders - current leadership leaderboard\n"
                 "/lifecycle - lifecycle phases + deltas\n"
+                "/shadows - CQE shadow watch + open paper trades\n"
                 "/health - webhook/server health\n"
                 "/help - command list"
             )
@@ -2662,6 +3201,17 @@ def bool_status():
         "CLIMAX_LEADER_DELTA_BLOCK": CLIMAX_LEADER_DELTA_BLOCK,
         "ENABLE_EMERGING_LEADER_ENTRIES": ENABLE_EMERGING_LEADER_ENTRIES,
         "ENABLE_SHADOW_EMERGENCE_TELEMETRY": ENABLE_SHADOW_EMERGENCE_TELEMETRY,
+        "ENABLE_SHADOW_QUIET_CONTINUATION": ENABLE_SHADOW_QUIET_CONTINUATION,
+        "ENABLE_SHADOW_CQE": ENABLE_SHADOW_CQE,
+        "ENABLE_SHADOW_CQE_TELEGRAM_ALERTS": ENABLE_SHADOW_CQE_TELEGRAM_ALERTS,
+        "CQE_MIN_QUALITY_SCORE": CQE_MIN_QUALITY_SCORE,
+        "CQE_SHADOW_HOLD_MINUTES": CQE_SHADOW_HOLD_MINUTES,
+        "CQE_MAX_OPEN_SHADOW_TRADES": CQE_MAX_OPEN_SHADOW_TRADES,
+        "CQE_MAX_SAME_SYMBOL_SHADOW_OPEN": CQE_MAX_SAME_SYMBOL_SHADOW_OPEN,
+        "QUIET_CONTINUATION_MAX_SCORE": QUIET_CONTINUATION_MAX_SCORE,
+        "QUIET_CONTINUATION_MIN_TREND": QUIET_CONTINUATION_MIN_TREND,
+        "QUIET_CONTINUATION_MIN_MOMENTUM": QUIET_CONTINUATION_MIN_MOMENTUM,
+        "QUIET_CONTINUATION_MAX_DELTA_30M": QUIET_CONTINUATION_MAX_DELTA_30M,
         "CONTROLLED_IGNITION_MIN_SCORE": CONTROLLED_IGNITION_MIN_SCORE,
         "CONTROLLED_IGNITION_MAX_SCORE": CONTROLLED_IGNITION_MAX_SCORE,
         "CONTROLLED_IGNITION_DELTA_MIN": CONTROLLED_IGNITION_DELTA_MIN,
