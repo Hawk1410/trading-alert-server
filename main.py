@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v6.1.6
-# TITLE: LEADERSHIP LIVE ENGINE + SHADOW CQE CONTINUATION QUALITY ENGINE + TELEGRAM OPS
+# VERSION: v6.1.7
+# TITLE: LEADERSHIP LIVE ENGINE + CQE LIVE SPECIALIST + SHADOW CQE + TELEGRAM OPS
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v6.1.6 SHADOW CQE + LEADERSHIP LIVE RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v6.1.7 CQE LIVE SPECIALIST + LEADERSHIP LIVE RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -56,7 +56,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 MAX_OPEN_TRADES = int(os.environ.get("MAX_OPEN_TRADES", "5") or 5)
 MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 30)
 
-DATA_VERSION = "v6.1.6"
+DATA_VERSION = "v6.1.7"
 
 MAX_SAME_SYMBOL_OPEN = int(os.environ.get("MAX_SAME_SYMBOL_OPEN", "1") or 1)
 ENABLE_SAME_SYMBOL_STACKING_LIMIT = os.environ.get("ENABLE_SAME_SYMBOL_STACKING_LIMIT", "true").lower() == "true"
@@ -141,6 +141,23 @@ CQE_MAX_SAME_SYMBOL_SHADOW_OPEN = int(os.environ.get("CQE_MAX_SAME_SYMBOL_SHADOW
 CQE_PEAK_ALERT_TRIGGER = float(os.environ.get("CQE_PEAK_ALERT_TRIGGER", "0.75") or 0.75)
 CQE_RUNNER_ALERT_TRIGGER = float(os.environ.get("CQE_RUNNER_ALERT_TRIGGER", "2.00") or 2.00)
 
+
+
+
+# =========================
+# 🧬 CQE LIVE SPECIALIST ENGINE v1
+# =========================
+ENABLE_LIVE_CQE = os.environ.get("ENABLE_LIVE_CQE", "false").lower() == "true"
+
+LIVE_CQE_TRADE_SIZE_GBP = float(os.environ.get("LIVE_CQE_TRADE_SIZE_GBP", "5") or 5)
+LIVE_CQE_MAX_OPEN_TRADES = int(os.environ.get("LIVE_CQE_MAX_OPEN_TRADES", "1") or 1)
+LIVE_CQE_MAX_SAME_SYMBOL_OPEN = int(os.environ.get("LIVE_CQE_MAX_SAME_SYMBOL_OPEN", "1") or 1)
+
+LIVE_CQE_MIN_QUALITY_SCORE = int(os.environ.get("LIVE_CQE_MIN_QUALITY_SCORE", "8") or 8)
+LIVE_CQE_MIN_LEADERSHIP = float(os.environ.get("LIVE_CQE_MIN_LEADERSHIP", "0.25") or 0.25)
+LIVE_CQE_MAX_LEADERSHIP = float(os.environ.get("LIVE_CQE_MAX_LEADERSHIP", "1.50") or 1.50)
+
+LIVE_CQE_HARD_STOP = float(os.environ.get("LIVE_CQE_HARD_STOP", "-0.60") or -0.60)
 
 
 # Dynamic sizing tiers.
@@ -1502,6 +1519,8 @@ def classify_leadership_tier(prior_avg_peak):
     return "LEADERSHIP_CORE"
 
 def get_trade_size_for_quality(entry_quality):
+    if entry_quality == "LIVE_CQE_V1":
+        return LIVE_CQE_TRADE_SIZE_GBP
     if entry_quality == "LEADERSHIP_MONSTER":
         return MONSTER_TRADE_SIZE_GBP
     if entry_quality == "LEADERSHIP_AGGRESSIVE":
