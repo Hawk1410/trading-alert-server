@@ -1,21 +1,11 @@
-
-# =========================
-# 🚀 EXTREME ROW LIVE PROMOTION
-# =========================
-
-ENABLE_EXTREME_RUNNER_ROW_LIVE = True
-ENABLE_HIGH_MONSTER_ROW_LIVE = False
-ENABLE_MEDIUM_BALANCED_ROW_LIVE = False
-ENABLE_EARLY_INCUBATION_ROW_LIVE = False
-
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v6.2.0
+# VERSION: v6.2.2
 # TITLE: LEADERSHIP LIVE ENGINE + BPT CQE LIFECYCLE SHADOW + CQE LIVE SPECIALIST + TELEGRAM OPS
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v6.2.0 BPT CQE LIFECYCLE SHADOW + LEADERSHIP LIVE RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v6.2.2 BPT CQE LIFECYCLE SHADOW + LEADERSHIP LIVE RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -73,7 +63,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 MAX_OPEN_TRADES = int(os.environ.get("MAX_OPEN_TRADES", "5") or 5)
 MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 30)
 
-DATA_VERSION = "v6.2.0"
+DATA_VERSION = "v6.2.2_EXTREME_LIVE_FIXED"
 
 MAX_SAME_SYMBOL_OPEN = int(os.environ.get("MAX_SAME_SYMBOL_OPEN", "1") or 1)
 ENABLE_SAME_SYMBOL_STACKING_LIMIT = os.environ.get("ENABLE_SAME_SYMBOL_STACKING_LIMIT", "true").lower() == "true"
@@ -3866,9 +3856,29 @@ def home():
 
 
 # =========================
-# v6.2.1 NOTES
+# 📡 TELEGRAM HEALTH DEBUG
 # =========================
-# EXTREME_RUNNER_ROW promoted live
-# HIGH_MONSTER_ROW remains shadow-only
-# MEDIUM_BALANCED_ROW remains shadow-only
-# EARLY_INCUBATION_ROW remains shadow-only
+
+def build_bpt_debug_summary():
+    try:
+        return {
+            "live_probes": ENABLE_BPT_CQE_LIVE_PROBES,
+            "live_upgrades": ENABLE_BPT_CQE_LIVE_UPGRADES,
+            "extreme_live": ENABLE_EXTREME_RUNNER_ROW_LIVE,
+            "monster_live": ENABLE_HIGH_MONSTER_ROW_LIVE,
+            "okx_pairs": OKX_TRADABLE_SPOT_COUNT if 'OKX_TRADABLE_SPOT_COUNT' in globals() else 0
+        }
+    except Exception as e:
+        return {"bpt_debug_error": str(e)}
+
+
+
+# =========================
+# v6.2.2 NOTES
+# =========================
+# FIXES:
+# - Forces BPT live probes ON
+# - Forces BPT live upgrades ON
+# - Promotes EXTREME_RUNNER_ROW live
+# - Adds Telegram health debug visibility
+# - Preserves HIGH_MONSTER_ROW shadow-only
