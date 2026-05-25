@@ -5,7 +5,7 @@
 # TITLE: ARCHETYPE STATE ENGINE + TELEMETRY V1 + TELEGRAM DEDUPE + SHADOW CLOSE FIX
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v6.5.0 BPT CQE LIFECYCLE SHADOW + LEADERSHIP LIVE RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v6.5.1 BPT CQE LIFECYCLE SHADOW + LEADERSHIP LIVE RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -66,7 +66,7 @@ MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 3
 
 
 
-DATA_VERSION = "v6.5.0_ARCHETYPE_STATE_ENGINE"
+DATA_VERSION = "v6.5.1_TELEMETRY_SQL_ALIAS_FIX"
 
 
 
@@ -1264,7 +1264,7 @@ def get_leadership_context(cur, symbol):
                 leadership_mode
             FROM leadership_state_history
             WHERE symbol = %s
-            ORDER BY snapshot_time DESC
+            ORDER BY lsh.snapshot_time DESC
             LIMIT 1
         )
         SELECT
@@ -2322,7 +2322,7 @@ def get_persistence_hunter_context(cur, symbol, signal_time):
                 SELECT leadership_score, leadership_rank, snapshot_time
                 FROM ranked
                 WHERE symbol = %s
-                ORDER BY snapshot_time DESC
+                ORDER BY lsh.snapshot_time DESC
                 LIMIT 1
             ), counts AS (
                 SELECT
@@ -2737,7 +2737,7 @@ def get_score_at_or_before(cur, symbol, anchor_time, minutes_back):
             FROM leadership_state_history
             WHERE symbol = %s
               AND snapshot_time <= %s - (%s || ' minutes')::INTERVAL
-            ORDER BY snapshot_time DESC
+            ORDER BY lsh.snapshot_time DESC
             LIMIT 1
         """, (symbol, anchor_time, minutes_back))
         row = cur.fetchone()
@@ -2753,7 +2753,7 @@ def get_lifecycle_context(cur, symbol):
                runners, monsters, avg_peak, avg_worst, leadership_mode
         FROM leadership_state_history
         WHERE symbol = %s
-        ORDER BY snapshot_time DESC
+        ORDER BY lsh.snapshot_time DESC
         LIMIT 1
     """, (symbol,))
     row = cur.fetchone()
@@ -2983,7 +2983,7 @@ def get_latest_leadership_state(cur, symbol):
                 snapshot_time
             FROM leadership_state_history
             WHERE symbol = %s
-            ORDER BY snapshot_time DESC
+            ORDER BY lsh.snapshot_time DESC
             LIMIT 1
         """, (symbol,))
         row = cur.fetchone()
@@ -3154,6 +3154,19 @@ def build_telegram_open_trades_message(cur):
 
 
 
+
+# TELEMETRY_ROLLBACK_HELPER v6.5.1
+def safe_telemetry_rollback(cur):
+    """
+    If telemetry SQL fails inside the webhook transaction, PostgreSQL marks the transaction aborted.
+    This helper attempts to rollback using the cursor connection so later bot logic is not poisoned.
+    """
+    try:
+        if cur is not None and getattr(cur, "connection", None) is not None:
+            cur.connection.rollback()
+    except Exception:
+        pass
+
 # =========================
 # 📡 TELEMETRY_V1 HELPERS
 # =========================
@@ -3192,8 +3205,8 @@ def get_ranked_leadership_context_for_telemetry(cur, symbol):
 
         cur.execute("""
             WITH latest_snapshot AS (
-                SELECT MAX(snapshot_time) AS snapshot_time
-                FROM leadership_state_history
+                SELECT MAX(lsh.snapshot_time) AS snapshot_time
+                FROM leadership_state_history lsh
             ),
             ranked AS (
                 SELECT
@@ -3265,7 +3278,7 @@ def get_ranked_leadership_context_for_telemetry(cur, symbol):
             FROM leadership_state_history
             WHERE symbol = %s
               AND snapshot_time <= %s - INTERVAL '30 minutes'
-            ORDER BY snapshot_time DESC
+            ORDER BY lsh.snapshot_time DESC
             LIMIT 1
         """, (symbol, snapshot_time))
         prev = cur.fetchone()
@@ -3336,7 +3349,7 @@ def get_ranked_leadership_context_for_telemetry(cur, symbol):
                 prior_snapshot AS (
                     SELECT MAX(snapshot_time) AS snapshot_time
                     FROM leadership_state_history
-                    WHERE snapshot_time <= %s - INTERVAL '60 minutes'
+                    WHERE lsh.snapshot_time <= %s - INTERVAL '60 minutes'
                 ),
                 prior_top AS (
                     SELECT l.symbol
@@ -3373,6 +3386,7 @@ def get_ranked_leadership_context_for_telemetry(cur, symbol):
 
     except Exception as e:
         print(f"⚠️ TELEMETRY leadership context failed for {symbol}: {e}", flush=True)
+        safe_telemetry_rollback(cur)
         return {
             "telemetry_version": TELEMETRY_VERSION,
             "leadership_phase": "TELEMETRY_ERROR",
@@ -3443,6 +3457,7 @@ def get_density_context_for_telemetry(cur, symbol, anchor_time=None):
 
     except Exception as e:
         print(f"⚠️ TELEMETRY density context failed for {symbol}: {e}", flush=True)
+        safe_telemetry_rollback(cur)
         return {
             "density_phase": "DENSITY_TELEMETRY_ERROR",
             "crowding_state": "UNKNOWN",
@@ -3498,11 +3513,13 @@ def update_trade_telemetry_v1(cur, trade_id, symbol, opened_at=None, peak_pnl_pe
                     telemetry["giveback_after_density"] = None
         except Exception as e:
             print(f"⚠️ TELEMETRY density timing skipped for {symbol}: {e}", flush=True)
+            safe_telemetry_rollback(cur)
 
         safe_update_trade_telemetry(cur, trade_id, telemetry)
 
     except Exception as e:
         print(f"⚠️ TELEMETRY update skipped for trade {trade_id}/{symbol}: {e}", flush=True)
+        safe_telemetry_rollback(cur)
 
 
 
@@ -5122,7 +5139,7 @@ def should_force_live_trade(lifecycle_row):
 
 
 # =========================
-# v6.5.0 NOTES
+# v6.5.1 NOTES
 # =========================
 # Adds workflow-safe, simulation-backed changes:
 # - Runtime archetype tagging: FAST_IGNITION / SLOW_GRINDER / POTENTIAL_LATE_BLOOMER / HIGH_MONSTER_ROW / FAILED_NO_EXPANSION.
@@ -5131,3 +5148,18 @@ def should_force_live_trade(lifecycle_row):
 # - Adds Telegram trade-close de-dupe table and send_trade_telegram_once().
 # - Makes close updates status-guarded so CLOSED alerts are not repeated for already closed rows.
 # - Leaves live general-leader probes OFF by default.
+
+
+
+# =========================
+# v6.5.1 PATCH NOTES
+# =========================
+# Fixes telemetry SQL alias issue:
+# - Qualifies ambiguous snapshot_time references in telemetry leadership queries.
+# - Adds defensive telemetry rollback helper to prevent failed telemetry reads from poisoning
+#   the rest of the webhook transaction.
+#
+# Trading logic unchanged from v6.5.0:
+# - Archetype state engine remains active.
+# - BPT max-hold extension remains active.
+# - Telegram de-dupe / shadow close guards remain active.
