@@ -1,3 +1,13 @@
+
+# =========================
+# 🚀 EXTREME ROW LIVE PROMOTION
+# =========================
+
+ENABLE_EXTREME_RUNNER_ROW_LIVE = True
+ENABLE_HIGH_MONSTER_ROW_LIVE = False
+ENABLE_MEDIUM_BALANCED_ROW_LIVE = False
+ENABLE_EARLY_INCUBATION_ROW_LIVE = False
+
 # =========================
 # 🤖 BOT VERSION
 # =========================
@@ -3853,3 +3863,12 @@ def home():
         "engine": "LEADERSHIP_SIGNAL_SCORED",
         "okx_execution": bool_status()
     }), 200
+
+
+# =========================
+# v6.2.1 NOTES
+# =========================
+# EXTREME_RUNNER_ROW promoted live
+# HIGH_MONSTER_ROW remains shadow-only
+# MEDIUM_BALANCED_ROW remains shadow-only
+# EARLY_INCUBATION_ROW remains shadow-only
