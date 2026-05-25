@@ -2,10 +2,10 @@
 # 🤖 BOT VERSION
 # =========================
 # VERSION: v6.4.0
-# TITLE: LEADERSHIP LIVE ENGINE + PERSISTENCE HUNTER SHADOW + BPT CQE LIFECYCLE + TELEGRAM OPS
+# TITLE: ARCHETYPE STATE ENGINE + TELEMETRY V1 + TELEGRAM DEDUPE + SHADOW CLOSE FIX
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v6.4.0 BPT CQE LIFECYCLE SHADOW + LEADERSHIP LIVE RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v6.5.0 BPT CQE LIFECYCLE SHADOW + LEADERSHIP LIVE RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -66,10 +66,43 @@ MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 3
 
 
 
-DATA_VERSION = "v6.4.0_TELEMETRY_V1"
+DATA_VERSION = "v6.5.0_ARCHETYPE_STATE_ENGINE"
 
 
 
+
+
+# =========================
+# 🧬 v6.5 ARCHETYPE STATE ENGINE
+# =========================
+# Simulation-backed parameters as of 2026-05-25:
+# - Best blanket lifecycle: kill no-progress after 120m if peak < 1%.
+# - Let leaders breathe; only protect after peak >= 3% and DD >= 1.5%.
+# - Do NOT remove max hold universally. Use adaptive/structural backstop.
+# - Add archetype tagging for future separate exit engines.
+
+ENABLE_ARCHETYPE_STATE_ENGINE = os.environ.get("ENABLE_ARCHETYPE_STATE_ENGINE", "true").lower() == "true"
+ARCHETYPE_VERSION = "ARCHETYPE_V1"
+
+ARCH_NO_PROGRESS_MINUTES = float(os.environ.get("ARCH_NO_PROGRESS_MINUTES", "120") or 120)
+ARCH_NO_PROGRESS_PEAK = float(os.environ.get("ARCH_NO_PROGRESS_PEAK", "1.0") or 1.0)
+ARCH_PROTECT_MINUTES = float(os.environ.get("ARCH_PROTECT_MINUTES", "60") or 60)
+ARCH_PROTECT_PEAK = float(os.environ.get("ARCH_PROTECT_PEAK", "3.0") or 3.0)
+ARCH_PROTECT_DRAWDOWN = float(os.environ.get("ARCH_PROTECT_DRAWDOWN", "1.5") or 1.5)
+ARCH_LEADERSHIP_DECAY_RATIO = float(os.environ.get("ARCH_LEADERSHIP_DECAY_RATIO", "0.50") or 0.50)
+
+# Safety backstop remains, but HIGH_MONSTER / grinder-style trades are no longer
+# killed solely because the clock expired while DD is still healthy.
+ENABLE_ADAPTIVE_BPT_MAX_HOLD = os.environ.get("ENABLE_ADAPTIVE_BPT_MAX_HOLD", "true").lower() == "true"
+BPT_EXTEND_MAX_HOLD_IF_PEAK_ABOVE = float(os.environ.get("BPT_EXTEND_MAX_HOLD_IF_PEAK_ABOVE", "3.0") or 3.0)
+BPT_EXTEND_MAX_HOLD_IF_DD_BELOW = float(os.environ.get("BPT_EXTEND_MAX_HOLD_IF_DD_BELOW", "1.5") or 1.5)
+
+# Experimental: keep OFF by default. Allows a tiny real probe for validated persistence archetypes later.
+ENABLE_GENERAL_LEADER_LIVE_PROBES = os.environ.get("ENABLE_GENERAL_LEADER_LIVE_PROBES", "false").lower() == "true"
+GENERAL_LEADER_PROBE_SIZE_GBP = float(os.environ.get("GENERAL_LEADER_PROBE_SIZE_GBP", "5") or 5)
+
+# Telegram de-duplication. Prevents repeated close alerts on every later signal.
+ENABLE_TELEGRAM_DEDUPE = os.environ.get("ENABLE_TELEGRAM_DEDUPE", "true").lower() == "true"
 # =========================
 # 🧠 v6.3.1 LIVE LEARNING PATCH
 # =========================
@@ -556,6 +589,106 @@ def telegram_send_message(chat_id, message):
 
 def send_telegram_alert(message):
     return telegram_send_message(TELEGRAM_CHAT_ID, message)
+
+
+# =========================
+# 🧬 v6.5 TELEGRAM DEDUPE + ARCHETYPE HELPERS
+# =========================
+
+def ensure_telegram_alert_log_table(cur):
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS telegram_alert_log (
+            id BIGSERIAL PRIMARY KEY,
+            alert_key TEXT UNIQUE,
+            trade_id TEXT,
+            event_type TEXT,
+            symbol TEXT,
+            sent_at TIMESTAMPTZ DEFAULT NOW(),
+            data_version TEXT
+        )
+    """)
+
+
+def send_trade_telegram_once(cur, trade_id, event_type, symbol, message):
+    """Send a Telegram trade alert once per trade/event type.
+    Critical for shadow close alerts: prevents the same CLOSED message firing on every new webhook.
+    """
+    if not ENABLE_TELEGRAM_DEDUPE:
+        return send_telegram_alert(message)
+    try:
+        ensure_telegram_alert_log_table(cur)
+        alert_key = f"{event_type}:{trade_id}"
+        cur.execute("""
+            INSERT INTO telegram_alert_log (alert_key, trade_id, event_type, symbol, data_version)
+            VALUES (%s,%s,%s,%s,%s)
+            ON CONFLICT (alert_key) DO NOTHING
+            RETURNING id
+        """, (alert_key, str(trade_id), event_type, symbol, DATA_VERSION))
+        inserted = cur.fetchone()
+        if inserted:
+            return send_telegram_alert(message)
+        print(f"🔕 TELEGRAM DEDUPE SKIP | {event_type} | {symbol} | {trade_id}", flush=True)
+        return False
+    except Exception as e:
+        print(f"⚠️ Telegram de-dupe failed, sending normally | {e}", flush=True)
+        return send_telegram_alert(message)
+
+
+def classify_runtime_archetype(lifecycle_row=None, mins=0, current_peak=0, pnl_percent=0, trend=0, momentum=0, leadership_score=None, density_phase=None):
+    """Runtime-safe archetype classifier.
+    It does NOT use future data. Archetype can evolve during the trade.
+    """
+    try:
+        mins = float(mins or 0)
+        current_peak = float(current_peak or 0)
+        pnl_percent = float(pnl_percent or 0)
+        trend = float(trend or 0)
+        momentum = float(momentum or 0)
+        leadership_score = float(leadership_score or 0)
+    except Exception:
+        return "GENERAL_LEADER"
+
+    if lifecycle_row == "HIGH_MONSTER_ROW" and current_peak >= 3.0:
+        return "HIGH_MONSTER_ROW"
+    if mins <= 60 and current_peak >= 2.0:
+        return "FAST_IGNITION"
+    if mins >= ARCH_NO_PROGRESS_MINUTES and current_peak < ARCH_NO_PROGRESS_PEAK:
+        if leadership_score >= 1.25 and trend >= 0.20:
+            return "POTENTIAL_LATE_BLOOMER"
+        return "FAILED_NO_EXPANSION"
+    if mins <= 240 and current_peak >= 3.0 and pnl_percent > 0 and trend >= 0.20:
+        return "SLOW_GRINDER"
+    if density_phase in ["CROWDING_EXPANDING", "CROWDED"] and current_peak >= 3.0:
+        return "CROWDED_RUNNER"
+    if current_peak >= 3.0:
+        return "GENERAL_RUNNER"
+    return "GENERAL_LEADER"
+
+
+def ensure_archetype_state_columns(cur):
+    cur.execute("""
+        ALTER TABLE bot_trades_v4
+        ADD COLUMN IF NOT EXISTS entry_archetype TEXT,
+        ADD COLUMN IF NOT EXISTS current_archetype TEXT,
+        ADD COLUMN IF NOT EXISTS archetype_version TEXT,
+        ADD COLUMN IF NOT EXISTS archetype_exit_reason TEXT,
+        ADD COLUMN IF NOT EXISTS archetype_updated_at TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS telegram_close_alert_sent BOOLEAN DEFAULT FALSE,
+        ADD COLUMN IF NOT EXISTS telegram_close_alert_sent_at TIMESTAMPTZ
+    """)
+
+
+def update_trade_archetype(cur, trade_id, archetype):
+    try:
+        ensure_archetype_state_columns(cur)
+        safe_update_trade_telemetry(cur, trade_id, {
+            "current_archetype": archetype,
+            "archetype_version": ARCHETYPE_VERSION,
+            "archetype_updated_at": datetime.now(timezone.utc),
+        })
+    except Exception as e:
+        print(f"⚠️ archetype update skipped for {trade_id}: {e}", flush=True)
+
 
 # =========================
 # OKX HELPERS
@@ -1584,9 +1717,16 @@ def process_shadow_cqe_trades(cur, symbol, price, momentum, trend, now):
                     close_price = %s,
                     pnl_percent = %s,
                     pnl_gbp = %s,
-                    close_reason = %s
+                    close_reason = %s,
+                    telegram_close_alert_sent = FALSE
                 WHERE id = %s
+                  AND status = 'OPEN'
+                RETURNING id
             """, (price, pnl_percent, pnl_gbp, close_reason, tid))
+            closed_row = cur.fetchone()
+            if not closed_row:
+                print(f"🔕 BPT close skipped; trade already closed or not open | {tid}", flush=True)
+                continue
 
             safe_update_trade_telemetry(cur, tid, {
                 "exit_architecture": "SHADOW_CQE_V1",
@@ -1651,7 +1791,13 @@ def ensure_bpt_cqe_lifecycle_columns(cur):
         ADD COLUMN IF NOT EXISTS ph_top3_hits_240m INTEGER,
         ADD COLUMN IF NOT EXISTS ph_first_density_seen BOOLEAN DEFAULT FALSE,
         ADD COLUMN IF NOT EXISTS ph_mins_to_density NUMERIC,
-        ADD COLUMN IF NOT EXISTS ph_density_phase TEXT
+        ADD COLUMN IF NOT EXISTS ph_density_phase TEXT,
+        ADD COLUMN IF NOT EXISTS entry_archetype TEXT,
+        ADD COLUMN IF NOT EXISTS current_archetype TEXT,
+        ADD COLUMN IF NOT EXISTS archetype_version TEXT,
+        ADD COLUMN IF NOT EXISTS archetype_exit_reason TEXT,
+        ADD COLUMN IF NOT EXISTS telegram_close_alert_sent BOOLEAN DEFAULT FALSE,
+        ADD COLUMN IF NOT EXISTS telegram_close_alert_sent_at TIMESTAMPTZ
     """)
 
 
@@ -1791,6 +1937,9 @@ def open_bpt_cqe_probe_trade(cur, symbol, price, momentum, trend, signal_id, sig
         "lifecycle_trail_activation": params["trail_activation"],
         "lifecycle_trail_drawdown": params["trail_drawdown"],
         "lifecycle_classified_at": datetime.now(timezone.utc),
+        "entry_archetype": lifecycle_row,
+        "current_archetype": lifecycle_row,
+        "archetype_version": ARCHETYPE_VERSION,
         "cqe_confirmed": False,
         "cqe_upgraded": False,
         "lifecycle_phase_at_entry": (leadership_context or {}).get("lifecycle_phase") or (leadership_context or {}).get("leadership_phase"),
@@ -2039,7 +2188,23 @@ def process_bpt_cqe_lifecycle_trades(cur, symbol, price, momentum, trend, now):
         exit_architecture = None
         drawdown_from_peak = current_peak - pnl_percent
 
-        if cqe_upgraded:
+        runtime_archetype = classify_runtime_archetype(
+            lifecycle_row=lifecycle_row,
+            mins=mins,
+            current_peak=current_peak,
+            pnl_percent=pnl_percent,
+            trend=trend,
+            momentum=momentum,
+            leadership_score=None,
+            density_phase=None,
+        )
+        update_trade_archetype(cur, tid, runtime_archetype)
+
+        if ENABLE_ARCHETYPE_STATE_ENGINE and mins >= ARCH_NO_PROGRESS_MINUTES and current_peak < ARCH_NO_PROGRESS_PEAK:
+            close_reason = "arch_no_progress_120m"
+            exit_architecture = "ARCHETYPE_STATE_NO_PROGRESS"
+
+        if cqe_upgraded and not close_reason:
             if current_peak >= float(trail_activation or 999) and drawdown_from_peak >= float(trail_drawdown or 999):
                 close_reason = f"bpt_{(lifecycle_row or 'row').lower()}_wide_trail"
                 exit_architecture = "BPT_CQE_LIFECYCLE_ROW_TRAIL"
@@ -2052,8 +2217,21 @@ def process_bpt_cqe_lifecycle_trades(cur, symbol, price, momentum, trend, now):
                 exit_architecture = "BPT_CQE_PROBE_HARD_STOP"
 
         if not close_reason and mins >= BPT_CQE_MAX_HOLD_MINUTES:
-            close_reason = "bpt_safety_max_hold_exit"
-            exit_architecture = "BPT_CQE_SAFETY_BACKSTOP"
+            extend_for_healthy_leader = (
+                ENABLE_ADAPTIVE_BPT_MAX_HOLD
+                and current_peak >= BPT_EXTEND_MAX_HOLD_IF_PEAK_ABOVE
+                and drawdown_from_peak < BPT_EXTEND_MAX_HOLD_IF_DD_BELOW
+                and runtime_archetype in ["HIGH_MONSTER_ROW", "SLOW_GRINDER", "GENERAL_RUNNER", "FAST_IGNITION"]
+            )
+            if extend_for_healthy_leader:
+                print(
+                    f"⏳ BPT MAX HOLD EXTENDED | {sym} | {runtime_archetype} | "
+                    f"peak={round(current_peak,3)} dd={round(drawdown_from_peak,3)} age={round(mins,1)}m",
+                    flush=True
+                )
+            else:
+                close_reason = "bpt_safety_max_hold_exit"
+                exit_architecture = "BPT_CQE_SAFETY_BACKSTOP"
 
         if close_reason:
             pnl_gbp = (pnl_percent / 100) * float(dynamic_size or BPT_CQE_PROBE_SIZE_GBP)
@@ -2065,9 +2243,16 @@ def process_bpt_cqe_lifecycle_trades(cur, symbol, price, momentum, trend, now):
                     close_price = %s,
                     pnl_percent = %s,
                     pnl_gbp = %s,
-                    close_reason = %s
+                    close_reason = %s,
+                    telegram_close_alert_sent = FALSE
                 WHERE id = %s
+                  AND status = 'OPEN'
+                RETURNING id
             """, (price, pnl_percent, pnl_gbp, close_reason, tid))
+            closed_row = cur.fetchone()
+            if not closed_row:
+                print(f"🔕 BPT close skipped; trade already closed or not open | {tid}", flush=True)
+                continue
 
             safe_update_trade_telemetry(cur, tid, {
                 "exit_architecture": exit_architecture,
@@ -2075,6 +2260,9 @@ def process_bpt_cqe_lifecycle_trades(cur, symbol, price, momentum, trend, now):
                 "leadership_trend_at_exit": trend,
                 "leadership_momentum_at_exit": momentum,
                 "bpt_exit_reason": close_reason,
+                "archetype_exit_reason": close_reason,
+                "current_archetype": runtime_archetype,
+                "archetype_version": ARCHETYPE_VERSION,
             })
 
             try:
@@ -3771,6 +3959,8 @@ def webhook():
         ensure_signal_leadership_scores_table(cur)
         if ENABLE_BPT_CQE_LIFECYCLE_SHADOW:
             ensure_bpt_cqe_lifecycle_columns(cur)
+        if ENABLE_ARCHETYPE_STATE_ENGINE:
+            ensure_archetype_state_columns(cur)
 
         # ================= RAW SIGNAL — ALWAYS STORE =================
         cur.execute("""
@@ -4407,7 +4597,8 @@ def build_telegram_health_message(cur):
         f"Persistence Hunter: {ENABLE_PERSISTENCE_HUNTER_SHADOW} | live {ENABLE_PERSISTENCE_HUNTER_LIVE} | score>={PH_MIN_LEADERSHIP_SCORE} age {PH_MIN_CORE_AGE_MINUTES}-{PH_MAX_CORE_AGE_MINUTES}m\n"
         f"Max same symbol: {MAX_SAME_SYMBOL_OPEN}\n"
         f"OKX tradable cache: {len(OKX_TRADABLE_SPOT_INST_IDS)} pairs\n"
-        f"Telemetry V1: {ENABLE_TELEMETRY_V1} | {TELEMETRY_VERSION}"
+        f"Telemetry V1: {ENABLE_TELEMETRY_V1} | {TELEMETRY_VERSION}\n"
+        f"Archetype engine: {ENABLE_ARCHETYPE_STATE_ENGINE} | adaptive BPT max hold {ENABLE_ADAPTIVE_BPT_MAX_HOLD} | tg dedupe {ENABLE_TELEGRAM_DEDUPE}"
     )
 
 def build_telegram_summary_message(cur, hours=24):
@@ -4928,3 +5119,15 @@ def should_force_live_trade(lifecycle_row):
 # Adds Telegram:
 # - /telemetry
 # - /tel
+
+
+# =========================
+# v6.5.0 NOTES
+# =========================
+# Adds workflow-safe, simulation-backed changes:
+# - Runtime archetype tagging: FAST_IGNITION / SLOW_GRINDER / POTENTIAL_LATE_BLOOMER / HIGH_MONSTER_ROW / FAILED_NO_EXPANSION.
+# - Adaptive BPT max-hold: no hard clock close while a strong leader is still healthy with DD < 1.5%.
+# - Keeps bounded patience; does NOT remove max hold universally.
+# - Adds Telegram trade-close de-dupe table and send_trade_telegram_once().
+# - Makes close updates status-guarded so CLOSED alerts are not repeated for already closed rows.
+# - Leaves live general-leader probes OFF by default.
