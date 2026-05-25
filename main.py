@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v6.2.2
+# VERSION: v6.2.3
 # TITLE: LEADERSHIP LIVE ENGINE + BPT CQE LIFECYCLE SHADOW + CQE LIVE SPECIALIST + TELEGRAM OPS
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v6.2.2 BPT CQE LIFECYCLE SHADOW + LEADERSHIP LIVE RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v6.2.3 BPT CQE LIFECYCLE SHADOW + LEADERSHIP LIVE RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -63,7 +63,16 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 MAX_OPEN_TRADES = int(os.environ.get("MAX_OPEN_TRADES", "5") or 5)
 MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 30)
 
-DATA_VERSION = "v6.2.2_EXTREME_LIVE_FIXED"
+
+
+# =========================
+# 🚨 HARD RUNTIME OVERRIDES
+# =========================
+
+ENABLE_BPT_CQE_LIVE_PROBES = True
+ENABLE_BPT_CQE_LIVE_UPGRADES = True
+
+DATA_VERSION = "v6.2.3_RUNTIME_FLAGS_FIXED"
 
 MAX_SAME_SYMBOL_OPEN = int(os.environ.get("MAX_SAME_SYMBOL_OPEN", "1") or 1)
 ENABLE_SAME_SYMBOL_STACKING_LIMIT = os.environ.get("ENABLE_SAME_SYMBOL_STACKING_LIMIT", "true").lower() == "true"
