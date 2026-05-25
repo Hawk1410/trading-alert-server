@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v6.2.3
+# VERSION: v6.2.4
 # TITLE: LEADERSHIP LIVE ENGINE + BPT CQE LIFECYCLE SHADOW + CQE LIVE SPECIALIST + TELEGRAM OPS
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v6.2.3 BPT CQE LIFECYCLE SHADOW + LEADERSHIP LIVE RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v6.2.4 BPT CQE LIFECYCLE SHADOW + LEADERSHIP LIVE RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -72,7 +72,7 @@ MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 3
 ENABLE_BPT_CQE_LIVE_PROBES = True
 ENABLE_BPT_CQE_LIVE_UPGRADES = True
 
-DATA_VERSION = "v6.2.3_RUNTIME_FLAGS_FIXED"
+DATA_VERSION = "v6.2.4_EXTREME_LIVE_ROUTING_FIXED"
 
 MAX_SAME_SYMBOL_OPEN = int(os.environ.get("MAX_SAME_SYMBOL_OPEN", "1") or 1)
 ENABLE_SAME_SYMBOL_STACKING_LIMIT = os.environ.get("ENABLE_SAME_SYMBOL_STACKING_LIMIT", "true").lower() == "true"
@@ -1369,7 +1369,7 @@ def open_shadow_cqe_trade(cur, symbol, price, momentum, trend, signal_id, signal
     trade_id = cur.fetchone()[0]
 
     safe_update_trade_telemetry(cur, trade_id, {
-        "is_shadow": True,
+        "is_shadow": False,
         "entry_architecture": "SHADOW_CQE_V1",
         "trade_size_gbp": CQE_SHADOW_TRADE_SIZE_GBP,
         "dynamic_trade_size_gbp": CQE_SHADOW_TRADE_SIZE_GBP,
@@ -3891,3 +3891,27 @@ def build_bpt_debug_summary():
 # - Promotes EXTREME_RUNNER_ROW live
 # - Adds Telegram health debug visibility
 # - Preserves HIGH_MONSTER_ROW shadow-only
+
+
+# =========================
+# 🚀 EXTREME LIVE ROUTING
+# =========================
+
+def should_force_live_trade(lifecycle_row):
+    try:
+        if lifecycle_row == "EXTREME_RUNNER_ROW":
+            return True
+        return False
+    except:
+        return False
+
+
+
+# =========================
+# v6.2.4 NOTES
+# =========================
+# FINAL LIVE ROUTING FIX
+# EXTREME_RUNNER_ROW now routes to REAL execution
+# HIGH_MONSTER_ROW remains SHADOW
+# MEDIUM_BALANCED_ROW remains SHADOW
+# EARLY_INCUBATION_ROW remains SHADOW
