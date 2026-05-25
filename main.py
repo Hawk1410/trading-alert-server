@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v6.1.7
-# TITLE: LEADERSHIP LIVE ENGINE + CQE LIVE SPECIALIST + SHADOW CQE + TELEGRAM OPS
+# VERSION: v6.2.0
+# TITLE: LEADERSHIP LIVE ENGINE + CQE LIVE SPECIALIST + BPT LIFECYCLE CONFIG STAGE + TELEGRAM OPS
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v6.1.7 CQE LIVE SPECIALIST + LEADERSHIP LIVE RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v6.2.0 BPT LIFECYCLE CONFIG STAGE + LEADERSHIP LIVE RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -56,7 +56,146 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 MAX_OPEN_TRADES = int(os.environ.get("MAX_OPEN_TRADES", "5") or 5)
 MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 30)
 
-DATA_VERSION = "v6.1.7"
+DATA_VERSION = "v6.2.0"
+
+# =========================
+# 🤖 PATCH FILE
+# =========================
+# FILE: patch_1_config.py
+# VERSION: v6.2 BPT LIFECYCLE ENGINE (CONFIG ONLY)
+# PURPOSE:
+# Adds modular lifecycle-engine configuration
+# safely without altering execution logic yet.
+#
+# SAFE TO DEPLOY: ✅ YES
+# EXECUTION CHANGES: ❌ NONE
+# DATABASE CHANGES: ❌ NONE
+#
+# INSERTED BELOW:
+# DATA_VERSION = "v6.2.0"
+# =========================
+
+
+# =========================
+# 🧠 BPT LIFECYCLE ENGINE
+# =========================
+
+ENABLE_BPT_CQE_LIFECYCLE_SHADOW = True
+ENABLE_BPT_CQE_LIVE_PROBES = False
+ENABLE_BPT_CQE_LIVE_UPGRADES = False
+
+# =========================
+# 💰 CAPITAL SETTINGS
+# =========================
+
+BPT_PROBE_SIZE_GBP = 5.0
+
+BPT_UPGRADE_SIZE_EARLY_GBP = 10.0
+BPT_UPGRADE_SIZE_MEDIUM_GBP = 20.0
+BPT_UPGRADE_SIZE_HIGH_GBP = 35.0
+BPT_UPGRADE_SIZE_MONSTER_GBP = 50.0
+
+# =========================
+# 📊 QUALITY SCORE SETTINGS
+# =========================
+
+BPT_QUALITY_EXTREME = 2.0
+BPT_QUALITY_HIGH = 1.2
+BPT_QUALITY_MEDIUM = 0.7
+BPT_QUALITY_EARLY = 0.3
+
+# =========================
+# 🚀 LIFECYCLE PROMOTION RULES
+# =========================
+
+BPT_MIN_SIGNALS_FOR_UPGRADE = 2
+
+BPT_TOP3_CONFIRM_MINUTES = 45
+BPT_TOP3_CONFIRM_REQUIRED = True
+
+BPT_MONSTER_SCORE_MIN = 1.4
+BPT_MONSTER_PRIOR_SIGNALS_MIN = 20
+
+# =========================
+# ⏱️ LIFECYCLE EXIT SETTINGS
+# =========================
+
+# EARLY INCUBATION
+BPT_EARLY_FAILFAST_MINUTES = 120
+BPT_EARLY_MIN_PEAK = 1.0
+
+# EXTREME RUNNER
+BPT_EXTREME_TRAIL_TRIGGER = 2.0
+BPT_EXTREME_TRAIL_DD = 0.50
+
+# MEDIUM BALANCED
+BPT_MEDIUM_TRAIL_TRIGGER = 2.0
+BPT_MEDIUM_TRAIL_DD = 0.75
+
+# HIGH MONSTER
+BPT_MONSTER_TRAIL_TRIGGER = 3.0
+BPT_MONSTER_TRAIL_DD = 1.00
+
+# PRICE MONSTER LOCK
+BPT_ULTRA_MONSTER_TRIGGER = 5.0
+BPT_ULTRA_MONSTER_DD = 1.50
+
+# =========================
+# 🏆 LEADERSHIP STATE RULES
+# =========================
+
+BPT_REQUIRE_CORE_LEADERSHIP = True
+BPT_CORE_LEADERSHIP_SCORE = 2.0
+
+BPT_REQUIRE_TOP3_FOR_MONSTER = True
+BPT_REQUIRE_TOP2_FOR_ULTRA = False
+
+# =========================
+# 📈 TELEMETRY
+# =========================
+
+ENABLE_BPT_LIFECYCLE_LOGGING = True
+ENABLE_BPT_DEBUG_TELEMETRY = True
+ENABLE_BPT_UPGRADE_ALERTS = True
+ENABLE_BPT_EXIT_ALERTS = True
+
+# =========================
+# 🧪 SHADOW TESTING
+# =========================
+
+BPT_MAX_SHADOW_TRADES = 50
+BPT_MAX_SAME_SYMBOL_SHADOW = 1
+
+BPT_ALLOW_MULTI_ROW_RECLASSIFICATION = True
+
+# =========================
+# 🧠 RESEARCH NOTES
+# =========================
+#
+# Current architecture hypothesis:
+#
+# EARLY_INCUBATION_ROW
+# → low conviction
+# → cheap probes
+# → aggressive recycling
+#
+# EXTREME_RUNNER_ROW
+# → fast runners
+# → tighter trailing
+# → lower monster expectation
+#
+# MEDIUM_BALANCED_ROW
+# → broad continuation engine
+# → balanced trailing
+# → primary throughput layer
+#
+# HIGH_MONSTER_ROW
+# → elite leadership persistence
+# → slow wide trails
+# → designed to mature monsters
+#
+# =========================
+
 
 MAX_SAME_SYMBOL_OPEN = int(os.environ.get("MAX_SAME_SYMBOL_OPEN", "1") or 1)
 ENABLE_SAME_SYMBOL_STACKING_LIMIT = os.environ.get("ENABLE_SAME_SYMBOL_STACKING_LIMIT", "true").lower() == "true"
