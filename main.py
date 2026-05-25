@@ -2,10 +2,10 @@
 # 🤖 BOT VERSION
 # =========================
 # VERSION: v6.2.0
-# TITLE: LEADERSHIP LIVE ENGINE + CQE LIVE SPECIALIST + BPT LIFECYCLE CONFIG STAGE + TELEGRAM OPS
+# TITLE: LEADERSHIP LIVE ENGINE + BPT CQE LIFECYCLE SHADOW + CQE LIVE SPECIALIST + TELEGRAM OPS
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v6.2.0 BPT LIFECYCLE CONFIG STAGE + LEADERSHIP LIVE RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v6.2.0 BPT CQE LIFECYCLE SHADOW + LEADERSHIP LIVE RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -28,6 +28,13 @@ print("🔥🔥🔥 MAIN.PY v6.2.0 BPT LIFECYCLE CONFIG STAGE + LEADERSHIP LIVE 
 # ✅ Keeps max_open_trades = 5
 # ✅ Keeps max_same_symbol_open = 2
 # ✅ Keeps adaptive lifecycle exits
+#
+# ✅ v6.2.0 adds BPT_CQE_LIFECYCLE_V1 shadow architecture
+#      - £5 probe → confirmation → lifecycle row routing
+#      - simulated upgrades after 30m +1% confirmation
+#      - row-specific wide monster trails
+#      - safe live toggles default OFF
+# ✅ Existing leadership live engine is preserved unchanged by default
 #
 # IMPORTANT:
 # Create signal_leadership_scores table before/after deployment using the SQL provided.
@@ -57,145 +64,6 @@ MAX_OPEN_TRADES = int(os.environ.get("MAX_OPEN_TRADES", "5") or 5)
 MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 30)
 
 DATA_VERSION = "v6.2.0"
-
-# =========================
-# 🤖 PATCH FILE
-# =========================
-# FILE: patch_1_config.py
-# VERSION: v6.2 BPT LIFECYCLE ENGINE (CONFIG ONLY)
-# PURPOSE:
-# Adds modular lifecycle-engine configuration
-# safely without altering execution logic yet.
-#
-# SAFE TO DEPLOY: ✅ YES
-# EXECUTION CHANGES: ❌ NONE
-# DATABASE CHANGES: ❌ NONE
-#
-# INSERTED BELOW:
-# DATA_VERSION = "v6.2.0"
-# =========================
-
-
-# =========================
-# 🧠 BPT LIFECYCLE ENGINE
-# =========================
-
-ENABLE_BPT_CQE_LIFECYCLE_SHADOW = True
-ENABLE_BPT_CQE_LIVE_PROBES = False
-ENABLE_BPT_CQE_LIVE_UPGRADES = False
-
-# =========================
-# 💰 CAPITAL SETTINGS
-# =========================
-
-BPT_PROBE_SIZE_GBP = 5.0
-
-BPT_UPGRADE_SIZE_EARLY_GBP = 10.0
-BPT_UPGRADE_SIZE_MEDIUM_GBP = 20.0
-BPT_UPGRADE_SIZE_HIGH_GBP = 35.0
-BPT_UPGRADE_SIZE_MONSTER_GBP = 50.0
-
-# =========================
-# 📊 QUALITY SCORE SETTINGS
-# =========================
-
-BPT_QUALITY_EXTREME = 2.0
-BPT_QUALITY_HIGH = 1.2
-BPT_QUALITY_MEDIUM = 0.7
-BPT_QUALITY_EARLY = 0.3
-
-# =========================
-# 🚀 LIFECYCLE PROMOTION RULES
-# =========================
-
-BPT_MIN_SIGNALS_FOR_UPGRADE = 2
-
-BPT_TOP3_CONFIRM_MINUTES = 45
-BPT_TOP3_CONFIRM_REQUIRED = True
-
-BPT_MONSTER_SCORE_MIN = 1.4
-BPT_MONSTER_PRIOR_SIGNALS_MIN = 20
-
-# =========================
-# ⏱️ LIFECYCLE EXIT SETTINGS
-# =========================
-
-# EARLY INCUBATION
-BPT_EARLY_FAILFAST_MINUTES = 120
-BPT_EARLY_MIN_PEAK = 1.0
-
-# EXTREME RUNNER
-BPT_EXTREME_TRAIL_TRIGGER = 2.0
-BPT_EXTREME_TRAIL_DD = 0.50
-
-# MEDIUM BALANCED
-BPT_MEDIUM_TRAIL_TRIGGER = 2.0
-BPT_MEDIUM_TRAIL_DD = 0.75
-
-# HIGH MONSTER
-BPT_MONSTER_TRAIL_TRIGGER = 3.0
-BPT_MONSTER_TRAIL_DD = 1.00
-
-# PRICE MONSTER LOCK
-BPT_ULTRA_MONSTER_TRIGGER = 5.0
-BPT_ULTRA_MONSTER_DD = 1.50
-
-# =========================
-# 🏆 LEADERSHIP STATE RULES
-# =========================
-
-BPT_REQUIRE_CORE_LEADERSHIP = True
-BPT_CORE_LEADERSHIP_SCORE = 2.0
-
-BPT_REQUIRE_TOP3_FOR_MONSTER = True
-BPT_REQUIRE_TOP2_FOR_ULTRA = False
-
-# =========================
-# 📈 TELEMETRY
-# =========================
-
-ENABLE_BPT_LIFECYCLE_LOGGING = True
-ENABLE_BPT_DEBUG_TELEMETRY = True
-ENABLE_BPT_UPGRADE_ALERTS = True
-ENABLE_BPT_EXIT_ALERTS = True
-
-# =========================
-# 🧪 SHADOW TESTING
-# =========================
-
-BPT_MAX_SHADOW_TRADES = 50
-BPT_MAX_SAME_SYMBOL_SHADOW = 1
-
-BPT_ALLOW_MULTI_ROW_RECLASSIFICATION = True
-
-# =========================
-# 🧠 RESEARCH NOTES
-# =========================
-#
-# Current architecture hypothesis:
-#
-# EARLY_INCUBATION_ROW
-# → low conviction
-# → cheap probes
-# → aggressive recycling
-#
-# EXTREME_RUNNER_ROW
-# → fast runners
-# → tighter trailing
-# → lower monster expectation
-#
-# MEDIUM_BALANCED_ROW
-# → broad continuation engine
-# → balanced trailing
-# → primary throughput layer
-#
-# HIGH_MONSTER_ROW
-# → elite leadership persistence
-# → slow wide trails
-# → designed to mature monsters
-#
-# =========================
-
 
 MAX_SAME_SYMBOL_OPEN = int(os.environ.get("MAX_SAME_SYMBOL_OPEN", "1") or 1)
 ENABLE_SAME_SYMBOL_STACKING_LIMIT = os.environ.get("ENABLE_SAME_SYMBOL_STACKING_LIMIT", "true").lower() == "true"
@@ -297,6 +165,75 @@ LIVE_CQE_MIN_LEADERSHIP = float(os.environ.get("LIVE_CQE_MIN_LEADERSHIP", "0.25"
 LIVE_CQE_MAX_LEADERSHIP = float(os.environ.get("LIVE_CQE_MAX_LEADERSHIP", "1.50") or 1.50)
 
 LIVE_CQE_HARD_STOP = float(os.environ.get("LIVE_CQE_HARD_STOP", "-0.60") or -0.60)
+
+
+# =========================
+# 🧬 BPT CQE LIFECYCLE SHADOW v1
+# =========================
+# Simulation-derived architecture:
+# - cheap probe entries
+# - upgrade only after early expansion confirmation
+# - row-specific lifecycle exits
+# - default is shadow-only beside current live engine
+
+ENABLE_BPT_CQE_LIFECYCLE_SHADOW = os.environ.get(
+    "ENABLE_BPT_CQE_LIFECYCLE_SHADOW", "true"
+).lower() == "true"
+
+# Future live toggles. Keep both false until shadow confirms live behaviour.
+ENABLE_BPT_CQE_LIVE_PROBES = os.environ.get(
+    "ENABLE_BPT_CQE_LIVE_PROBES", "false"
+).lower() == "true"
+ENABLE_BPT_CQE_LIVE_UPGRADES = os.environ.get(
+    "ENABLE_BPT_CQE_LIVE_UPGRADES", "false"
+).lower() == "true"
+
+BPT_CQE_ENTRY_QUALITY = "BPT_CQE_LIFECYCLE_V1"
+BPT_CQE_PROBE_SIZE_GBP = float(os.environ.get("BPT_CQE_PROBE_SIZE_GBP", "5") or 5)
+BPT_CQE_MAX_OPEN_TRADES = int(os.environ.get("BPT_CQE_MAX_OPEN_TRADES", "5") or 5)
+BPT_CQE_MAX_SAME_SYMBOL_OPEN = int(os.environ.get("BPT_CQE_MAX_SAME_SYMBOL_OPEN", "1") or 1)
+
+# Probe gate from CQE/quiet-continuation findings.
+BPT_CQE_MIN_TREND = float(os.environ.get("BPT_CQE_MIN_TREND", "0.25") or 0.25)
+BPT_CQE_MIN_MOMENTUM = float(os.environ.get("BPT_CQE_MIN_MOMENTUM", "0.50") or 0.50)
+BPT_CQE_MAX_LEADERSHIP_SCORE = float(os.environ.get("BPT_CQE_MAX_LEADERSHIP_SCORE", "0.50") or 0.50)
+BPT_CQE_MAX_LEADERSHIP_DELTA_30M = float(os.environ.get("BPT_CQE_MAX_LEADERSHIP_DELTA_30M", "1.00") or 1.00)
+
+# Upgrade confirmation cluster from sims:
+# 30m peak >= 1.0%, positive trend/momentum persistence.
+BPT_CQE_CONFIRM_WINDOW_MINUTES = float(os.environ.get("BPT_CQE_CONFIRM_WINDOW_MINUTES", "30") or 30)
+BPT_CQE_CONFIRM_PEAK = float(os.environ.get("BPT_CQE_CONFIRM_PEAK", "1.0") or 1.0)
+BPT_CQE_CONFIRM_AVG_TREND = float(os.environ.get("BPT_CQE_CONFIRM_AVG_TREND", "0.05") or 0.05)
+BPT_CQE_CONFIRM_AVG_MOMENTUM = float(os.environ.get("BPT_CQE_CONFIRM_AVG_MOMENTUM", "0.05") or 0.05)
+BPT_CQE_CONFIRM_MIN_SIGNAL_COUNT = int(os.environ.get("BPT_CQE_CONFIRM_MIN_SIGNAL_COUNT", "0") or 0)
+
+# Row thresholds: quality_score = trend + momentum.
+BPT_EXTREME_QUALITY_SCORE = float(os.environ.get("BPT_EXTREME_QUALITY_SCORE", "2.0") or 2.0)
+BPT_HIGH_QUALITY_SCORE = float(os.environ.get("BPT_HIGH_QUALITY_SCORE", "1.2") or 1.2)
+BPT_MEDIUM_QUALITY_SCORE = float(os.environ.get("BPT_MEDIUM_QUALITY_SCORE", "0.6") or 0.6)
+
+# Row-specific upgrade sizes and exits.
+BPT_EXTREME_UPGRADE_GBP = float(os.environ.get("BPT_EXTREME_UPGRADE_GBP", "20") or 20)
+BPT_EXTREME_TRAIL_ACTIVATION = float(os.environ.get("BPT_EXTREME_TRAIL_ACTIVATION", "2.0") or 2.0)
+BPT_EXTREME_TRAIL_DRAWDOWN = float(os.environ.get("BPT_EXTREME_TRAIL_DRAWDOWN", "0.75") or 0.75)
+
+BPT_HIGH_UPGRADE_GBP = float(os.environ.get("BPT_HIGH_UPGRADE_GBP", "25") or 25)
+BPT_HIGH_TRAIL_ACTIVATION = float(os.environ.get("BPT_HIGH_TRAIL_ACTIVATION", "3.0") or 3.0)
+BPT_HIGH_TRAIL_DRAWDOWN = float(os.environ.get("BPT_HIGH_TRAIL_DRAWDOWN", "1.0") or 1.0)
+
+BPT_MEDIUM_UPGRADE_GBP = float(os.environ.get("BPT_MEDIUM_UPGRADE_GBP", "35") or 35)
+BPT_MEDIUM_TRAIL_ACTIVATION = float(os.environ.get("BPT_MEDIUM_TRAIL_ACTIVATION", "5.0") or 5.0)
+BPT_MEDIUM_TRAIL_DRAWDOWN = float(os.environ.get("BPT_MEDIUM_TRAIL_DRAWDOWN", "1.5") or 1.5)
+
+BPT_EARLY_UPGRADE_GBP = float(os.environ.get("BPT_EARLY_UPGRADE_GBP", "10") or 10)
+BPT_EARLY_TRAIL_ACTIVATION = float(os.environ.get("BPT_EARLY_TRAIL_ACTIVATION", "2.0") or 2.0)
+BPT_EARLY_TRAIL_DRAWDOWN = float(os.environ.get("BPT_EARLY_TRAIL_DRAWDOWN", "0.75") or 0.75)
+BPT_EARLY_FAILFAST_MINUTES = float(os.environ.get("BPT_EARLY_FAILFAST_MINUTES", "120") or 120)
+BPT_EARLY_FAILFAST_PEAK = float(os.environ.get("BPT_EARLY_FAILFAST_PEAK", "0.25") or 0.25)
+
+# Shadow safety backstop only. Not the main exit thesis.
+BPT_CQE_MAX_HOLD_MINUTES = float(os.environ.get("BPT_CQE_MAX_HOLD_MINUTES", "720") or 720)
+BPT_CQE_HARD_STOP = float(os.environ.get("BPT_CQE_HARD_STOP", "-0.60") or -0.60)
 
 
 # Dynamic sizing tiers.
@@ -1605,6 +1542,495 @@ def process_shadow_cqe_trades(cur, symbol, price, momentum, trend, now):
                     f"ID {tid}"
                 )
 
+
+# =========================
+# BPT CQE LIFECYCLE SHADOW HELPERS
+# =========================
+
+def ensure_bpt_cqe_lifecycle_columns(cur):
+    """Adds optional telemetry columns used by BPT_CQE_LIFECYCLE_V1.
+    Safe to run repeatedly. Existing deployments without these columns still
+    work because safe_update_trade_telemetry skips missing fields, but these
+    columns make the shadow engine fully analyzable.
+    """
+    cur.execute("""
+        ALTER TABLE bot_trades_v4
+        ADD COLUMN IF NOT EXISTS lifecycle_row TEXT,
+        ADD COLUMN IF NOT EXISTS cqe_confirmed BOOLEAN DEFAULT FALSE,
+        ADD COLUMN IF NOT EXISTS cqe_upgraded BOOLEAN DEFAULT FALSE,
+        ADD COLUMN IF NOT EXISTS probe_size_gbp NUMERIC,
+        ADD COLUMN IF NOT EXISTS upgrade_size_gbp NUMERIC,
+        ADD COLUMN IF NOT EXISTS lifecycle_quality_score NUMERIC,
+        ADD COLUMN IF NOT EXISTS lifecycle_trail_activation NUMERIC,
+        ADD COLUMN IF NOT EXISTS lifecycle_trail_drawdown NUMERIC,
+        ADD COLUMN IF NOT EXISTS lifecycle_classified_at TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS upgraded_at TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS confirmation_peak_30m NUMERIC,
+        ADD COLUMN IF NOT EXISTS confirmation_avg_trend NUMERIC,
+        ADD COLUMN IF NOT EXISTS confirmation_avg_momentum NUMERIC,
+        ADD COLUMN IF NOT EXISTS confirmation_signal_count INTEGER,
+        ADD COLUMN IF NOT EXISTS confirmation_age_minutes NUMERIC,
+        ADD COLUMN IF NOT EXISTS bpt_exit_reason TEXT
+    """)
+
+
+def bpt_quality_score(momentum, trend):
+    return float(momentum or 0) + float(trend or 0)
+
+
+def classify_bpt_lifecycle_row(momentum, trend):
+    q = bpt_quality_score(momentum, trend)
+    if q >= BPT_EXTREME_QUALITY_SCORE:
+        return "EXTREME_RUNNER_ROW", q
+    if q >= BPT_HIGH_QUALITY_SCORE:
+        return "HIGH_MONSTER_ROW", q
+    if q >= BPT_MEDIUM_QUALITY_SCORE:
+        return "MEDIUM_BALANCED_ROW", q
+    return "EARLY_INCUBATION_ROW", q
+
+
+def get_bpt_row_params(lifecycle_row):
+    if lifecycle_row == "EXTREME_RUNNER_ROW":
+        return {
+            "upgrade_size": BPT_EXTREME_UPGRADE_GBP,
+            "trail_activation": BPT_EXTREME_TRAIL_ACTIVATION,
+            "trail_drawdown": BPT_EXTREME_TRAIL_DRAWDOWN,
+        }
+    if lifecycle_row == "HIGH_MONSTER_ROW":
+        return {
+            "upgrade_size": BPT_HIGH_UPGRADE_GBP,
+            "trail_activation": BPT_HIGH_TRAIL_ACTIVATION,
+            "trail_drawdown": BPT_HIGH_TRAIL_DRAWDOWN,
+        }
+    if lifecycle_row == "MEDIUM_BALANCED_ROW":
+        return {
+            "upgrade_size": BPT_MEDIUM_UPGRADE_GBP,
+            "trail_activation": BPT_MEDIUM_TRAIL_ACTIVATION,
+            "trail_drawdown": BPT_MEDIUM_TRAIL_DRAWDOWN,
+        }
+    return {
+        "upgrade_size": BPT_EARLY_UPGRADE_GBP,
+        "trail_activation": BPT_EARLY_TRAIL_ACTIVATION,
+        "trail_drawdown": BPT_EARLY_TRAIL_DRAWDOWN,
+    }
+
+
+def get_open_bpt_cqe_count(cur):
+    cur.execute("""
+        SELECT COUNT(*)
+        FROM bot_trades_v4
+        WHERE status = 'OPEN'
+          AND entry_quality = %s
+    """, (BPT_CQE_ENTRY_QUALITY,))
+    return cur.fetchone()[0] or 0
+
+
+def get_open_same_symbol_bpt_cqe_count(cur, symbol):
+    cur.execute("""
+        SELECT COUNT(*)
+        FROM bot_trades_v4
+        WHERE status = 'OPEN'
+          AND entry_quality = %s
+          AND symbol = %s
+    """, (BPT_CQE_ENTRY_QUALITY, symbol))
+    return cur.fetchone()[0] or 0
+
+
+def passes_bpt_cqe_probe_gate(cur, symbol, momentum, trend, leadership_context):
+    if not ENABLE_BPT_CQE_LIFECYCLE_SHADOW:
+        return False, "bpt_lifecycle_disabled"
+
+    if trend < BPT_CQE_MIN_TREND:
+        return False, "bpt_trend_too_low"
+    if momentum < BPT_CQE_MIN_MOMENTUM:
+        return False, "bpt_momentum_too_low"
+
+    score = float((leadership_context or {}).get("leadership_score") or (leadership_context or {}).get("prior_avg_peak") or 0)
+    delta = (leadership_context or {}).get("leadership_delta_30m")
+    if delta is None:
+        delta = (leadership_context or {}).get("delta_30m")
+    delta = float(delta or 0)
+
+    if score > BPT_CQE_MAX_LEADERSHIP_SCORE:
+        return False, "bpt_leadership_too_mature"
+    if delta > BPT_CQE_MAX_LEADERSHIP_DELTA_30M:
+        return False, "bpt_leadership_delta_climax_risk"
+
+    if get_open_bpt_cqe_count(cur) >= BPT_CQE_MAX_OPEN_TRADES:
+        return False, "bpt_max_open_trades"
+    if get_open_same_symbol_bpt_cqe_count(cur, symbol) >= BPT_CQE_MAX_SAME_SYMBOL_OPEN:
+        return False, "bpt_max_same_symbol_open"
+
+    return True, "bpt_probe_allowed"
+
+
+def open_bpt_cqe_probe_trade(cur, symbol, price, momentum, trend, signal_id, signal_time, leadership_context=None):
+    lifecycle_row, q = classify_bpt_lifecycle_row(momentum, trend)
+    params = get_bpt_row_params(lifecycle_row)
+
+    cur.execute("""
+        INSERT INTO bot_trades_v4 (
+            symbol,
+            direction,
+            entry_price,
+            status,
+            opened_at,
+            data_version,
+            momentum_strength,
+            trend_strength,
+            entry_quality,
+            peak_pnl_percent,
+            signal_id,
+            signal_timestamp
+        )
+        VALUES (%s,%s,%s,'OPEN',NOW(),%s,%s,%s,%s,0,%s,%s)
+        RETURNING id
+    """, (
+        symbol,
+        "LONG",
+        price,
+        DATA_VERSION,
+        momentum,
+        trend,
+        BPT_CQE_ENTRY_QUALITY,
+        signal_id,
+        signal_time,
+    ))
+    trade_id = cur.fetchone()[0]
+
+    safe_update_trade_telemetry(cur, trade_id, {
+        "is_shadow": not ENABLE_BPT_CQE_LIVE_PROBES,
+        "entry_architecture": BPT_CQE_ENTRY_QUALITY,
+        "trade_size_gbp": BPT_CQE_PROBE_SIZE_GBP,
+        "dynamic_trade_size_gbp": BPT_CQE_PROBE_SIZE_GBP,
+        "probe_size_gbp": BPT_CQE_PROBE_SIZE_GBP,
+        "upgrade_size_gbp": params["upgrade_size"],
+        "lifecycle_row": lifecycle_row,
+        "lifecycle_quality_score": q,
+        "lifecycle_trail_activation": params["trail_activation"],
+        "lifecycle_trail_drawdown": params["trail_drawdown"],
+        "lifecycle_classified_at": datetime.now(timezone.utc),
+        "cqe_confirmed": False,
+        "cqe_upgraded": False,
+        "lifecycle_phase_at_entry": (leadership_context or {}).get("lifecycle_phase") or (leadership_context or {}).get("leadership_phase"),
+        "leadership_score": (leadership_context or {}).get("prior_avg_peak"),
+        "leadership_delta_30m_at_entry": (leadership_context or {}).get("leadership_delta_30m") or (leadership_context or {}).get("delta_30m"),
+    })
+
+    try:
+        log_trade_event(cur, trade_id, symbol, "bpt_cqe_probe_entry", price, 0, 0, 0, momentum, trend, True)
+    except Exception as e:
+        print(f"⚠️ BPT CQE trade_events probe entry log failed: {e}", flush=True)
+
+    if ENABLE_BPT_CQE_LIVE_PROBES:
+        okx_place_market_order(
+            cur=cur,
+            trade_id=trade_id,
+            symbol=symbol,
+            direction="LONG",
+            action="entry",
+            price=price,
+            entry_price=price,
+            trade_size_quote=BPT_CQE_PROBE_SIZE_GBP,
+        )
+
+    print(
+        f"🧬 OPEN BPT CQE PROBE | {symbol} | id={trade_id} | row={lifecycle_row} | "
+        f"q={round(q,3)} | size={fmt_money(BPT_CQE_PROBE_SIZE_GBP)} | T/M={round(trend,3)}/{round(momentum,3)}",
+        flush=True
+    )
+
+    send_telegram_alert(
+        f"🧬 <b>BPT CQE PROBE</b> | {symbol} LONG\n"
+        f"Row: <b>{lifecycle_row}</b> | Q {fmt_num(q)}\n"
+        f"Probe size: {fmt_money(BPT_CQE_PROBE_SIZE_GBP)} | Live probe: {ENABLE_BPT_CQE_LIVE_PROBES}\n"
+        f"Entry {price} | T/M {fmt_num(trend)} / {fmt_num(momentum)}\n"
+        f"Confirm target: +{BPT_CQE_CONFIRM_PEAK}% within {BPT_CQE_CONFIRM_WINDOW_MINUTES}m\n"
+        f"ID {trade_id}"
+    )
+
+    return trade_id
+
+
+def maybe_open_bpt_cqe_probe(cur, symbol, price, momentum, trend, signal_id, signal_time, leadership_context=None):
+    allowed, reason = passes_bpt_cqe_probe_gate(cur, symbol, momentum, trend, leadership_context)
+    if not allowed:
+        return None
+
+    # Do not double-open if old CQE engine already opened same symbol on this exact signal path.
+    return open_bpt_cqe_probe_trade(cur, symbol, price, momentum, trend, signal_id, signal_time, leadership_context)
+
+
+def get_bpt_confirmation_metrics(cur, symbol, opened_at, entry_price, now):
+    cur.execute("""
+        SELECT
+            COUNT(*),
+            AVG(trend),
+            AVG(momentum),
+            MAX(((price - %s) / NULLIF(%s,0)) * 100)
+        FROM signals_raw
+        WHERE symbol = %s
+          AND timestamp >= %s
+          AND timestamp <= LEAST(%s, %s + INTERVAL '60 minutes')
+    """, (entry_price, entry_price, symbol, opened_at, now, opened_at))
+    count, avg_trend, avg_momentum, peak_window = cur.fetchone() or (0, None, None, None)
+    return {
+        "signal_count": int(count or 0),
+        "avg_trend": float(avg_trend or 0),
+        "avg_momentum": float(avg_momentum or 0),
+        "peak_window": float(peak_window or 0),
+    }
+
+
+def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, current_peak, peak_time_minutes, momentum, trend, now):
+    if peak_time_minutes is None:
+        peak_time_minutes = 999999
+
+    metrics = get_bpt_confirmation_metrics(cur, sym, opened_at, entry_price, now)
+    age_mins = (now - opened_at).total_seconds() / 60
+    peak_for_confirmation = max(float(current_peak or 0), metrics["peak_window"])
+
+    confirmed = (
+        peak_for_confirmation >= BPT_CQE_CONFIRM_PEAK
+        and float(peak_time_minutes or 999999) <= BPT_CQE_CONFIRM_WINDOW_MINUTES
+        and metrics["avg_trend"] >= BPT_CQE_CONFIRM_AVG_TREND
+        and metrics["avg_momentum"] >= BPT_CQE_CONFIRM_AVG_MOMENTUM
+        and metrics["signal_count"] >= BPT_CQE_CONFIRM_MIN_SIGNAL_COUNT
+    )
+
+    safe_update_trade_telemetry(cur, tid, {
+        "confirmation_peak_30m": peak_for_confirmation,
+        "confirmation_avg_trend": metrics["avg_trend"],
+        "confirmation_avg_momentum": metrics["avg_momentum"],
+        "confirmation_signal_count": metrics["signal_count"],
+        "confirmation_age_minutes": age_mins,
+    })
+
+    if not confirmed:
+        return False
+
+    cur.execute("""
+        SELECT lifecycle_row, upgrade_size_gbp, dynamic_trade_size_gbp
+        FROM bot_trades_v4
+        WHERE id = %s
+    """, (tid,))
+    row = cur.fetchone()
+    lifecycle_row = row[0] if row else None
+    upgrade_size = float(row[1] or get_bpt_row_params(lifecycle_row).get("upgrade_size", 0)) if row else 0
+    current_dynamic_size = float(row[2] or BPT_CQE_PROBE_SIZE_GBP) if row else BPT_CQE_PROBE_SIZE_GBP
+    new_dynamic_size = current_dynamic_size + upgrade_size
+
+    cur.execute("""
+        UPDATE bot_trades_v4
+        SET cqe_confirmed = TRUE,
+            cqe_upgraded = TRUE,
+            upgraded_at = NOW()
+        WHERE id = %s
+    """, (tid,))
+
+    safe_update_trade_telemetry(cur, tid, {
+        "dynamic_trade_size_gbp": new_dynamic_size,
+        "trade_size_gbp": new_dynamic_size,
+    })
+
+    try:
+        log_trade_event(cur, tid, sym, "bpt_cqe_confirmed_upgrade", entry_price, 0, current_peak, age_mins, momentum, trend, False)
+    except Exception as e:
+        print(f"⚠️ BPT CQE upgrade trade_events log failed: {e}", flush=True)
+
+    if ENABLE_BPT_CQE_LIVE_UPGRADES:
+        okx_place_market_order(
+            cur=cur,
+            trade_id=tid,
+            symbol=sym,
+            direction="LONG",
+            action="entry",
+            price=entry_price,
+            entry_price=entry_price,
+            trade_size_quote=upgrade_size,
+        )
+
+    print(
+        f"🚀 BPT CQE UPGRADED | {sym} | id={tid} | row={lifecycle_row} | "
+        f"upgrade={fmt_money(upgrade_size)} | dynamic={fmt_money(new_dynamic_size)} | "
+        f"peak={round(peak_for_confirmation,3)}%",
+        flush=True
+    )
+
+    send_telegram_alert(
+        f"🚀 <b>BPT CQE UPGRADED</b> | {sym}\n"
+        f"Row: <b>{lifecycle_row}</b> | Upgrade {fmt_money(upgrade_size)} | Total model size {fmt_money(new_dynamic_size)}\n"
+        f"Confirmed peak {fmt_num(peak_for_confirmation)}% | age {fmt_num(age_mins,1)}m\n"
+        f"Avg T/M {fmt_num(metrics['avg_trend'])} / {fmt_num(metrics['avg_momentum'])}\n"
+        f"Live upgrades: {ENABLE_BPT_CQE_LIVE_UPGRADES}\n"
+        f"ID {tid}"
+    )
+    return True
+
+
+def process_bpt_cqe_lifecycle_trades(cur, symbol, price, momentum, trend, now):
+    """Processes BPT_CQE_LIFECYCLE_V1 trades.
+    Shadow by default; live probes/upgrades can be enabled through toggles later.
+    """
+    if not ENABLE_BPT_CQE_LIFECYCLE_SHADOW:
+        return
+
+    ensure_bpt_cqe_lifecycle_columns(cur)
+
+    cur.execute("""
+        SELECT
+            id,
+            symbol,
+            direction,
+            entry_price,
+            opened_at,
+            COALESCE(peak_pnl_percent, 0),
+            COALESCE(peak_time_minutes, NULL),
+            COALESCE(cqe_confirmed, FALSE),
+            COALESCE(cqe_upgraded, FALSE),
+            lifecycle_row,
+            COALESCE(dynamic_trade_size_gbp, trade_size_gbp, %s),
+            COALESCE(lifecycle_trail_activation, 0),
+            COALESCE(lifecycle_trail_drawdown, 0),
+            COALESCE(is_shadow, TRUE)
+        FROM bot_trades_v4
+        WHERE status = 'OPEN'
+          AND entry_quality = %s
+          AND symbol = %s
+    """, (BPT_CQE_PROBE_SIZE_GBP, BPT_CQE_ENTRY_QUALITY, symbol))
+
+    rows = cur.fetchall()
+    for (
+        tid, sym, direction, entry_price, opened_at, peak_pnl, peak_time_minutes,
+        cqe_confirmed, cqe_upgraded, lifecycle_row, dynamic_size,
+        trail_activation, trail_drawdown, is_shadow
+    ) in rows:
+        if direction != "LONG" or not entry_price:
+            continue
+
+        pnl_percent = ((price - entry_price) / entry_price) * 100
+        mins = (now - opened_at).total_seconds() / 60
+        current_peak = float(peak_pnl or 0)
+        old_peak = current_peak
+
+        if pnl_percent > current_peak:
+            current_peak = pnl_percent
+            if column_exists(cur, "bot_trades_v4", "peak_time_minutes"):
+                cur.execute("""
+                    UPDATE bot_trades_v4
+                    SET peak_pnl_percent = %s,
+                        peak_time_minutes = %s
+                    WHERE id = %s
+                """, (current_peak, mins, tid))
+                peak_time_minutes = mins
+            else:
+                cur.execute("""
+                    UPDATE bot_trades_v4
+                    SET peak_pnl_percent = %s
+                    WHERE id = %s
+                """, (current_peak, tid))
+
+        try:
+            log_trade_event(cur, tid, sym, "bpt_cqe_update", price, pnl_percent, current_peak, mins, momentum, trend, False)
+        except Exception as e:
+            print(f"⚠️ BPT CQE update trade_events log failed: {e}", flush=True)
+
+        if not cqe_upgraded:
+            maybe_confirm_and_upgrade_bpt_trade(
+                cur, tid, sym, entry_price, opened_at, current_peak,
+                peak_time_minutes, momentum, trend, now
+            )
+
+        # Reload upgrade state after possible upgrade.
+        cur.execute("""
+            SELECT COALESCE(cqe_upgraded, FALSE), lifecycle_row,
+                   COALESCE(dynamic_trade_size_gbp, trade_size_gbp, %s),
+                   COALESCE(lifecycle_trail_activation, %s),
+                   COALESCE(lifecycle_trail_drawdown, %s)
+            FROM bot_trades_v4
+            WHERE id = %s
+        """, (BPT_CQE_PROBE_SIZE_GBP, trail_activation, trail_drawdown, tid))
+        state = cur.fetchone()
+        if state:
+            cqe_upgraded, lifecycle_row, dynamic_size, trail_activation, trail_drawdown = state
+
+        close_reason = None
+        exit_architecture = None
+        drawdown_from_peak = current_peak - pnl_percent
+
+        if cqe_upgraded:
+            if current_peak >= float(trail_activation or 999) and drawdown_from_peak >= float(trail_drawdown or 999):
+                close_reason = f"bpt_{(lifecycle_row or 'row').lower()}_wide_trail"
+                exit_architecture = "BPT_CQE_LIFECYCLE_ROW_TRAIL"
+        else:
+            if lifecycle_row == "EARLY_INCUBATION_ROW" and mins >= BPT_EARLY_FAILFAST_MINUTES and current_peak < BPT_EARLY_FAILFAST_PEAK:
+                close_reason = "bpt_early_failed_incubation"
+                exit_architecture = "BPT_CQE_EARLY_FAILFAST"
+            elif pnl_percent <= BPT_CQE_HARD_STOP:
+                close_reason = "bpt_probe_hard_stop"
+                exit_architecture = "BPT_CQE_PROBE_HARD_STOP"
+
+        if not close_reason and mins >= BPT_CQE_MAX_HOLD_MINUTES:
+            close_reason = "bpt_safety_max_hold_exit"
+            exit_architecture = "BPT_CQE_SAFETY_BACKSTOP"
+
+        if close_reason:
+            pnl_gbp = (pnl_percent / 100) * float(dynamic_size or BPT_CQE_PROBE_SIZE_GBP)
+
+            cur.execute("""
+                UPDATE bot_trades_v4
+                SET status = 'CLOSED',
+                    closed_at = NOW(),
+                    close_price = %s,
+                    pnl_percent = %s,
+                    pnl_gbp = %s,
+                    close_reason = %s
+                WHERE id = %s
+            """, (price, pnl_percent, pnl_gbp, close_reason, tid))
+
+            safe_update_trade_telemetry(cur, tid, {
+                "exit_architecture": exit_architecture,
+                "drawdown_from_peak_at_exit": drawdown_from_peak,
+                "leadership_trend_at_exit": trend,
+                "leadership_momentum_at_exit": momentum,
+                "bpt_exit_reason": close_reason,
+            })
+
+            try:
+                log_trade_event(cur, tid, sym, f"exit_{close_reason}", price, pnl_percent, current_peak, mins, momentum, trend, False)
+            except Exception as e:
+                print(f"⚠️ BPT CQE exit trade_events log failed: {e}", flush=True)
+
+            # Only send OKX exit if this BPT trade actually had live BPT orders.
+            if not is_shadow and has_successful_okx_live_entry(cur, tid):
+                okx_place_market_order(
+                    cur=cur,
+                    trade_id=tid,
+                    symbol=sym,
+                    direction=direction,
+                    action="exit",
+                    price=price,
+                    entry_price=entry_price,
+                    trade_size_quote=float(dynamic_size or BPT_CQE_PROBE_SIZE_GBP),
+                )
+            elif not is_shadow:
+                log_okx_exit_skip_no_live_entry(cur, tid, sym, direction, price)
+
+            print(
+                f"💰 CLOSED BPT CQE | {sym} | {round(pnl_percent,3)}% | "
+                f"peak={round(current_peak,3)} | dd={round(drawdown_from_peak,3)} | {close_reason}",
+                flush=True
+            )
+
+            send_telegram_alert(
+                f"💰 <b>BPT CQE CLOSED</b> | {sym}\n"
+                f"Row: {lifecycle_row} | PnL <b>{fmt_num(pnl_percent)}%</b> | {fmt_money(pnl_gbp)}\n"
+                f"Peak {fmt_num(current_peak)}% | DD {fmt_num(drawdown_from_peak)}%\n"
+                f"Size model {fmt_money(dynamic_size)} | Reason {close_reason}\n"
+                f"ID {tid}"
+            )
+
+
 def passes_leadership_engine(cur, symbol, momentum, trend):
     if not ENABLE_LEADERSHIP_ENGINE:
         return False, None, "leadership_engine_disabled"
@@ -2491,6 +2917,8 @@ def webhook():
             ensure_okx_order_log_table(cur)
 
         ensure_signal_leadership_scores_table(cur)
+        if ENABLE_BPT_CQE_LIFECYCLE_SHADOW:
+            ensure_bpt_cqe_lifecycle_columns(cur)
 
         # ================= RAW SIGNAL — ALWAYS STORE =================
         cur.execute("""
@@ -2637,6 +3065,23 @@ def webhook():
         except Exception as e:
             print(f"⚠️ shadow CQE entry skipped: {e}", flush=True)
 
+        # ================= BPT CQE LIFECYCLE SHADOW ENTRY ENGINE =================
+        # Opens/manages the new v6.2 BPT lifecycle probes. Shadow by default.
+        try:
+            if decision == "LONG" and leadership_context:
+                maybe_open_bpt_cqe_probe(
+                    cur,
+                    symbol,
+                    price,
+                    momentum,
+                    trend,
+                    signal_id,
+                    signal_time,
+                    leadership_context,
+                )
+        except Exception as e:
+            print(f"⚠️ BPT CQE lifecycle probe skipped: {e}", flush=True)
+
         # ================= REAL ENTRY EXECUTION =================
         if decision in ["LONG", "SHORT"]:
             if entry_allowed:
@@ -2718,6 +3163,13 @@ def webhook():
             process_shadow_cqe_trades(cur, symbol, price, momentum, trend, now)
         except Exception as e:
             print(f"⚠️ shadow CQE processing skipped: {e}", flush=True)
+
+        # ================= BPT CQE LIFECYCLE SHADOW PROCESSING =================
+        # Updates BPT probes, confirms/upgrades when conditions are met, and exits by row-specific lifecycle rules.
+        try:
+            process_bpt_cqe_lifecycle_trades(cur, symbol, price, momentum, trend, now)
+        except Exception as e:
+            print(f"⚠️ BPT CQE lifecycle processing skipped: {e}", flush=True)
 
         # ================= EXIT ENGINE =================
         cur.execute("""
@@ -3040,7 +3492,7 @@ def build_telegram_health_message(cur):
     return (
         f"🩺 <b>Bot Health</b>\n"
         f"Version: {DATA_VERSION}\n"
-        f"Engine: LEADERSHIP_LIVE + SHADOW_CQE_V1 + SHADOW_EMERGENCE\n"
+        f"Engine: LEADERSHIP_LIVE + BPT_CQE_LIFECYCLE_V1 + SHADOW_CQE_V1 + SHADOW_EMERGENCE\n"
         f"Live orders: {ENABLE_LIVE_ORDERS}\n"
         f"Last signal: {last_signal}\n"
         f"Signals 1h: {signals_1h}\n"
@@ -3052,6 +3504,7 @@ def build_telegram_health_message(cur):
         f"Stable: score>={STABLE_LEADER_MIN_SCORE}, Δ{STABLE_LEADER_DELTA_MIN}..{STABLE_LEADER_DELTA_MAX}\n"
         f"Shadow ignition: {ENABLE_SHADOW_EMERGENCE_TELEMETRY} | Δ{CONTROLLED_IGNITION_DELTA_MIN}..{CONTROLLED_IGNITION_DELTA_MAX}\n"
         f"Shadow CQE: {ENABLE_SHADOW_CQE} | Q>={CQE_MIN_QUALITY_SCORE} | hold {CQE_SHADOW_HOLD_MINUTES}m\n"
+        f"BPT lifecycle: {ENABLE_BPT_CQE_LIFECYCLE_SHADOW} | live probes {ENABLE_BPT_CQE_LIVE_PROBES} | live upgrades {ENABLE_BPT_CQE_LIVE_UPGRADES}\n"
         f"Max same symbol: {MAX_SAME_SYMBOL_OPEN}\n"
         f"OKX tradable cache: {len(OKX_TRADABLE_SPOT_INST_IDS)} pairs"
     )
@@ -3343,6 +3796,11 @@ def okx_tradability_status():
 def bool_status():
     return {
         "DATA_VERSION": DATA_VERSION,
+        "ENABLE_BPT_CQE_LIFECYCLE_SHADOW": ENABLE_BPT_CQE_LIFECYCLE_SHADOW,
+        "ENABLE_BPT_CQE_LIVE_PROBES": ENABLE_BPT_CQE_LIVE_PROBES,
+        "ENABLE_BPT_CQE_LIVE_UPGRADES": ENABLE_BPT_CQE_LIVE_UPGRADES,
+        "BPT_CQE_PROBE_SIZE_GBP": BPT_CQE_PROBE_SIZE_GBP,
+        "BPT_MEDIUM_UPGRADE_GBP": BPT_MEDIUM_UPGRADE_GBP,
         "MAX_OPEN_TRADES": MAX_OPEN_TRADES,
         "MAX_SAME_SYMBOL_OPEN": MAX_SAME_SYMBOL_OPEN,
         "ENABLE_LIVE_ORDERS": ENABLE_LIVE_ORDERS,
