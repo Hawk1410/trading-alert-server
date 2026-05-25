@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v6.2.4
-# TITLE: LEADERSHIP LIVE ENGINE + BPT CQE LIFECYCLE SHADOW + CQE LIVE SPECIALIST + TELEGRAM OPS
+# VERSION: v6.3.1
+# TITLE: LEADERSHIP LIVE ENGINE + PERSISTENCE HUNTER SHADOW + BPT CQE LIFECYCLE + TELEGRAM OPS
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v6.2.4 BPT CQE LIFECYCLE SHADOW + LEADERSHIP LIVE RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v6.3.1 BPT CQE LIFECYCLE SHADOW + LEADERSHIP LIVE RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -65,14 +65,34 @@ MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 3
 
 
 
-# =========================
-# 🚨 HARD RUNTIME OVERRIDES
-# =========================
 
-ENABLE_BPT_CQE_LIVE_PROBES = True
-ENABLE_BPT_CQE_LIVE_UPGRADES = True
+DATA_VERSION = "v6.3.1_DENSITY_RELAXED_NO_FIXED_EXIT"
 
-DATA_VERSION = "v6.2.4_EXTREME_LIVE_ROUTING_FIXED"
+
+
+# =========================
+# 🧠 v6.3.1 LIVE LEARNING PATCH
+# =========================
+# Purpose:
+# 1) Relax density dependency: missing density is no longer treated as low quality.
+# 2) Keep current real leadership engine intact.
+# 3) Keep Persistence Hunter shadow-only.
+# 4) Avoid fixed-time exits on live real trades; use lifecycle/profit-lock/trailing/hard-stop logic instead.
+
+ENABLE_RELAXED_DENSITY_DEPENDENCY = True
+ENABLE_FIXED_TIME_EXITS_REAL = False
+ENABLE_FIXED_TIME_EXITS_SHADOW = True
+
+# Density interpretation update:
+# - NULL density is allowed and treated as "unknown/clean", not failed.
+# - Strong density should be interpreted as possible crowding/maturity context,
+#   not mandatory entry confirmation.
+DENSITY_NULL_IS_VALID = True
+DENSITY_REQUIRED_FOR_LIVE_ENTRIES = False
+DENSITY_REQUIRED_FOR_BPT_LIFECYCLE = False
+
+# Optional future use: if density appears after entry, we can tighten trails later.
+ENABLE_DENSITY_AS_CROWDING_TELEMETRY = True
 
 MAX_SAME_SYMBOL_OPEN = int(os.environ.get("MAX_SAME_SYMBOL_OPEN", "1") or 1)
 ENABLE_SAME_SYMBOL_STACKING_LIMIT = os.environ.get("ENABLE_SAME_SYMBOL_STACKING_LIMIT", "true").lower() == "true"
@@ -243,6 +263,38 @@ BPT_EARLY_FAILFAST_PEAK = float(os.environ.get("BPT_EARLY_FAILFAST_PEAK", "0.25"
 # Shadow safety backstop only. Not the main exit thesis.
 BPT_CQE_MAX_HOLD_MINUTES = float(os.environ.get("BPT_CQE_MAX_HOLD_MINUTES", "720") or 720)
 BPT_CQE_HARD_STOP = float(os.environ.get("BPT_CQE_HARD_STOP", "-0.60") or -0.60)
+
+
+# =========================
+# 🧲 PERSISTENCE HUNTER v1 — SHADOW ONLY
+# =========================
+# Research-derived thesis:
+# no density + leadership >= 2.0 + stable persistence + trend/momentum continuation
+# catches rotational leadership before crowding. Shadow-only until live telemetry confirms.
+
+ENABLE_PERSISTENCE_HUNTER_SHADOW = os.environ.get("ENABLE_PERSISTENCE_HUNTER_SHADOW", "true").lower() == "true"
+ENABLE_PERSISTENCE_HUNTER_LIVE = os.environ.get("ENABLE_PERSISTENCE_HUNTER_LIVE", "false").lower() == "true"
+
+PH_ENTRY_QUALITY = "PERSISTENCE_HUNTER_V1"
+PH_LIFECYCLE_ROW = "PERSISTENCE_HUNTER_ROW"
+PH_SHADOW_SIZE_GBP = float(os.environ.get("PH_SHADOW_SIZE_GBP", "35") or 35)
+PH_MAX_OPEN_TRADES = int(os.environ.get("PH_MAX_OPEN_TRADES", "5") or 5)
+PH_MAX_SAME_SYMBOL_OPEN = int(os.environ.get("PH_MAX_SAME_SYMBOL_OPEN", "1") or 1)
+
+PH_MIN_MOMENTUM = float(os.environ.get("PH_MIN_MOMENTUM", "0.50") or 0.50)
+PH_MIN_TREND = float(os.environ.get("PH_MIN_TREND", "0.25") or 0.25)
+PH_MIN_LEADERSHIP_SCORE = float(os.environ.get("PH_MIN_LEADERSHIP_SCORE", "2.0") or 2.0)
+PH_MIN_CORE_AGE_MINUTES = float(os.environ.get("PH_MIN_CORE_AGE_MINUTES", "45") or 45)
+PH_MAX_CORE_AGE_MINUTES = float(os.environ.get("PH_MAX_CORE_AGE_MINUTES", "180") or 180)
+PH_MIN_CORE_HITS_240M = int(os.environ.get("PH_MIN_CORE_HITS_240M", "12") or 12)
+
+PH_TRAIL_ACTIVATION = float(os.environ.get("PH_TRAIL_ACTIVATION", "3.0") or 3.0)
+PH_TRAIL_DRAWDOWN = float(os.environ.get("PH_TRAIL_DRAWDOWN", "1.0") or 1.0)
+PH_MONSTER_TRAIL_ACTIVATION = float(os.environ.get("PH_MONSTER_TRAIL_ACTIVATION", "5.0") or 5.0)
+PH_MONSTER_TRAIL_DRAWDOWN = float(os.environ.get("PH_MONSTER_TRAIL_DRAWDOWN", "1.5") or 1.5)
+PH_HARD_STOP = float(os.environ.get("PH_HARD_STOP", "-0.80") or -0.80)
+PH_MAX_HOLD_MINUTES = float(os.environ.get("PH_MAX_HOLD_MINUTES", "720") or 720)
+PH_DENSITY_EXIT_TIGHTEN = os.environ.get("PH_DENSITY_EXIT_TIGHTEN", "true").lower() == "true"
 
 
 # Dynamic sizing tiers.
@@ -1508,7 +1560,7 @@ def process_shadow_cqe_trades(cur, symbol, price, momentum, trend, now):
             )
 
         close_reason = None
-        if mins >= CQE_SHADOW_HOLD_MINUTES:
+        if fixed_time_exit_allowed_for_trade(is_shadow=True) and mins >= CQE_SHADOW_HOLD_MINUTES:
             close_reason = "shadow_cqe_120m_time_exit"
 
         if close_reason:
@@ -1579,7 +1631,15 @@ def ensure_bpt_cqe_lifecycle_columns(cur):
         ADD COLUMN IF NOT EXISTS confirmation_avg_momentum NUMERIC,
         ADD COLUMN IF NOT EXISTS confirmation_signal_count INTEGER,
         ADD COLUMN IF NOT EXISTS confirmation_age_minutes NUMERIC,
-        ADD COLUMN IF NOT EXISTS bpt_exit_reason TEXT
+        ADD COLUMN IF NOT EXISTS bpt_exit_reason TEXT,
+        ADD COLUMN IF NOT EXISTS ph_detected BOOLEAN DEFAULT FALSE,
+        ADD COLUMN IF NOT EXISTS ph_reason TEXT,
+        ADD COLUMN IF NOT EXISTS ph_core_age_minutes NUMERIC,
+        ADD COLUMN IF NOT EXISTS ph_core_hits_240m INTEGER,
+        ADD COLUMN IF NOT EXISTS ph_top3_hits_240m INTEGER,
+        ADD COLUMN IF NOT EXISTS ph_first_density_seen BOOLEAN DEFAULT FALSE,
+        ADD COLUMN IF NOT EXISTS ph_mins_to_density NUMERIC,
+        ADD COLUMN IF NOT EXISTS ph_density_phase TEXT
     """)
 
 
@@ -2039,6 +2099,356 @@ def process_bpt_cqe_lifecycle_trades(cur, symbol, price, momentum, trend, now):
                 f"ID {tid}"
             )
 
+
+
+# =========================
+# PERSISTENCE HUNTER SHADOW HELPERS
+# =========================
+
+def get_persistence_hunter_context(cur, symbol, signal_time):
+    """Returns leadership persistence context known at signal time."""
+    try:
+        cur.execute("""
+            WITH ranked AS (
+                SELECT
+                    snapshot_time,
+                    symbol,
+                    leadership_score,
+                    RANK() OVER (PARTITION BY snapshot_time ORDER BY leadership_score DESC NULLS LAST) AS leadership_rank
+                FROM leadership_state_history
+                WHERE snapshot_time >= %s - INTERVAL '6 hours'
+                  AND snapshot_time <= %s
+            ), latest AS (
+                SELECT leadership_score, leadership_rank, snapshot_time
+                FROM ranked
+                WHERE symbol = %s
+                ORDER BY snapshot_time DESC
+                LIMIT 1
+            ), counts AS (
+                SELECT
+                    COUNT(*) FILTER (WHERE leadership_score >= %s) AS core_hits_240m,
+                    COUNT(*) FILTER (WHERE leadership_rank <= 3) AS top3_hits_240m,
+                    MIN(snapshot_time) FILTER (WHERE leadership_score >= %s) AS first_core_time,
+                    MIN(snapshot_time) FILTER (WHERE leadership_rank <= 3) AS first_top3_time
+                FROM ranked
+                WHERE symbol = %s
+                  AND snapshot_time >= %s - INTERVAL '240 minutes'
+                  AND snapshot_time <= %s
+            )
+            SELECT
+                COALESCE(l.leadership_score, 0),
+                l.leadership_rank,
+                COALESCE(c.core_hits_240m, 0),
+                COALESCE(c.top3_hits_240m, 0),
+                c.first_core_time,
+                c.first_top3_time
+            FROM counts c
+            LEFT JOIN latest l ON TRUE
+        """, (
+            signal_time, signal_time, symbol,
+            PH_MIN_LEADERSHIP_SCORE, PH_MIN_LEADERSHIP_SCORE, symbol,
+            signal_time, signal_time,
+        ))
+        row = cur.fetchone()
+        if not row:
+            return {
+                "leadership_score": 0.0,
+                "leadership_rank": None,
+                "core_hits_240m": 0,
+                "top3_hits_240m": 0,
+                "core_age_minutes": None,
+                "top3_age_minutes": None,
+            }
+        score, rank, core_hits, top3_hits, first_core_time, first_top3_time = row
+        core_age = None
+        top3_age = None
+        if first_core_time:
+            core_age = (signal_time - first_core_time).total_seconds() / 60
+        if first_top3_time:
+            top3_age = (signal_time - first_top3_time).total_seconds() / 60
+        return {
+            "leadership_score": float(score or 0),
+            "leadership_rank": int(rank) if rank is not None else None,
+            "core_hits_240m": int(core_hits or 0),
+            "top3_hits_240m": int(top3_hits or 0),
+            "core_age_minutes": core_age,
+            "top3_age_minutes": top3_age,
+        }
+    except Exception as e:
+        print(f"⚠️ PH context failed for {symbol}: {e}", flush=True)
+        return {"leadership_score": 0.0, "leadership_rank": None, "core_hits_240m": 0, "top3_hits_240m": 0, "core_age_minutes": None, "top3_age_minutes": None}
+
+
+def get_open_persistence_hunter_count(cur):
+    cur.execute("""
+        SELECT COUNT(*)
+        FROM bot_trades_v4
+        WHERE status = 'OPEN'
+          AND entry_quality = %s
+    """, (PH_ENTRY_QUALITY,))
+    return cur.fetchone()[0] or 0
+
+
+def get_open_same_symbol_persistence_hunter_count(cur, symbol):
+    cur.execute("""
+        SELECT COUNT(*)
+        FROM bot_trades_v4
+        WHERE status = 'OPEN'
+          AND entry_quality = %s
+          AND symbol = %s
+    """, (PH_ENTRY_QUALITY, symbol))
+    return cur.fetchone()[0] or 0
+
+
+def passes_persistence_hunter_gate(cur, symbol, momentum, trend, signal_time):
+    if not ENABLE_PERSISTENCE_HUNTER_SHADOW:
+        return False, "ph_disabled", None
+    if momentum < PH_MIN_MOMENTUM:
+        return False, "ph_momentum_too_low", None
+    if trend < PH_MIN_TREND:
+        return False, "ph_trend_too_low", None
+
+    ctx = get_persistence_hunter_context(cur, symbol, signal_time)
+    score = float(ctx.get("leadership_score") or 0)
+    core_age = ctx.get("core_age_minutes")
+    core_hits = int(ctx.get("core_hits_240m") or 0)
+
+    if score < PH_MIN_LEADERSHIP_SCORE:
+        return False, "ph_leadership_too_low", ctx
+    if core_hits < PH_MIN_CORE_HITS_240M:
+        return False, "ph_not_enough_persistence_hits", ctx
+    if core_age is None:
+        return False, "ph_no_core_age", ctx
+    if core_age < PH_MIN_CORE_AGE_MINUTES:
+        return False, "ph_too_fresh", ctx
+    if core_age > PH_MAX_CORE_AGE_MINUTES:
+        return False, "ph_too_mature", ctx
+    if get_open_persistence_hunter_count(cur) >= PH_MAX_OPEN_TRADES:
+        return False, "ph_max_open_trades", ctx
+    if get_open_same_symbol_persistence_hunter_count(cur, symbol) >= PH_MAX_SAME_SYMBOL_OPEN:
+        return False, "ph_max_same_symbol_open", ctx
+
+    return True, "ph_no_density_persistent_leader_allowed", ctx
+
+
+def open_persistence_hunter_trade(cur, symbol, price, momentum, trend, signal_id, signal_time, reason, ctx):
+    cur.execute("""
+        INSERT INTO bot_trades_v4 (
+            symbol,
+            direction,
+            entry_price,
+            status,
+            opened_at,
+            data_version,
+            momentum_strength,
+            trend_strength,
+            entry_quality,
+            peak_pnl_percent,
+            signal_id,
+            signal_timestamp
+        )
+        VALUES (%s,%s,%s,'OPEN',NOW(),%s,%s,%s,%s,0,%s,%s)
+        RETURNING id
+    """, (
+        symbol,
+        "LONG",
+        price,
+        DATA_VERSION,
+        momentum,
+        trend,
+        PH_ENTRY_QUALITY,
+        signal_id,
+        signal_time,
+    ))
+    tid = cur.fetchone()[0]
+
+    safe_update_trade_telemetry(cur, tid, {
+        "is_shadow": not ENABLE_PERSISTENCE_HUNTER_LIVE,
+        "entry_architecture": PH_ENTRY_QUALITY,
+        "trade_size_gbp": PH_SHADOW_SIZE_GBP,
+        "dynamic_trade_size_gbp": PH_SHADOW_SIZE_GBP,
+        "lifecycle_row": PH_LIFECYCLE_ROW,
+        "ph_detected": True,
+        "ph_reason": reason,
+        "ph_core_age_minutes": ctx.get("core_age_minutes"),
+        "ph_core_hits_240m": ctx.get("core_hits_240m"),
+        "ph_top3_hits_240m": ctx.get("top3_hits_240m"),
+        "leadership_score": ctx.get("leadership_score"),
+        "leadership_rank_at_entry": ctx.get("leadership_rank"),
+        "lifecycle_trail_activation": PH_TRAIL_ACTIVATION,
+        "lifecycle_trail_drawdown": PH_TRAIL_DRAWDOWN,
+    })
+
+    try:
+        log_trade_event(cur, tid, symbol, "ph_entry", price, 0, 0, 0, momentum, trend, True)
+    except Exception as e:
+        print(f"⚠️ PH trade_events entry log failed: {e}", flush=True)
+
+    if ENABLE_PERSISTENCE_HUNTER_LIVE:
+        okx_place_market_order(cur, tid, symbol, "LONG", "entry", price=price, entry_price=price, trade_size_quote=PH_SHADOW_SIZE_GBP)
+
+    print(
+        f"🧲 OPEN PH SHADOW | {symbol} | id={tid} | score={fmt_num(ctx.get('leadership_score'))} | "
+        f"age={fmt_num(ctx.get('core_age_minutes'),1)}m | hits={ctx.get('core_hits_240m')} | T/M={fmt_num(trend)}/{fmt_num(momentum)}",
+        flush=True,
+    )
+
+    send_telegram_alert(
+        f"🧲 <b>PERSISTENCE HUNTER</b> | {symbol} LONG\n"
+        f"Shadow size {fmt_money(PH_SHADOW_SIZE_GBP)} | Live: {ENABLE_PERSISTENCE_HUNTER_LIVE}\n"
+        f"Score {fmt_num(ctx.get('leadership_score'))} | Rank #{ctx.get('leadership_rank') or 'n/a'}\n"
+        f"Core age {fmt_num(ctx.get('core_age_minutes'),1)}m | Hits {ctx.get('core_hits_240m')} | Top3 hits {ctx.get('top3_hits_240m')}\n"
+        f"T/M {fmt_num(trend)} / {fmt_num(momentum)}\n"
+        f"Reason: {reason}\nID {tid}"
+    )
+    return tid
+
+
+def maybe_open_persistence_hunter_trade(cur, symbol, price, momentum, trend, signal_id, signal_time):
+    allowed, reason, ctx = passes_persistence_hunter_gate(cur, symbol, momentum, trend, signal_time)
+    if not allowed:
+        return None
+    return open_persistence_hunter_trade(cur, symbol, price, momentum, trend, signal_id, signal_time, reason, ctx or {})
+
+
+def process_persistence_hunter_trades(cur, symbol, price, momentum, trend, now):
+    if not ENABLE_PERSISTENCE_HUNTER_SHADOW:
+        return
+    ensure_bpt_cqe_lifecycle_columns(cur)
+
+    cur.execute("""
+        SELECT
+            id,
+            symbol,
+            direction,
+            entry_price,
+            opened_at,
+            COALESCE(peak_pnl_percent,0),
+            COALESCE(dynamic_trade_size_gbp, trade_size_gbp, %s),
+            COALESCE(is_shadow, TRUE),
+            COALESCE(ph_first_density_seen, FALSE)
+        FROM bot_trades_v4
+        WHERE status = 'OPEN'
+          AND entry_quality = %s
+          AND symbol = %s
+    """, (PH_SHADOW_SIZE_GBP, PH_ENTRY_QUALITY, symbol))
+    rows = cur.fetchall()
+
+    for tid, sym, direction, entry_price, opened_at, peak_pnl, dynamic_size, is_shadow, density_seen in rows:
+        if direction != "LONG" or not entry_price:
+            continue
+        pnl_percent = ((price - entry_price) / entry_price) * 100
+        mins = (now - opened_at).total_seconds() / 60
+        current_peak = float(peak_pnl or 0)
+        if pnl_percent > current_peak:
+            current_peak = pnl_percent
+            if column_exists(cur, "bot_trades_v4", "peak_time_minutes"):
+                cur.execute("""
+                    UPDATE bot_trades_v4
+                    SET peak_pnl_percent = %s,
+                        peak_time_minutes = %s
+                    WHERE id = %s
+                """, (current_peak, mins, tid))
+            else:
+                cur.execute("UPDATE bot_trades_v4 SET peak_pnl_percent = %s WHERE id = %s", (current_peak, tid))
+
+        # Current payload generally has no density. This field is ready for future Pine density coverage.
+        density_phase = "NO_DENSITY"
+        safe_update_trade_telemetry(cur, tid, {
+            "ph_density_phase": density_phase,
+        })
+
+        try:
+            log_trade_event(cur, tid, sym, "ph_update", price, pnl_percent, current_peak, mins, momentum, trend, False)
+        except Exception as e:
+            print(f"⚠️ PH update event failed: {e}", flush=True)
+
+        drawdown = current_peak - pnl_percent
+        close_reason = None
+        if current_peak >= PH_MONSTER_TRAIL_ACTIVATION and drawdown >= PH_MONSTER_TRAIL_DRAWDOWN:
+            close_reason = "ph_monster_wide_trail"
+        elif current_peak >= PH_TRAIL_ACTIVATION and drawdown >= PH_TRAIL_DRAWDOWN:
+            close_reason = "ph_runner_trail"
+        elif pnl_percent <= PH_HARD_STOP:
+            close_reason = "ph_hard_stop"
+        elif mins >= PH_MAX_HOLD_MINUTES:
+            close_reason = "ph_max_hold_exit"
+
+        if close_reason:
+            pnl_gbp = (pnl_percent / 100.0) * float(dynamic_size or PH_SHADOW_SIZE_GBP)
+            cur.execute("""
+                UPDATE bot_trades_v4
+                SET status='CLOSED',
+                    closed_at=NOW(),
+                    close_price=%s,
+                    pnl_percent=%s,
+                    pnl_gbp=%s,
+                    close_reason=%s
+                WHERE id=%s
+            """, (price, pnl_percent, pnl_gbp, close_reason, tid))
+            safe_update_trade_telemetry(cur, tid, {
+                "exit_architecture": "PERSISTENCE_HUNTER_EXIT",
+                "drawdown_from_peak_at_exit": drawdown,
+                "bpt_exit_reason": close_reason,
+                "leadership_trend_at_exit": trend,
+                "leadership_momentum_at_exit": momentum,
+            })
+            try:
+                log_trade_event(cur, tid, sym, f"exit_{close_reason}", price, pnl_percent, current_peak, mins, momentum, trend, False)
+            except Exception as e:
+                print(f"⚠️ PH exit event failed: {e}", flush=True)
+            if not is_shadow and has_successful_okx_live_entry(cur, tid):
+                okx_place_market_order(cur, tid, sym, direction, "exit", price=price, entry_price=entry_price, trade_size_quote=float(dynamic_size or PH_SHADOW_SIZE_GBP))
+            send_telegram_alert(
+                f"💰 <b>PH CLOSED</b> | {sym}\n"
+                f"PnL <b>{fmt_num(pnl_percent)}%</b> | {fmt_money(pnl_gbp)} | Peak {fmt_num(current_peak)}%\n"
+                f"DD {fmt_num(drawdown)}% | Reason {close_reason}\nID {tid}"
+            )
+
+
+def build_telegram_persistence_hunter_message(cur, hours=24):
+    try:
+        ensure_bpt_cqe_lifecycle_columns(cur)
+        cur.execute("""
+            SELECT
+                COUNT(*) FILTER (WHERE status='OPEN') AS open_trades,
+                COUNT(*) FILTER (WHERE status='CLOSED') AS closed_trades,
+                COALESCE(ROUND(AVG(pnl_percent) FILTER (WHERE status='CLOSED')::numeric,3),0) AS avg_closed,
+                COALESCE(ROUND(SUM(pnl_gbp) FILTER (WHERE status='CLOSED')::numeric,3),0) AS pnl_gbp,
+                COALESCE(ROUND(AVG(peak_pnl_percent)::numeric,3),0) AS avg_peak,
+                COUNT(*) FILTER (WHERE peak_pnl_percent >= 2.0) AS runners,
+                COUNT(*) FILTER (WHERE peak_pnl_percent >= 5.0) AS monsters
+            FROM bot_trades_v4
+            WHERE entry_quality = %s
+              AND opened_at >= NOW() - (%s || ' hours')::INTERVAL
+        """, (PH_ENTRY_QUALITY, hours))
+        row = cur.fetchone() or (0,0,0,0,0,0,0)
+        open_trades, closed_trades, avg_closed, pnl_gbp, avg_peak, runners, monsters = row
+        cur.execute("""
+            SELECT symbol, opened_at, COALESCE(peak_pnl_percent,0), COALESCE(ph_core_age_minutes,0), COALESCE(ph_core_hits_240m,0), COALESCE(leadership_score,0)
+            FROM bot_trades_v4
+            WHERE entry_quality = %s
+              AND status='OPEN'
+            ORDER BY opened_at DESC
+            LIMIT 8
+        """, (PH_ENTRY_QUALITY,))
+        rows = cur.fetchall()
+        lines = [
+            f"🧲 <b>Persistence Hunter {hours}h</b>",
+            f"Enabled: {ENABLE_PERSISTENCE_HUNTER_SHADOW} | Live: {ENABLE_PERSISTENCE_HUNTER_LIVE}",
+            f"Open: <b>{open_trades}</b> | Closed: <b>{closed_trades}</b>",
+            f"Closed avg: <b>{fmt_num(avg_closed)}%</b> | {fmt_money(pnl_gbp)} | Avg peak {fmt_num(avg_peak)}%",
+            f"Runners: {runners} | Monsters: {monsters}",
+            f"Rule: no-density + leadership>={PH_MIN_LEADERSHIP_SCORE} + age {PH_MIN_CORE_AGE_MINUTES}-{PH_MAX_CORE_AGE_MINUTES}m + hits>={PH_MIN_CORE_HITS_240M}",
+        ]
+        if rows:
+            lines.append("\n<b>Open PH trades</b>")
+            for sym, opened_at, peak, age, hits, score in rows:
+                lines.append(f"{sym} | peak {fmt_num(peak)}% | age {fmt_num(age,1)}m | hits {hits} | score {fmt_num(score)}")
+        return "\n".join(lines)
+    except Exception as e:
+        print(f"⚠️ PH telegram summary failed: {e}", flush=True)
+        return f"🧲 <b>Persistence Hunter</b> unavailable: {e}"
 
 def passes_leadership_engine(cur, symbol, momentum, trend):
     if not ENABLE_LEADERSHIP_ENGINE:
@@ -2893,6 +3303,61 @@ def score_signal_leadership():
         print("❌ SIGNAL LEADERSHIP ERROR:", e, flush=True)
         return jsonify({"error": str(e), "version": DATA_VERSION}), 400
 
+
+# =========================
+# 🧠 DENSITY-TOLERANT HELPERS v6.3.1
+# =========================
+
+def density_is_valid_for_entry(sniper_density=None, sniper_density_delta=None):
+    """
+    v6.3.1 learning:
+    Missing density is NOT a failure condition.
+    Recent sims showed NULL density + strong leadership/trend/momentum
+    outperformed strict density-present filters.
+    """
+    if ENABLE_RELAXED_DENSITY_DEPENDENCY:
+        if (False and (sniper_density is None or sniper_density_delta is None)):
+            return True, "density_null_allowed"
+        return True, "density_present_context_only"
+
+    if DENSITY_REQUIRED_FOR_LIVE_ENTRIES:
+        if (False and (sniper_density is None or sniper_density_delta is None)):
+            return False, "density_required_missing"
+    return True, "density_ok"
+
+
+def get_density_phase(sniper_density=None, sniper_density_delta=None):
+    """
+    Interprets density as lifecycle/crowding context rather than hard entry gate.
+    """
+    try:
+        if (False and (sniper_density is None or sniper_density_delta is None)):
+            return "NO_DENSITY_CLEAN"
+        d = float(sniper_density or 0)
+        dd = float(sniper_density_delta or 0)
+        if d >= 6 and dd >= 2:
+            return "CROWDING_EXPANDING"
+        if d >= 6:
+            return "CROWDED"
+        if dd >= 2:
+            return "DENSITY_RISING"
+        return "DENSITY_PRESENT_LOW"
+    except Exception:
+        return "DENSITY_UNKNOWN"
+
+
+def fixed_time_exit_allowed_for_trade(is_shadow=False):
+    """
+    v6.3.1:
+    Fixed exits are disabled for real/live trades because sims repeatedly showed
+    fixed-time exits clip delayed leaders and monsters.
+    Shadow engines may still use fixed holds for research unless disabled.
+    """
+    if is_shadow:
+        return ENABLE_FIXED_TIME_EXITS_SHADOW
+    return ENABLE_FIXED_TIME_EXITS_REAL
+
+
 # =========================
 # WEBHOOK
 # =========================
@@ -3091,6 +3556,22 @@ def webhook():
         except Exception as e:
             print(f"⚠️ BPT CQE lifecycle probe skipped: {e}", flush=True)
 
+        # ================= PERSISTENCE HUNTER SHADOW ENTRY ENGINE =================
+        # Tests no-density + persistent leadership as a separate shadow architecture.
+        try:
+            if decision == "LONG":
+                maybe_open_persistence_hunter_trade(
+                    cur,
+                    symbol,
+                    price,
+                    momentum,
+                    trend,
+                    signal_id,
+                    signal_time,
+                )
+        except Exception as e:
+            print(f"⚠️ Persistence Hunter entry skipped: {e}", flush=True)
+
         # ================= REAL ENTRY EXECUTION =================
         if decision in ["LONG", "SHORT"]:
             if entry_allowed:
@@ -3179,6 +3660,12 @@ def webhook():
             process_bpt_cqe_lifecycle_trades(cur, symbol, price, momentum, trend, now)
         except Exception as e:
             print(f"⚠️ BPT CQE lifecycle processing skipped: {e}", flush=True)
+
+        # ================= PERSISTENCE HUNTER SHADOW PROCESSING =================
+        try:
+            process_persistence_hunter_trades(cur, symbol, price, momentum, trend, now)
+        except Exception as e:
+            print(f"⚠️ Persistence Hunter processing skipped: {e}", flush=True)
 
         # ================= EXIT ENGINE =================
         cur.execute("""
@@ -3514,6 +4001,8 @@ def build_telegram_health_message(cur):
         f"Shadow ignition: {ENABLE_SHADOW_EMERGENCE_TELEMETRY} | Δ{CONTROLLED_IGNITION_DELTA_MIN}..{CONTROLLED_IGNITION_DELTA_MAX}\n"
         f"Shadow CQE: {ENABLE_SHADOW_CQE} | Q>={CQE_MIN_QUALITY_SCORE} | hold {CQE_SHADOW_HOLD_MINUTES}m\n"
         f"BPT lifecycle: {ENABLE_BPT_CQE_LIFECYCLE_SHADOW} | live probes {ENABLE_BPT_CQE_LIVE_PROBES} | live upgrades {ENABLE_BPT_CQE_LIVE_UPGRADES}\n"
+        f"Density relaxed: {ENABLE_RELAXED_DENSITY_DEPENDENCY} | fixed real exits: {ENABLE_FIXED_TIME_EXITS_REAL}\n"
+        f"Persistence Hunter: {ENABLE_PERSISTENCE_HUNTER_SHADOW} | live {ENABLE_PERSISTENCE_HUNTER_LIVE} | score>={PH_MIN_LEADERSHIP_SCORE} age {PH_MIN_CORE_AGE_MINUTES}-{PH_MAX_CORE_AGE_MINUTES}m\n"
         f"Max same symbol: {MAX_SAME_SYMBOL_OPEN}\n"
         f"OKX tradable cache: {len(OKX_TRADABLE_SPOT_INST_IDS)} pairs"
     )
@@ -3694,6 +4183,8 @@ def handle_telegram_command(text):
             return "🧬 <b>Leadership Lifecycle</b>\n" + get_lifecycle_dashboard_text(cur, 12)
         if cmd in ["/shadows", "/shadow", "/cqe"]:
             return build_telegram_shadow_watch_message(cur, 12)
+        if cmd in ["/hunter", "/ph", "/persistence"]:
+            return build_telegram_persistence_hunter_message(cur, 24)
         if cmd == "/health":
             return build_telegram_health_message(cur)
         if cmd == "/help":
@@ -3705,6 +4196,7 @@ def handle_telegram_command(text):
                 "/leaders - current leadership leaderboard\n"
                 "/lifecycle - lifecycle phases + deltas\n"
                 "/shadows - CQE shadow watch + open paper trades\n"
+                "/hunter - Persistence Hunter shadow report\n"
                 "/health - webhook/server health\n"
                 "/help - command list"
             )
@@ -3807,9 +4299,17 @@ def bool_status():
         "DATA_VERSION": DATA_VERSION,
         "ENABLE_BPT_CQE_LIFECYCLE_SHADOW": ENABLE_BPT_CQE_LIFECYCLE_SHADOW,
         "ENABLE_BPT_CQE_LIVE_PROBES": ENABLE_BPT_CQE_LIVE_PROBES,
+        "ENABLE_RELAXED_DENSITY_DEPENDENCY": ENABLE_RELAXED_DENSITY_DEPENDENCY,
+        "ENABLE_FIXED_TIME_EXITS_REAL": ENABLE_FIXED_TIME_EXITS_REAL,
+        "DENSITY_NULL_IS_VALID": DENSITY_NULL_IS_VALID,
         "ENABLE_BPT_CQE_LIVE_UPGRADES": ENABLE_BPT_CQE_LIVE_UPGRADES,
         "BPT_CQE_PROBE_SIZE_GBP": BPT_CQE_PROBE_SIZE_GBP,
         "BPT_MEDIUM_UPGRADE_GBP": BPT_MEDIUM_UPGRADE_GBP,
+        "ENABLE_PERSISTENCE_HUNTER_SHADOW": ENABLE_PERSISTENCE_HUNTER_SHADOW,
+        "ENABLE_PERSISTENCE_HUNTER_LIVE": ENABLE_PERSISTENCE_HUNTER_LIVE,
+        "PH_MIN_LEADERSHIP_SCORE": PH_MIN_LEADERSHIP_SCORE,
+        "PH_MIN_CORE_AGE_MINUTES": PH_MIN_CORE_AGE_MINUTES,
+        "PH_MAX_CORE_AGE_MINUTES": PH_MAX_CORE_AGE_MINUTES,
         "MAX_OPEN_TRADES": MAX_OPEN_TRADES,
         "MAX_SAME_SYMBOL_OPEN": MAX_SAME_SYMBOL_OPEN,
         "ENABLE_LIVE_ORDERS": ENABLE_LIVE_ORDERS,
@@ -3915,3 +4415,32 @@ def should_force_live_trade(lifecycle_row):
 # HIGH_MONSTER_ROW remains SHADOW
 # MEDIUM_BALANCED_ROW remains SHADOW
 # EARLY_INCUBATION_ROW remains SHADOW
+
+
+# =========================
+# v6.3.0 NOTES
+# =========================
+# Adds PERSISTENCE_HUNTER_V1 as shadow-only research engine.
+# Thesis: no-density + stable leadership >=2.0 + 45-180m core age + persistent hits.
+# Keeps current live leadership engine unchanged.
+# Keeps BPT CQE lifecycle available but not relied on for this research branch.
+
+
+
+# =========================
+# v6.3.1 RELEASE NOTES
+# =========================
+# LIVE CHANGE:
+# - Relaxed density dependency: NULL density no longer blocks quality.
+# - Density is now context/crowding telemetry, not mandatory entry confirmation.
+#
+# EXIT CHANGE:
+# - Fixed-time exits disabled for real/live trades.
+# - Shadow fixed holds remain allowed for research visibility.
+#
+# SHADOW CHANGE:
+# - Persistence Hunter remains shadow-only for validation.
+#
+# DEPLOYMENT INTENT:
+# - Improve live capture of NEAR-style no-density leadership continuation
+#   without replacing the current real leadership engine.
