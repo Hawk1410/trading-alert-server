@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v6.3.1
+# VERSION: v6.4.0
 # TITLE: LEADERSHIP LIVE ENGINE + PERSISTENCE HUNTER SHADOW + BPT CQE LIFECYCLE + TELEGRAM OPS
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v6.3.1 BPT CQE LIFECYCLE SHADOW + LEADERSHIP LIVE RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v6.4.0 BPT CQE LIFECYCLE SHADOW + LEADERSHIP LIVE RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -66,7 +66,7 @@ MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 3
 
 
 
-DATA_VERSION = "v6.3.1_DENSITY_RELAXED_NO_FIXED_EXIT"
+DATA_VERSION = "v6.4.0_TELEMETRY_V1"
 
 
 
@@ -1445,6 +1445,18 @@ def open_shadow_cqe_trade(cur, symbol, price, momentum, trend, signal_id, signal
         log_trade_event(cur, trade_id, symbol, "shadow_cqe_entry", price, 0, 0, 0, momentum, trend, True)
     except Exception as e:
         print(f"⚠️ shadow CQE trade_events entry log failed: {e}", flush=True)
+
+    try:
+        update_trade_telemetry_v1(
+            cur,
+            trade_id,
+            symbol,
+            opened_at=signal_time,
+            peak_pnl_percent=0,
+            is_exit=False
+        )
+    except Exception as e:
+        print(f"⚠️ TELEMETRY shadow entry update failed: {e}", flush=True)
 
     return trade_id
 
@@ -2952,6 +2964,360 @@ def build_telegram_open_trades_message(cur):
 
     return "\n".join(lines)
 
+
+
+# =========================
+# 📡 TELEMETRY_V1 HELPERS
+# =========================
+
+ENABLE_TELEMETRY_V1 = True
+TELEMETRY_VERSION = "TELEMETRY_V1"
+
+def safe_float(value, default=None):
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+def safe_int(value, default=None):
+    try:
+        if value is None:
+            return default
+        return int(value)
+    except Exception:
+        return default
+
+def get_ranked_leadership_context_for_telemetry(cur, symbol):
+    """
+    TELEMETRY_V1:
+    Computes current leadership rank, age, persistence hits, velocity,
+    rank stability, and market breadth/concentration context.
+    This is observability only; it should not alter live decisions.
+    """
+    if not ENABLE_TELEMETRY_V1:
+        return {}
+
+    try:
+        ensure_leadership_state_history_table(cur)
+
+        cur.execute("""
+            WITH latest_snapshot AS (
+                SELECT MAX(snapshot_time) AS snapshot_time
+                FROM leadership_state_history
+            ),
+            ranked AS (
+                SELECT
+                    symbol,
+                    snapshot_time,
+                    leadership_score,
+                    avg_peak,
+                    avg_worst,
+                    leadership_mode,
+                    RANK() OVER (ORDER BY leadership_score DESC NULLS LAST) AS leadership_rank,
+                    COUNT(*) FILTER (WHERE leadership_score >= 2.0) OVER () AS leader_count_2p0,
+                    COUNT(*) FILTER (WHERE leadership_score >= 1.25) OVER () AS leader_count_1p25,
+                    AVG(leadership_score) OVER () AS market_leadership_quality,
+                    SUM(leadership_score) OVER () AS total_leadership_score
+                FROM leadership_state_history l
+                JOIN latest_snapshot x
+                  ON x.snapshot_time = l.snapshot_time
+            )
+            SELECT
+                symbol,
+                snapshot_time,
+                leadership_score,
+                avg_peak,
+                avg_worst,
+                leadership_mode,
+                leadership_rank,
+                leader_count_2p0,
+                leader_count_1p25,
+                market_leadership_quality,
+                CASE
+                    WHEN total_leadership_score > 0
+                    THEN leadership_score / total_leadership_score
+                    ELSE NULL
+                END AS top3_concentration
+            FROM ranked
+            WHERE symbol = %s
+            LIMIT 1
+        """, (symbol,))
+        row = cur.fetchone()
+
+        if not row:
+            return {
+                "telemetry_version": TELEMETRY_VERSION,
+                "leadership_phase": "NO_LEADERSHIP_CONTEXT",
+                "lifecycle_phase": "NO_LEADERSHIP_CONTEXT",
+            }
+
+        (
+            _symbol,
+            snapshot_time,
+            leadership_score,
+            avg_peak,
+            avg_worst,
+            leadership_mode,
+            leadership_rank,
+            leader_count_2p0,
+            leader_count_1p25,
+            market_leadership_quality,
+            top3_concentration
+        ) = row
+
+        leadership_score_f = safe_float(leadership_score, 0.0)
+        leadership_rank_i = safe_int(leadership_rank, None)
+
+        cur.execute("""
+            SELECT
+                leadership_score,
+                snapshot_time
+            FROM leadership_state_history
+            WHERE symbol = %s
+              AND snapshot_time <= %s - INTERVAL '30 minutes'
+            ORDER BY snapshot_time DESC
+            LIMIT 1
+        """, (symbol, snapshot_time))
+        prev = cur.fetchone()
+        prev_score = safe_float(prev[0], None) if prev else None
+        leadership_velocity = (
+            leadership_score_f - prev_score
+            if prev_score is not None
+            else None
+        )
+
+        cur.execute("""
+            WITH ranked_history AS (
+                SELECT
+                    snapshot_time,
+                    symbol,
+                    leadership_score,
+                    RANK() OVER (
+                        PARTITION BY snapshot_time
+                        ORDER BY leadership_score DESC NULLS LAST
+                    ) AS leadership_rank
+                FROM leadership_state_history
+                WHERE snapshot_time >= %s - INTERVAL '4 hours'
+            )
+            SELECT
+                COUNT(*) FILTER (WHERE leadership_score >= 2.0) AS stable_hits,
+                COUNT(*) FILTER (WHERE leadership_rank <= 3) AS top3_hits,
+                MIN(snapshot_time) FILTER (WHERE leadership_score >= 2.0) AS first_core_time,
+                AVG(leadership_rank) FILTER (WHERE leadership_rank IS NOT NULL) AS avg_rank_4h,
+                STDDEV(leadership_rank) FILTER (WHERE leadership_rank IS NOT NULL) AS rank_stability
+            FROM ranked_history
+            WHERE symbol = %s
+              AND snapshot_time <= %s
+        """, (snapshot_time, symbol, snapshot_time))
+        hist = cur.fetchone() or (0, 0, None, None, None)
+
+        stable_hits, top3_hits, first_core_time, avg_rank_4h, rank_stability = hist
+
+        leadership_age_minutes = None
+        if first_core_time:
+            leadership_age_minutes = (snapshot_time - first_core_time).total_seconds() / 60.0
+
+        if leadership_score_f >= 2.0:
+            if leadership_velocity is None:
+                leadership_phase = "STABLE_LEADER"
+            elif leadership_velocity >= 0.50:
+                leadership_phase = "IGNITION"
+            elif leadership_velocity <= -0.50:
+                leadership_phase = "DECAY"
+            elif leadership_age_minutes is not None and leadership_age_minutes >= 180:
+                leadership_phase = "MATURE"
+            else:
+                leadership_phase = "STABLE"
+        elif leadership_score_f >= 1.25:
+            leadership_phase = "CORE"
+        else:
+            leadership_phase = "WEAK"
+
+        leader_rotation_velocity = None
+        try:
+            cur.execute("""
+                WITH current_top AS (
+                    SELECT symbol
+                    FROM leadership_state_history
+                    WHERE snapshot_time = %s
+                    ORDER BY leadership_score DESC NULLS LAST
+                    LIMIT 3
+                ),
+                prior_snapshot AS (
+                    SELECT MAX(snapshot_time) AS snapshot_time
+                    FROM leadership_state_history
+                    WHERE snapshot_time <= %s - INTERVAL '60 minutes'
+                ),
+                prior_top AS (
+                    SELECT l.symbol
+                    FROM leadership_state_history l
+                    JOIN prior_snapshot p
+                      ON p.snapshot_time = l.snapshot_time
+                    ORDER BY l.leadership_score DESC NULLS LAST
+                    LIMIT 3
+                )
+                SELECT COUNT(*)
+                FROM current_top c
+                FULL OUTER JOIN prior_top p
+                  ON p.symbol = c.symbol
+                WHERE c.symbol IS NULL OR p.symbol IS NULL
+            """, (snapshot_time, snapshot_time))
+            leader_rotation_velocity = safe_float((cur.fetchone() or [None])[0], None)
+        except Exception:
+            leader_rotation_velocity = None
+
+        return {
+            "telemetry_version": TELEMETRY_VERSION,
+            "leadership_age_minutes": leadership_age_minutes,
+            "stable_leadership_hits": safe_int(stable_hits, 0),
+            "leadership_rank": leadership_rank_i,
+            "leadership_rank_stability": safe_float(rank_stability, None),
+            "leadership_velocity": leadership_velocity,
+            "leadership_phase": leadership_phase,
+            "lifecycle_phase": leadership_phase,
+            "simultaneous_leader_count": safe_int(leader_count_2p0, 0),
+            "top3_concentration": safe_float(top3_concentration, None),
+            "market_leadership_quality": safe_float(market_leadership_quality, None),
+            "leader_rotation_velocity": leader_rotation_velocity,
+        }
+
+    except Exception as e:
+        print(f"⚠️ TELEMETRY leadership context failed for {symbol}: {e}", flush=True)
+        return {
+            "telemetry_version": TELEMETRY_VERSION,
+            "leadership_phase": "TELEMETRY_ERROR",
+            "lifecycle_phase": "TELEMETRY_ERROR",
+        }
+
+
+def get_density_context_for_telemetry(cur, symbol, anchor_time=None):
+    """
+    TELEMETRY_V1:
+    Density is interpreted as crowding/lifecycle context, not mandatory entry confirmation.
+    """
+    if not ENABLE_TELEMETRY_V1:
+        return {}
+
+    try:
+        if anchor_time is None:
+            cur.execute("""
+                SELECT timestamp, sniper_density, sniper_density_delta
+                FROM signals_raw
+                WHERE symbol = %s
+                ORDER BY timestamp DESC
+                LIMIT 1
+            """, (symbol,))
+        else:
+            cur.execute("""
+                SELECT timestamp, sniper_density, sniper_density_delta
+                FROM signals_raw
+                WHERE symbol = %s
+                  AND timestamp <= %s
+                ORDER BY timestamp DESC
+                LIMIT 1
+            """, (symbol, anchor_time))
+
+        row = cur.fetchone()
+        if not row:
+            return {
+                "density_phase": "NO_DENSITY_DATA",
+                "crowding_state": "UNKNOWN",
+            }
+
+        ts, density, density_delta = row
+        density_f = safe_float(density, None)
+        density_delta_f = safe_float(density_delta, None)
+
+        if density_f is None or density_delta_f is None:
+            density_phase = "NO_DENSITY_CLEAN"
+            crowding_state = "NOT_CROWDED"
+        elif density_f >= 6 and density_delta_f >= 2:
+            density_phase = "CROWDING_EXPANDING"
+            crowding_state = "CROWDED"
+        elif density_f >= 6:
+            density_phase = "CROWDED"
+            crowding_state = "CROWDED"
+        elif density_delta_f >= 2:
+            density_phase = "DENSITY_EMERGING"
+            crowding_state = "EMERGING"
+        else:
+            density_phase = "DENSITY_PRESENT_LOW"
+            crowding_state = "LOW"
+
+        return {
+            "density_phase": density_phase,
+            "crowding_state": crowding_state,
+            "density_at_exit": density_f,
+            "density_delta_at_exit": density_delta_f,
+        }
+
+    except Exception as e:
+        print(f"⚠️ TELEMETRY density context failed for {symbol}: {e}", flush=True)
+        return {
+            "density_phase": "DENSITY_TELEMETRY_ERROR",
+            "crowding_state": "UNKNOWN",
+        }
+
+
+def update_trade_telemetry_v1(cur, trade_id, symbol, opened_at=None, peak_pnl_percent=None, is_exit=False):
+    """
+    Writes TELEMETRY_V1 fields into bot_trades_v4.
+    Safe/no-op for missing columns via safe_update_trade_telemetry.
+    """
+    if not ENABLE_TELEMETRY_V1:
+        return
+
+    try:
+        leadership_telemetry = get_ranked_leadership_context_for_telemetry(cur, symbol)
+        density_telemetry = get_density_context_for_telemetry(cur, symbol)
+
+        telemetry = {}
+        telemetry.update(leadership_telemetry)
+        telemetry.update({
+            "density_phase": density_telemetry.get("density_phase"),
+            "crowding_state": density_telemetry.get("crowding_state"),
+        })
+
+        if is_exit:
+            telemetry.update({
+                "density_at_exit": density_telemetry.get("density_at_exit"),
+                "density_delta_at_exit": density_telemetry.get("density_delta_at_exit"),
+                "leadership_decay_at_exit": leadership_telemetry.get("leadership_velocity"),
+            })
+
+        # First density timing and peak before/after density.
+        try:
+            if opened_at:
+                cur.execute("""
+                    SELECT MIN(timestamp)
+                    FROM signals_raw
+                    WHERE symbol = %s
+                      AND timestamp >= %s
+                      AND sniper_density IS NOT NULL
+                """, (symbol, opened_at))
+                fd = cur.fetchone()
+                first_density_seen = fd[0] if fd and fd[0] else None
+
+                if first_density_seen:
+                    telemetry["first_density_seen"] = first_density_seen
+                    telemetry["mins_to_density"] = (first_density_seen - opened_at).total_seconds() / 60.0
+
+                    current_peak = safe_float(peak_pnl_percent, None)
+                    telemetry["peak_before_density"] = current_peak
+                    telemetry["peak_after_density"] = current_peak
+                    telemetry["giveback_after_density"] = None
+        except Exception as e:
+            print(f"⚠️ TELEMETRY density timing skipped for {symbol}: {e}", flush=True)
+
+        safe_update_trade_telemetry(cur, trade_id, telemetry)
+
+    except Exception as e:
+        print(f"⚠️ TELEMETRY update skipped for trade {trade_id}/{symbol}: {e}", flush=True)
+
+
+
 # =========================
 # TRADE HELPERS
 # =========================
@@ -3066,6 +3432,18 @@ def open_trade(cur, symbol, direction, price, momentum, trend, quality,
         )
     except Exception as e:
         print(f"⚠️ trade_events entry log failed: {e}", flush=True)
+
+    try:
+        update_trade_telemetry_v1(
+            cur,
+            trade_id,
+            symbol,
+            opened_at=signal_time,
+            peak_pnl_percent=0,
+            is_exit=False
+        )
+    except Exception as e:
+        print(f"⚠️ TELEMETRY entry update failed: {e}", flush=True)
 
     return trade_id
 
@@ -3730,6 +4108,18 @@ def webhook():
             except Exception as e:
                 print(f"⚠️ trade_events update log failed: {e}", flush=True)
 
+            try:
+                update_trade_telemetry_v1(
+                    cur,
+                    tid,
+                    sym,
+                    opened_at=opened_at,
+                    peak_pnl_percent=current_peak,
+                    is_exit=False
+                )
+            except Exception as e:
+                print(f"⚠️ TELEMETRY real update failed: {e}", flush=True)
+
             close_reason = None
             exit_architecture = None
             decay_triggered = False
@@ -3857,6 +4247,18 @@ def webhook():
                     "leadership_delta_30m_at_exit": exit_lifecycle_context.get("leadership_delta_30m"),
                     "leadership_rank_at_exit": exit_lifecycle_context.get("leadership_rank")
                 })
+
+                try:
+                    update_trade_telemetry_v1(
+                        cur,
+                        tid,
+                        sym,
+                        opened_at=opened_at,
+                        peak_pnl_percent=current_peak,
+                        is_exit=True
+                    )
+                except Exception as e:
+                    print(f"⚠️ TELEMETRY exit update failed: {e}", flush=True)
 
                 try:
                     log_trade_event(
@@ -4004,7 +4406,8 @@ def build_telegram_health_message(cur):
         f"Density relaxed: {ENABLE_RELAXED_DENSITY_DEPENDENCY} | fixed real exits: {ENABLE_FIXED_TIME_EXITS_REAL}\n"
         f"Persistence Hunter: {ENABLE_PERSISTENCE_HUNTER_SHADOW} | live {ENABLE_PERSISTENCE_HUNTER_LIVE} | score>={PH_MIN_LEADERSHIP_SCORE} age {PH_MIN_CORE_AGE_MINUTES}-{PH_MAX_CORE_AGE_MINUTES}m\n"
         f"Max same symbol: {MAX_SAME_SYMBOL_OPEN}\n"
-        f"OKX tradable cache: {len(OKX_TRADABLE_SPOT_INST_IDS)} pairs"
+        f"OKX tradable cache: {len(OKX_TRADABLE_SPOT_INST_IDS)} pairs\n"
+        f"Telemetry V1: {ENABLE_TELEMETRY_V1} | {TELEMETRY_VERSION}"
     )
 
 def build_telegram_summary_message(cur, hours=24):
@@ -4167,6 +4570,58 @@ def build_telegram_shadow_watch_message(cur, hours=12):
         print(f"⚠️ shadow watch failed: {e}", flush=True)
         return f"🕵️ <b>Shadow Watch</b>\nUnavailable: {e}"
 
+
+
+def build_telegram_telemetry_message(cur, hours=24):
+    try:
+        cur.execute("""
+            SELECT
+                COUNT(*) AS trades,
+                COUNT(*) FILTER (WHERE telemetry_version = 'TELEMETRY_V1') AS telemetry_trades,
+                COUNT(*) FILTER (WHERE density_phase = 'NO_DENSITY_CLEAN') AS no_density_clean,
+                COUNT(*) FILTER (WHERE crowding_state = 'CROWDED') AS crowded,
+                ROUND(AVG(leadership_age_minutes)::numeric, 1) AS avg_leadership_age,
+                ROUND(AVG(stable_leadership_hits)::numeric, 1) AS avg_stable_hits,
+                ROUND(AVG(leadership_velocity)::numeric, 3) AS avg_leadership_velocity
+            FROM bot_trades_v4
+            WHERE opened_at >= NOW() - (%s || ' hours')::INTERVAL
+        """, (hours,))
+        row = cur.fetchone() or (0,0,0,0,0,0,0)
+        trades, telemetry_trades, no_density_clean, crowded, avg_age, avg_hits, avg_velocity = row
+
+        cur.execute("""
+            SELECT
+                COALESCE(leadership_phase, 'UNKNOWN') AS phase,
+                COALESCE(density_phase, 'UNKNOWN') AS density,
+                COUNT(*) AS trades,
+                ROUND(AVG(COALESCE(peak_pnl_percent,0))::numeric, 3) AS avg_peak,
+                ROUND(AVG(COALESCE(pnl_percent,0))::numeric, 3) AS avg_final
+            FROM bot_trades_v4
+            WHERE opened_at >= NOW() - (%s || ' hours')::INTERVAL
+            GROUP BY 1,2
+            ORDER BY trades DESC
+            LIMIT 8
+        """, (hours,))
+        rows = cur.fetchall()
+
+        lines = [
+            f"📡 <b>Telemetry V1 {hours}h</b>",
+            f"Trades: <b>{trades}</b> | Telemetry tagged: <b>{telemetry_trades}</b>",
+            f"No-density clean: <b>{no_density_clean}</b> | Crowded: <b>{crowded}</b>",
+            f"Avg leadership age: <b>{avg_age}</b>m | Stable hits: <b>{avg_hits}</b> | Velocity: <b>{avg_velocity}</b>",
+        ]
+
+        if rows:
+            lines.append("\n<b>Phase / density breakdown</b>")
+            for phase, density, t, avg_peak, avg_final in rows:
+                lines.append(f"{phase} / {density}: {t} | peak {avg_peak}% | final {avg_final}%")
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        return f"📡 <b>Telemetry V1</b> unavailable: {e}"
+
+
 def handle_telegram_command(text):
     cmd = (text or "").strip().lower().split()[0] if text else "/help"
     conn = get_db()
@@ -4181,6 +4636,8 @@ def handle_telegram_command(text):
             return "🧠 <b>Top Leadership States</b>\n" + get_top_leaders_text(cur, 10)
         if cmd in ["/lifecycle", "/phases"]:
             return "🧬 <b>Leadership Lifecycle</b>\n" + get_lifecycle_dashboard_text(cur, 12)
+        if cmd in ["/telemetry", "/tel"]:
+            return build_telegram_telemetry_message(cur, 24)
         if cmd in ["/shadows", "/shadow", "/cqe"]:
             return build_telegram_shadow_watch_message(cur, 12)
         if cmd in ["/hunter", "/ph", "/persistence"]:
@@ -4198,6 +4655,7 @@ def handle_telegram_command(text):
                 "/shadows - CQE shadow watch + open paper trades\n"
                 "/hunter - Persistence Hunter shadow report\n"
                 "/health - webhook/server health\n"
+                "/telemetry - Telemetry V1 market-state summary\n"
                 "/help - command list"
             )
         return "Unknown command. Send /help."
@@ -4300,6 +4758,8 @@ def bool_status():
         "ENABLE_BPT_CQE_LIFECYCLE_SHADOW": ENABLE_BPT_CQE_LIFECYCLE_SHADOW,
         "ENABLE_BPT_CQE_LIVE_PROBES": ENABLE_BPT_CQE_LIVE_PROBES,
         "ENABLE_RELAXED_DENSITY_DEPENDENCY": ENABLE_RELAXED_DENSITY_DEPENDENCY,
+        "ENABLE_TELEMETRY_V1": ENABLE_TELEMETRY_V1,
+        "TELEMETRY_VERSION": TELEMETRY_VERSION,
         "ENABLE_FIXED_TIME_EXITS_REAL": ENABLE_FIXED_TIME_EXITS_REAL,
         "DENSITY_NULL_IS_VALID": DENSITY_NULL_IS_VALID,
         "ENABLE_BPT_CQE_LIVE_UPGRADES": ENABLE_BPT_CQE_LIVE_UPGRADES,
@@ -4444,3 +4904,27 @@ def should_force_live_trade(lifecycle_row):
 # DEPLOYMENT INTENT:
 # - Improve live capture of NEAR-style no-density leadership continuation
 #   without replacing the current real leadership engine.
+
+
+
+# =========================
+# v6.4.0 TELEMETRY_V1 NOTES
+# =========================
+# Adds market-state observability without intentionally changing live entry/exit behavior:
+# - leadership_age_minutes
+# - stable_leadership_hits
+# - leadership_rank
+# - leadership_rank_stability
+# - leadership_velocity
+# - leadership_phase / lifecycle_phase
+# - density_phase / crowding_state
+# - first_density_seen / mins_to_density
+# - density_at_exit / density_delta_at_exit
+# - simultaneous_leader_count
+# - top3_concentration
+# - market_leadership_quality
+# - leader_rotation_velocity
+#
+# Adds Telegram:
+# - /telemetry
+# - /tel
