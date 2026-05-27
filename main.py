@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v6.4.0
-# TITLE: ARCHETYPE STATE ENGINE + TELEMETRY V1 + TELEGRAM DEDUPE + SHADOW CLOSE FIX
+# VERSION: v6.6.0
+# TITLE: V6.6 MARKET OS + PARTIAL BANKING + ROT MICRO + INFRA HARDENING
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v6.5.1 BPT CQE LIFECYCLE SHADOW + LEADERSHIP LIVE RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v6.6.0 BPT CQE LIFECYCLE SHADOW + LEADERSHIP LIVE RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -66,7 +66,45 @@ MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 3
 
 
 
-DATA_VERSION = "v6.5.1_TELEMETRY_SQL_ALIAS_FIX"
+DATA_VERSION = "v6.6.0_MARKET_OS_PARTIAL_BANK"
+
+
+# =========================
+# 🚀 v6.6 MARKET OS SETTINGS
+# =========================
+# Simulation-backed architecture:
+# - Keep elite/core leadership engine.
+# - Scale size by leadership intensity instead of duplicating async entries.
+# - Bank 25% at +4% on real core/leadership trades, then keep runner alive.
+# - Add tiny rotational micro continuation layer as a separate toggleable engine.
+# - Add Telegram market-state command so silence is explainable.
+
+ENABLE_MARKET_OS_V66 = os.environ.get("ENABLE_MARKET_OS_V66", "true").lower() == "true"
+
+# Leadership scaling / capital allocation
+ENABLE_LEADERSHIP_SIZE_SCALING_V66 = os.environ.get("ENABLE_LEADERSHIP_SIZE_SCALING_V66", "true").lower() == "true"
+LEADERSHIP_SCALE_THRESHOLD = float(os.environ.get("LEADERSHIP_SCALE_THRESHOLD", "2.0") or 2.0)
+LEADERSHIP_SCALED_TRADE_SIZE_GBP = float(os.environ.get("LEADERSHIP_SCALED_TRADE_SIZE_GBP", "30") or 30)
+
+# Partial profit bank: bank a small piece of position only after meaningful expansion.
+ENABLE_PARTIAL_PROFIT_BANK_V66 = os.environ.get("ENABLE_PARTIAL_PROFIT_BANK_V66", "true").lower() == "true"
+PARTIAL_BANK_TRIGGER_PCT = float(os.environ.get("PARTIAL_BANK_TRIGGER_PCT", "4.0") or 4.0)
+PARTIAL_BANK_FRACTION = float(os.environ.get("PARTIAL_BANK_FRACTION", "0.25") or 0.25)
+
+# Rotational micro continuation layer. Independent from elite core, tiny size only.
+ENABLE_ROT_MICRO_LIVE = os.environ.get("ENABLE_ROT_MICRO_LIVE", "true").lower() == "true"
+ROT_MICRO_TRADE_SIZE_GBP = float(os.environ.get("ROT_MICRO_TRADE_SIZE_GBP", "5") or 5)
+ROT_MICRO_MIN_MOMENTUM = float(os.environ.get("ROT_MICRO_MIN_MOMENTUM", "0.30") or 0.30)
+ROT_MICRO_MIN_TREND = float(os.environ.get("ROT_MICRO_MIN_TREND", "0.10") or 0.10)
+ROT_MICRO_MIN_LEAD60 = float(os.environ.get("ROT_MICRO_MIN_LEAD60", "0.75") or 0.75)
+ROT_MICRO_MAX_LEAD60 = float(os.environ.get("ROT_MICRO_MAX_LEAD60", "1.00") or 1.00)
+ROT_MICRO_COOLDOWN_MINUTES = float(os.environ.get("ROT_MICRO_COOLDOWN_MINUTES", "90") or 90)
+
+# Operational safety / self-healing
+ENABLE_OKX_TRADABILITY_SELF_HEAL_V66 = os.environ.get("ENABLE_OKX_TRADABILITY_SELF_HEAL_V66", "true").lower() == "true"
+ENABLE_STALE_SHADOW_SWEEP_V66 = os.environ.get("ENABLE_STALE_SHADOW_SWEEP_V66", "true").lower() == "true"
+STALE_SHADOW_MAX_HOURS = float(os.environ.get("STALE_SHADOW_MAX_HOURS", "24") or 24)
+ENABLE_MARKET_STATE_TELEGRAM_V66 = os.environ.get("ENABLE_MARKET_STATE_TELEGRAM_V66", "true").lower() == "true"
 
 
 
@@ -331,8 +369,8 @@ PH_DENSITY_EXIT_TIGHTEN = os.environ.get("PH_DENSITY_EXIT_TIGHTEN", "true").lowe
 
 
 # Dynamic sizing tiers.
-CORE_TRADE_SIZE_GBP = float(os.environ.get("CORE_TRADE_SIZE_GBP", "10") or 10)
-AGGRESSIVE_TRADE_SIZE_GBP = float(os.environ.get("AGGRESSIVE_TRADE_SIZE_GBP", "18") or 18)
+CORE_TRADE_SIZE_GBP = float(os.environ.get("CORE_TRADE_SIZE_GBP", "20") or 20)
+AGGRESSIVE_TRADE_SIZE_GBP = float(os.environ.get("AGGRESSIVE_TRADE_SIZE_GBP", "20") or 20)
 MONSTER_TRADE_SIZE_GBP = float(os.environ.get("MONSTER_TRADE_SIZE_GBP", "30") or 30)
 
 CORE_MIN_PRIOR_PEAK = 1.25
@@ -674,9 +712,265 @@ def ensure_archetype_state_columns(cur):
         ADD COLUMN IF NOT EXISTS archetype_exit_reason TEXT,
         ADD COLUMN IF NOT EXISTS archetype_updated_at TIMESTAMPTZ,
         ADD COLUMN IF NOT EXISTS telegram_close_alert_sent BOOLEAN DEFAULT FALSE,
-        ADD COLUMN IF NOT EXISTS telegram_close_alert_sent_at TIMESTAMPTZ
+        ADD COLUMN IF NOT EXISTS telegram_close_alert_sent_at TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS partial_bank_4_done BOOLEAN DEFAULT FALSE,
+        ADD COLUMN IF NOT EXISTS partial_bank_4_done_at TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS partial_bank_4_pct FLOAT,
+        ADD COLUMN IF NOT EXISTS partial_bank_4_fraction FLOAT,
+        ADD COLUMN IF NOT EXISTS partial_bank_realized_pnl_gbp FLOAT,
+        ADD COLUMN IF NOT EXISTS market_os_engine TEXT,
+        ADD COLUMN IF NOT EXISTS size_scaling_reason TEXT
     """)
 
+
+
+
+# =========================
+# 🚀 v6.6 MARKET OS HELPERS
+# =========================
+
+def get_recent_leadership_max(cur, symbol, minutes=60):
+    try:
+        ensure_leadership_state_history_table(cur)
+        cur.execute("""
+            SELECT MAX(leadership_score)
+            FROM leadership_state_history
+            WHERE symbol = %s
+              AND snapshot_time >= NOW() - (%s || ' minutes')::INTERVAL
+        """, (symbol, minutes))
+        row = cur.fetchone()
+        return float(row[0] or 0) if row else 0.0
+    except Exception as e:
+        print(f"⚠️ recent leadership max lookup failed for {symbol}: {e}", flush=True)
+        safe_telemetry_rollback(cur)
+        return 0.0
+
+
+def get_trade_size_for_context(entry_quality, leadership_context=None):
+    """Simulation-backed sizing. Async overlap was mostly duplicate, so use leadership as a sizing layer."""
+    try:
+        if entry_quality == "ROT_MICRO_V1":
+            return float(ROT_MICRO_TRADE_SIZE_GBP)
+        score = 0.0
+        if leadership_context:
+            score = float(
+                leadership_context.get("leadership_max_60m")
+                or leadership_context.get("prior_avg_peak")
+                or leadership_context.get("leadership_score")
+                or 0
+            )
+        if ENABLE_LEADERSHIP_SIZE_SCALING_V66 and score >= LEADERSHIP_SCALE_THRESHOLD:
+            return float(LEADERSHIP_SCALED_TRADE_SIZE_GBP)
+    except Exception:
+        pass
+    return float(get_trade_size_for_quality(entry_quality))
+
+
+def get_trade_size_quote_for_context(entry_quality, leadership_context=None):
+    return get_trade_size_for_context(entry_quality, leadership_context)
+
+
+def is_rot_micro_candidate(cur, symbol, momentum, trend):
+    """Independent rotational micro layer. Small size only. Does not replace core."""
+    if not (ENABLE_MARKET_OS_V66 and ENABLE_ROT_MICRO_LIVE):
+        return False, "rot_micro_disabled", {}
+    lead60 = get_recent_leadership_max(cur, symbol, 60)
+    ctx = {
+        "leadership_max_60m": lead60,
+        "rot_micro_min_momentum": ROT_MICRO_MIN_MOMENTUM,
+        "rot_micro_min_trend": ROT_MICRO_MIN_TREND,
+    }
+    if float(momentum or 0) < ROT_MICRO_MIN_MOMENTUM:
+        return False, "rot_micro_low_momentum", ctx
+    if float(trend or 0) < ROT_MICRO_MIN_TREND:
+        return False, "rot_micro_low_trend", ctx
+    if lead60 < ROT_MICRO_MIN_LEAD60:
+        return False, "rot_micro_low_lead60", ctx
+    if lead60 >= ROT_MICRO_MAX_LEAD60:
+        return False, "rot_micro_lead_too_high_core_zone", ctx
+    return True, "rot_micro_ok", ctx
+
+
+def sweep_stale_shadow_trades(cur):
+    if not ENABLE_STALE_SHADOW_SWEEP_V66:
+        return 0
+    try:
+        cur.execute("""
+            UPDATE bot_trades_v4
+            SET status = 'STALE_SHADOW_EXPIRED',
+                closed_at = COALESCE(closed_at, NOW()),
+                close_reason = COALESCE(close_reason, 'v6_6_stale_shadow_sweep')
+            WHERE status = 'OPEN'
+              AND COALESCE(is_shadow, FALSE) = TRUE
+              AND opened_at < NOW() - (%s || ' hours')::INTERVAL
+            RETURNING id
+        """, (STALE_SHADOW_MAX_HOURS,))
+        rows = cur.fetchall() or []
+        if rows:
+            print(f"🧹 STALE SHADOW SWEEP | closed={len(rows)}", flush=True)
+        return len(rows)
+    except Exception as e:
+        print(f"⚠️ stale shadow sweep failed: {e}", flush=True)
+        safe_telemetry_rollback(cur)
+        return 0
+
+
+def maybe_partial_profit_bank(cur, tid, sym, direction, entry_price, price, entry_quality, current_peak, pnl_percent, opened_at, mins, leadership_context=None):
+    """Bank PARTIAL_BANK_FRACTION at +PARTIAL_BANK_TRIGGER_PCT once, keep the runner open."""
+    if not ENABLE_PARTIAL_PROFIT_BANK_V66:
+        return False
+    if direction != "LONG":
+        return False
+    try:
+        ensure_archetype_state_columns(cur)
+        cur.execute("SELECT COALESCE(partial_bank_4_done, FALSE) FROM bot_trades_v4 WHERE id = %s", (tid,))
+        row = cur.fetchone()
+        already_done = bool(row[0]) if row else False
+        if already_done:
+            return False
+        if float(current_peak or 0) < PARTIAL_BANK_TRIGGER_PCT:
+            return False
+
+        full_size = get_trade_size_for_context(entry_quality, leadership_context)
+        bank_size = max(0.0, float(full_size) * float(PARTIAL_BANK_FRACTION))
+        realized_pnl_gbp = (float(PARTIAL_BANK_TRIGGER_PCT) / 100.0) * bank_size
+
+        if has_successful_okx_live_entry(cur, tid):
+            okx_place_market_order(
+                cur=cur,
+                trade_id=tid,
+                symbol=sym,
+                direction=direction,
+                action="exit",
+                price=price,
+                entry_price=entry_price,
+                trade_size_quote=bank_size,
+            )
+        else:
+            log_okx_exit_skip_no_live_entry(cur, tid, sym, direction, price)
+
+        safe_update_trade_telemetry(cur, tid, {
+            "partial_bank_4_done": True,
+            "partial_bank_4_done_at": datetime.now(timezone.utc),
+            "partial_bank_4_pct": PARTIAL_BANK_TRIGGER_PCT,
+            "partial_bank_4_fraction": PARTIAL_BANK_FRACTION,
+            "partial_bank_realized_pnl_gbp": realized_pnl_gbp,
+            "exit_architecture": "partial_bank_25_at_4_runner_alive",
+        })
+        try:
+            log_trade_event(cur, tid, sym, "partial_bank_4pct", price, pnl_percent, current_peak, mins, 0, 0, False)
+        except Exception:
+            pass
+        send_trade_telegram_once(
+            cur,
+            tid,
+            "partial_bank_4pct",
+            sym,
+            f"💚 <b>PARTIAL BANK</b> | {sym}\n"
+            f"Banked {int(PARTIAL_BANK_FRACTION*100)}% at +{fmt_num(PARTIAL_BANK_TRIGGER_PCT)}%\n"
+            f"Approx realised: {fmt_money(realized_pnl_gbp)} | Runner remains open\n"
+            f"Current peak {fmt_num(current_peak)}% | PnL now {fmt_num(pnl_percent)}%\n"
+            f"ID {tid}"
+        )
+        print(f"💚 PARTIAL BANK | {sym} | id={tid} | {PARTIAL_BANK_FRACTION*100:.0f}% @ {PARTIAL_BANK_TRIGGER_PCT}%", flush=True)
+        return True
+    except Exception as e:
+        print(f"⚠️ partial bank skipped for {sym}/{tid}: {e}", flush=True)
+        safe_telemetry_rollback(cur)
+        return False
+
+
+def build_market_state_message(cur, hours=3):
+    """Operator visibility: explains why bot is / isn't trading."""
+    try:
+        cur.execute("""
+            WITH sig AS (
+                SELECT * FROM signals_raw
+                WHERE timestamp >= NOW() - (%s || ' hours')::INTERVAL
+            ), latest_leaders AS (
+                SELECT DISTINCT ON (symbol)
+                    symbol, leadership_score, avg_peak, leadership_mode, snapshot_time
+                FROM leadership_state_history
+                WHERE snapshot_time >= NOW() - (%s || ' hours')::INTERVAL
+                ORDER BY symbol, snapshot_time DESC
+            ), qual AS (
+                SELECT
+                    s.symbol,
+                    s.momentum,
+                    s.trend,
+                    COALESCE(l.leadership_score,0) AS leadership_score
+                FROM sig s
+                LEFT JOIN latest_leaders l ON l.symbol = s.symbol
+            )
+            SELECT
+                (SELECT COUNT(*) FROM sig) AS signals,
+                (SELECT COUNT(DISTINCT symbol) FROM sig) AS signal_symbols,
+                (SELECT COUNT(*) FROM latest_leaders WHERE leadership_score >= 2.0) AS elite_leaders,
+                (SELECT COUNT(*) FROM latest_leaders WHERE leadership_score >= 1.25) AS core_leaders,
+                (SELECT COUNT(*) FROM qual WHERE momentum >= 0.5 AND trend >= 0.25 AND leadership_score >= 1.25) AS core_candidates,
+                (SELECT COUNT(*) FROM qual WHERE momentum >= 0.3 AND trend >= 0.10 AND leadership_score >= 0.75 AND leadership_score < 1.0) AS rot_candidates,
+                (SELECT MAX(timestamp) FROM sig) AS last_signal
+        """, (hours, hours))
+        row = cur.fetchone() or (0,0,0,0,0,0,None)
+        signals, signal_symbols, elite_leaders, core_leaders, core_candidates, rot_candidates, last_signal = row
+
+        cur.execute("""
+            SELECT symbol, ROUND(leadership_score::numeric,2), leadership_mode
+            FROM leadership_state_history
+            WHERE snapshot_time = (SELECT MAX(snapshot_time) FROM leadership_state_history)
+            ORDER BY leadership_score DESC NULLS LAST
+            LIMIT 5
+        """)
+        leaders = cur.fetchall() or []
+
+        cur.execute("""
+            SELECT COALESCE(block_reason,'no_block') AS reason, COUNT(*)
+            FROM signals_raw
+            WHERE timestamp >= NOW() - (%s || ' hours')::INTERVAL
+            GROUP BY 1
+            ORDER BY COUNT(*) DESC
+            LIMIT 5
+        """, (hours,))
+        reasons = cur.fetchall() or []
+
+        if core_candidates and core_candidates > 0:
+            regime = "IGNITION_READY"
+            why = "Core-quality aligned candidates are appearing."
+        elif rot_candidates and rot_candidates > 0:
+            regime = "HEALTHY_ROTATION"
+            why = "Rotational continuation exists, but elite/core alignment is limited."
+        elif elite_leaders and elite_leaders > 0:
+            regime = "FRAGMENTED_LEADERSHIP"
+            why = "Leadership exists, but momentum/trend are not aligned enough."
+        elif signals and signals > 100:
+            regime = "ACTIVE_CHOP"
+            why = "Many signals, but weak structural quality / low follow-through alignment."
+        else:
+            regime = "QUIET_OR_DEAD"
+            why = "Low signal flow or no coherent leadership."
+
+        lines = [
+            f"📡 <b>Market State {hours}h</b>",
+            f"Regime: <b>{regime}</b>",
+            f"Why: {why}",
+            f"Signals: <b>{signals}</b> across <b>{signal_symbols}</b> symbols | Last {last_signal}",
+            f"Leaders >=2.0: <b>{elite_leaders}</b> | >=1.25: <b>{core_leaders}</b>",
+            f"Core candidates: <b>{core_candidates}</b> | Rot micro candidates: <b>{rot_candidates}</b>",
+            f"OKX tradable cache: <b>{len(OKX_TRADABLE_SPOT_INST_IDS)}</b> pairs",
+        ]
+        if leaders:
+            lines.append("\n<b>Top leaders</b>")
+            for sym, score, mode in leaders:
+                lines.append(f"{sym}: {score} | {mode}")
+        if reasons:
+            lines.append("\n<b>Recent block/reject reasons</b>")
+            for reason, count in reasons:
+                lines.append(f"{reason}: {count}")
+        return "\n".join(lines)
+    except Exception as e:
+        print(f"⚠️ market state message failed: {e}", flush=True)
+        safe_telemetry_rollback(cur)
+        return f"📡 <b>Market State</b> unavailable: {e}"
 
 def update_trade_archetype(cur, trade_id, archetype):
     try:
@@ -824,6 +1118,15 @@ def is_okx_symbol_live_tradable(symbol):
 
     okx_inst_id = okx_symbol_to_inst_id(symbol).upper()
     result = refresh_okx_tradable_spot_instruments(force=False)
+
+    if ENABLE_OKX_TRADABILITY_SELF_HEAL_V66 and len(OKX_TRADABLE_SPOT_INST_IDS) == 0:
+        print("🚨 OKX tradability cache empty — forcing self-heal refresh", flush=True)
+        result = refresh_okx_tradable_spot_instruments(force=True)
+        if len(OKX_TRADABLE_SPOT_INST_IDS) == 0:
+            send_telegram_alert(
+                "🚨 <b>OKX TRADABILITY CACHE EMPTY</b>\n"
+                "Auto-refresh failed or returned 0 pairs. Entries may be blocked until /okx_tradability_status?force=true succeeds."
+            )
 
     if not result.get("success"):
         return False, f"tradability_check_failed: {result.get('error')}"
@@ -2703,6 +3006,10 @@ def classify_leadership_tier(prior_avg_peak):
     return "LEADERSHIP_CORE"
 
 def get_trade_size_for_quality(entry_quality):
+    if entry_quality == "ROT_MICRO_V1":
+        return ROT_MICRO_TRADE_SIZE_GBP
+    if entry_quality == "LEADERSHIP_SCALED":
+        return LEADERSHIP_SCALED_TRADE_SIZE_GBP
     if entry_quality == "LIVE_CQE_V1":
         return LIVE_CQE_TRADE_SIZE_GBP
     if entry_quality == "LEADERSHIP_MONSTER":
@@ -3592,8 +3899,10 @@ def open_trade(cur, symbol, direction, price, momentum, trend, quality,
 
     safe_update_trade_telemetry(cur, trade_id, {
         "entry_architecture": quality,
-        "trade_size_gbp": get_trade_size_for_quality(quality),
-        "dynamic_trade_size_gbp": get_trade_size_for_quality(quality),
+        "trade_size_gbp": get_trade_size_for_context(quality, leadership_context),
+        "dynamic_trade_size_gbp": get_trade_size_for_context(quality, leadership_context),
+        "market_os_engine": leadership_context.get("market_os_engine"),
+        "size_scaling_reason": leadership_context.get("size_scaling_reason"),
         "leadership_prior_successes": leadership_context.get("prior_successes"),
         "leadership_prior_runners": leadership_context.get("prior_runners"),
         "leadership_prior_avg_peak": leadership_context.get("prior_avg_peak"),
@@ -3978,6 +4287,7 @@ def webhook():
             ensure_bpt_cqe_lifecycle_columns(cur)
         if ENABLE_ARCHETYPE_STATE_ENGINE:
             ensure_archetype_state_columns(cur)
+        sweep_stale_shadow_trades(cur)
 
         # ================= RAW SIGNAL — ALWAYS STORE =================
         cur.execute("""
@@ -4033,6 +4343,16 @@ def webhook():
 
             if entry_allowed:
                 entry_quality = classify_leadership_tier(leadership_context["prior_avg_peak"])
+                leadership_context["leadership_max_60m"] = max(
+                    float(leadership_context.get("prior_avg_peak") or 0),
+                    get_recent_leadership_max(cur, symbol, 60)
+                )
+                leadership_context["market_os_engine"] = "CORE"
+                if ENABLE_LEADERSHIP_SIZE_SCALING_V66 and leadership_context["leadership_max_60m"] >= LEADERSHIP_SCALE_THRESHOLD:
+                    leadership_context["size_scaling_reason"] = "leadership_max_60m_scaled"
+                    entry_quality = "LEADERSHIP_SCALED"
+                else:
+                    leadership_context["size_scaling_reason"] = "base_core_size"
 
                 # v6.1.4: check OKX tradability BEFORE creating DB trade / consuming slot.
                 okx_tradable, okx_tradability_reason = is_okx_symbol_live_tradable(symbol)
@@ -4052,6 +4372,32 @@ def webhook():
                     if same_symbol_count >= MAX_SAME_SYMBOL_OPEN:
                         entry_allowed = False
                         block_reason = "max_same_symbol_open"
+
+
+            # v6.6 ROT_MICRO: independent tiny continuation harvester.
+            # Only considered if core leadership entry did not already allow a trade.
+            if not entry_allowed and ENABLE_ROT_MICRO_LIVE:
+                rot_ok, rot_reason, rot_ctx = is_rot_micro_candidate(cur, symbol, momentum, trend)
+                if rot_ok:
+                    okx_tradable, okx_tradability_reason = is_okx_symbol_live_tradable(symbol)
+                    if not okx_tradable:
+                        block_reason = f"rot_micro_okx_not_tradable_{okx_tradability_reason}"
+                    elif get_live_real_open_count(cur) >= MAX_OPEN_TRADES:
+                        block_reason = "rot_micro_max_open_trades"
+                    elif ENABLE_SAME_SYMBOL_STACKING_LIMIT and get_open_same_symbol_real_count(cur, symbol) >= MAX_SAME_SYMBOL_OPEN:
+                        block_reason = "rot_micro_max_same_symbol_open"
+                    else:
+                        entry_allowed = True
+                        entry_quality = "ROT_MICRO_V1"
+                        leadership_context = leadership_context or {}
+                        leadership_context.update(rot_ctx)
+                        leadership_context["prior_avg_peak"] = rot_ctx.get("leadership_max_60m", 0)
+                        leadership_context["leadership_mode"] = "ROT_MICRO"
+                        leadership_context["market_os_engine"] = "ROT_MICRO"
+                        leadership_context["size_scaling_reason"] = "rot_micro_fixed_5gbp"
+                        block_reason = None
+                elif block_reason is None:
+                    block_reason = rot_reason
 
         elif decision == "SHORT":
             block_reason = "shorts_disabled_v6_1_long_only"
@@ -4173,8 +4519,8 @@ def webhook():
                     leadership_context
                 )
 
-                entry_trade_size = get_trade_size_for_quality(entry_quality)
-                entry_quote_size = get_trade_size_quote_for_quality(entry_quality)
+                entry_trade_size = get_trade_size_for_context(entry_quality, leadership_context)
+                entry_quote_size = get_trade_size_quote_for_context(entry_quality, leadership_context)
 
                 print(
                     f"🚀 OPEN REAL | {symbol} | LONG | id={trade_id} | "
@@ -4270,7 +4616,7 @@ def webhook():
 
         open_trades = cur.fetchall()
 
-        for (tid, sym, direction, entry_price, opened_at, peak_pnl, is_shadow, entry_quality) in open_trades:
+        for (tid, sym, direction, entry_price, opened_at, peak_pnl, is_shadow, entry_quality, partial_bank_done, partial_bank_realized_gbp) in open_trades:
             if sym != symbol:
                 continue
 
@@ -4333,6 +4679,13 @@ def webhook():
             adaptive_exit_triggered = False
             slot_recycle_candidate = False
             drawdown_from_peak = current_peak - pnl_percent
+
+            # v6.6 partial profit bank: take 25% at +4%, leave runner open.
+            maybe_partial_profit_bank(
+                cur, tid, sym, direction, entry_price, price, entry_quality,
+                current_peak, pnl_percent, opened_at, mins,
+                {"leadership_max_60m": get_recent_leadership_max(cur, sym, 60)}
+            )
 
             if (
                 not close_reason
@@ -4414,7 +4767,8 @@ def webhook():
 
             if close_reason:
                 trade_size_for_pnl = get_trade_size_for_quality(entry_quality)
-                pnl_gbp = (pnl_percent / 100) * trade_size_for_pnl
+                remaining_fraction = (1.0 - PARTIAL_BANK_FRACTION) if partial_bank_done else 1.0
+                pnl_gbp = ((pnl_percent / 100) * trade_size_for_pnl * remaining_fraction) + float(partial_bank_realized_gbp or 0)
 
                 cur.execute("""
                     UPDATE bot_trades_v4
@@ -4615,7 +4969,9 @@ def build_telegram_health_message(cur):
         f"Max same symbol: {MAX_SAME_SYMBOL_OPEN}\n"
         f"OKX tradable cache: {len(OKX_TRADABLE_SPOT_INST_IDS)} pairs\n"
         f"Telemetry V1: {ENABLE_TELEMETRY_V1} | {TELEMETRY_VERSION}\n"
-        f"Archetype engine: {ENABLE_ARCHETYPE_STATE_ENGINE} | adaptive BPT max hold {ENABLE_ADAPTIVE_BPT_MAX_HOLD} | tg dedupe {ENABLE_TELEGRAM_DEDUPE}"
+        f"Archetype engine: {ENABLE_ARCHETYPE_STATE_ENGINE} | adaptive BPT max hold {ENABLE_ADAPTIVE_BPT_MAX_HOLD} | tg dedupe {ENABLE_TELEGRAM_DEDUPE}\n"
+        f"Market OS v6.6: {ENABLE_MARKET_OS_V66} | partial bank {ENABLE_PARTIAL_PROFIT_BANK_V66} @ {PARTIAL_BANK_TRIGGER_PCT}% x {int(PARTIAL_BANK_FRACTION*100)}% | rot micro {ENABLE_ROT_MICRO_LIVE}\n"
+        f"Leadership scaling: {ENABLE_LEADERSHIP_SIZE_SCALING_V66} | >= {LEADERSHIP_SCALE_THRESHOLD} → {fmt_money(LEADERSHIP_SCALED_TRADE_SIZE_GBP)}"
     )
 
 def build_telegram_summary_message(cur, hours=24):
@@ -4846,6 +5202,8 @@ def handle_telegram_command(text):
             return "🧬 <b>Leadership Lifecycle</b>\n" + get_lifecycle_dashboard_text(cur, 12)
         if cmd in ["/telemetry", "/tel"]:
             return build_telegram_telemetry_message(cur, 24)
+        if cmd in ["/market", "/regime", "/why", "/state"]:
+            return build_market_state_message(cur, 3)
         if cmd in ["/shadows", "/shadow", "/cqe"]:
             return build_telegram_shadow_watch_message(cur, 12)
         if cmd in ["/hunter", "/ph", "/persistence"]:
@@ -5019,6 +5377,13 @@ def bool_status():
         "OKX_TRADABILITY_LAST_ERROR": OKX_TRADABILITY_LAST_ERROR,
         "ENABLE_TELEGRAM_ALERTS": ENABLE_TELEGRAM_ALERTS,
         "ENABLE_TELEGRAM_COMMANDS": ENABLE_TELEGRAM_COMMANDS,
+        "ENABLE_MARKET_OS_V66": ENABLE_MARKET_OS_V66,
+        "ENABLE_PARTIAL_PROFIT_BANK_V66": ENABLE_PARTIAL_PROFIT_BANK_V66,
+        "PARTIAL_BANK_TRIGGER_PCT": PARTIAL_BANK_TRIGGER_PCT,
+        "PARTIAL_BANK_FRACTION": PARTIAL_BANK_FRACTION,
+        "ENABLE_ROT_MICRO_LIVE": ENABLE_ROT_MICRO_LIVE,
+        "ROT_MICRO_TRADE_SIZE_GBP": ROT_MICRO_TRADE_SIZE_GBP,
+        "ENABLE_OKX_TRADABILITY_SELF_HEAL_V66": ENABLE_OKX_TRADABILITY_SELF_HEAL_V66,
         "TELEGRAM_CONFIGURED": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
     }
 
@@ -5163,3 +5528,16 @@ def should_force_live_trade(lifecycle_row):
 # - Archetype state engine remains active.
 # - BPT max-hold extension remains active.
 # - Telegram de-dupe / shadow close guards remain active.
+
+
+# =========================
+# v6.6.0 MARKET OS RELEASE NOTES
+# =========================
+# Adds simulation-backed monetization architecture:
+# - Core entries preserved.
+# - Leadership >=2.0 is treated as a sizing upgrade, not a duplicate async trade.
+# - Partial profit bank: bank 25% at +4%, leave runner open.
+# - ROT_MICRO live layer: tiny £5 continuation harvester, toggleable.
+# - Telegram /market command explains market state, silence, leadership breadth and rejection reasons.
+# - OKX tradability self-heal attempts forced refresh when runtime cache returns 0 pairs.
+# - Stale shadow sweeper prevents old shadow rows clogging capacity.
