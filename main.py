@@ -1,8 +1,8 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v6.6.8
-# TITLE: V6.6.8 CACHE SELF-HEAL + LEADERSHIP SCORE HOTFIX
+# VERSION: v6.6.9
+# TITLE: V6.6.9 OKX CACHE REFRESH WIRING FIX
 # =========================
 
 print("🔥🔥🔥 MAIN.PY v6.6.0 BPT CQE LIFECYCLE SHADOW + LEADERSHIP LIVE RUNNING 🔥🔥🔥", flush=True)
@@ -87,7 +87,7 @@ LAST_OKX_CACHE_REFRESH = None
 
 def okx_cache_health_summary():
     try:
-        count = len(okx_tradable_pairs) if 'okx_tradable_pairs' in globals() else 0
+        count = get_okx_cache_count() if 'okx_tradable_pairs' in globals() else 0
         return f"{count} pairs"
     except Exception:
         return "unknown"
@@ -102,7 +102,7 @@ def emergency_refresh_okx_cache():
 
         LAST_OKX_CACHE_REFRESH = datetime.now(timezone.utc)
 
-        refreshed_count = len(okx_tradable_pairs) if 'okx_tradable_pairs' in globals() else 0
+        refreshed_count = get_okx_cache_count() if 'okx_tradable_pairs' in globals() else 0
 
         print(f"✅ OKX CACHE RECOVERED | {refreshed_count} pairs", flush=True)
 
@@ -198,19 +198,26 @@ OKX_CACHE_LAST_FORCE_REFRESH = None
 OKX_CACHE_FORCE_REFRESH_COOLDOWN_SECONDS = 60
 
 def get_okx_cache_count():
+    """
+    v6.6.9: count the real OKX tradability cache used by execution.
+    Primary cache is OKX_TRADABLE_SPOT_INST_IDS, not okx_tradable_pairs.
+    """
     try:
+        if "OKX_TRADABLE_SPOT_INST_IDS" in globals() and OKX_TRADABLE_SPOT_INST_IDS is not None:
+            return len(OKX_TRADABLE_SPOT_INST_IDS)
         if "okx_tradable_pairs" in globals() and okx_tradable_pairs is not None:
-            return len(okx_tradable_pairs)
+            return get_okx_cache_count()
         if "OKX_TRADABLE_PAIRS" in globals() and OKX_TRADABLE_PAIRS is not None:
-            return len(OKX_TRADABLE_PAIRS)
+            return get_okx_cache_count()
         return 0
     except Exception:
         return 0
 
 def force_okx_cache_refresh_if_empty(reason="unknown"):
     """
-    Hard self-heal: if tradable cache is 0, force refresh immediately.
-    This must run during health, market command, and webhook processing.
+    v6.6.9 hard self-heal.
+    If tradability cache is 0, call the actual real refresh function:
+    refresh_okx_tradable_spot_instruments(force=True)
     """
     global OKX_CACHE_LAST_FORCE_REFRESH
 
@@ -228,44 +235,64 @@ def force_okx_cache_refresh_if_empty(reason="unknown"):
         OKX_CACHE_LAST_FORCE_REFRESH = now
         print(f"🚨 OKX CACHE EMPTY | force refresh triggered | reason={reason}", flush=True)
 
-        # Try known refresh function names safely.
         refreshed = False
-        for fn_name in [
-            "refresh_okx_tradable_pairs",
-            "refresh_okx_tradability_cache",
-            "load_okx_tradable_pairs",
-            "build_okx_tradable_cache",
-        ]:
-            fn = globals().get(fn_name)
-            if callable(fn):
-                try:
-                    fn()
-                    refreshed = True
-                    break
-                except TypeError:
+        refresh_result = None
+
+        # The real v6 OKX tradability cache refresh function.
+        fn = globals().get("refresh_okx_tradable_spot_instruments")
+        if callable(fn):
+            try:
+                refresh_result = fn(force=True)
+                refreshed = True
+            except Exception as e:
+                print(f"⚠️ refresh_okx_tradable_spot_instruments(force=True) failed: {e}", flush=True)
+
+        # Fallbacks for older names if future files rename it.
+        if not refreshed:
+            for fn_name in [
+                "refresh_okx_tradable_pairs",
+                "refresh_okx_tradability_cache",
+                "load_okx_tradable_pairs",
+                "build_okx_tradable_cache",
+            ]:
+                fn = globals().get(fn_name)
+                if callable(fn):
                     try:
-                        fn(force=True)
+                        refresh_result = fn()
                         refreshed = True
                         break
+                    except TypeError:
+                        try:
+                            refresh_result = fn(force=True)
+                            refreshed = True
+                            break
+                        except Exception as e:
+                            print(f"⚠️ {fn_name}(force=True) failed: {e}", flush=True)
                     except Exception as e:
-                        print(f"⚠️ {fn_name}(force=True) failed: {e}", flush=True)
-                except Exception as e:
-                    print(f"⚠️ {fn_name} failed: {e}", flush=True)
+                        print(f"⚠️ {fn_name} failed: {e}", flush=True)
 
         count_after = get_okx_cache_count()
-        if count_after > 0:
-            print(f"✅ OKX CACHE SELF-HEALED | {count_after} pairs", flush=True)
+
+        # If the refresh function returned count but the global count is still not visible, use result count for log clarity.
+        result_count = 0
+        try:
+            if isinstance(refresh_result, dict):
+                result_count = int(refresh_result.get("count") or 0)
+        except Exception:
+            result_count = 0
+
+        visible_count = max(count_after, result_count)
+
+        if visible_count > 0:
+            print(f"✅ OKX CACHE SELF-HEALED | {visible_count} pairs", flush=True)
         else:
             print(f"❌ OKX CACHE STILL EMPTY after refresh attempts | refreshed_called={refreshed}", flush=True)
 
-        return count_after
+        return visible_count
 
     except Exception as e:
         print(f"❌ OKX CACHE SELF-HEAL ERROR: {e}", flush=True)
         return get_okx_cache_count()
-
-
-
 
 # =========================
 # 🧠 v6.6.8 LEADERSHIP SCORE HEALTH FALLBACK
@@ -329,7 +356,7 @@ MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 3
 
 
 
-DATA_VERSION = "v6.6.8_CACHE_SELF_HEAL_LEADERSHIP_HOTFIX"
+DATA_VERSION = "v6.6.9_OKX_CACHE_REFRESH_WIRING_FIX"
 
 
 # =========================
@@ -6121,7 +6148,7 @@ print("✅ v6.6.2 Telegram Market OS commands wired", flush=True)
 # Defensive tradability cache guard
 try:
     if 'okx_tradable_pairs' in globals():
-        if len(okx_tradable_pairs) == 0:
+        if get_okx_cache_count() == 0:
             emergency_refresh_okx_cache()
 except Exception as e:
     print(f"⚠️ Cache guard failed: {e}", flush=True)
@@ -6151,3 +6178,18 @@ except Exception as e:
 # - Hard OKX tradable cache self-heal on startup, health, market/regime commands, and webhook.
 # - Health fallback for scored leadership count so it doesn't falsely show 0 when snapshots exist.
 # - No strategy, scaling, banking, or execution threshold changes.
+
+
+
+# =========================
+# v6.6.9 OKX CACHE REFRESH WIRING FIX
+# =========================
+# Fixes:
+# - Self-heal now calls the actual real refresh function:
+#   refresh_okx_tradable_spot_instruments(force=True)
+# - Cache count now reads OKX_TRADABLE_SPOT_INST_IDS, the real execution cache.
+#
+# This fixes:
+# ❌ OKX CACHE STILL EMPTY after refresh attempts | refreshed_called=False
+#
+# No strategy, banking, scaling, lifecycle, or entry threshold changes.
