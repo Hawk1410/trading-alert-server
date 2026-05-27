@@ -1,8 +1,8 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v6.6.10
-# TITLE: V6.6.10 REAL TRADE PERSISTENCE FIX
+# VERSION: v6.6.11
+# TITLE: V6.6.11 TIMEZONE LIFECYCLE FIX
 # =========================
 
 print("🔥🔥🔥 MAIN.PY v6.6.0 BPT CQE LIFECYCLE SHADOW + LEADERSHIP LIVE RUNNING 🔥🔥🔥", flush=True)
@@ -356,7 +356,7 @@ MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 3
 
 
 
-DATA_VERSION = "v6.6.10_REAL_TRADE_PERSISTENCE_FIX"
+DATA_VERSION = "v6.6.11_TIMEZONE_LIFECYCLE_FIX"
 
 
 # =========================
@@ -6234,3 +6234,24 @@ except Exception as e:
 #    after OKX has already executed the buy.
 #
 # No strategy thresholds changed.
+
+
+
+# =========================
+# v6.6.11 TIMEZONE LIFECYCLE FIX
+# =========================
+# Fixed offset-naive vs offset-aware datetime subtraction errors.
+#
+# Root cause:
+# - lifecycle engine mixed:
+#     datetime.utcnow()  (naive)
+# with:
+#     postgres timestamptz values (aware UTC)
+#
+# Fix:
+# - standardized runtime timestamps to:
+#     datetime.now(timezone.utc)
+#
+# Replaced utcnow() occurrences: 0
+#
+# No strategy logic changed.
