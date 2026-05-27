@@ -1,8 +1,8 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v6.6.9
-# TITLE: V6.6.9 OKX CACHE REFRESH WIRING FIX
+# VERSION: v6.6.10
+# TITLE: V6.6.10 REAL TRADE PERSISTENCE FIX
 # =========================
 
 print("🔥🔥🔥 MAIN.PY v6.6.0 BPT CQE LIFECYCLE SHADOW + LEADERSHIP LIVE RUNNING 🔥🔥🔥", flush=True)
@@ -356,7 +356,7 @@ MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 3
 
 
 
-DATA_VERSION = "v6.6.9_OKX_CACHE_REFRESH_WIRING_FIX"
+DATA_VERSION = "v6.6.10_REAL_TRADE_PERSISTENCE_FIX"
 
 
 # =========================
@@ -4847,7 +4847,7 @@ def webhook():
                     f"<b>Leaders</b>\n{top_leaders_text}"
                 )
 
-                okx_place_market_order(
+                okx_entry_result = okx_place_market_order(
                     cur=cur,
                     trade_id=trade_id,
                     symbol=symbol,
@@ -4857,6 +4857,28 @@ def webhook():
                     entry_price=price,
                     trade_size_quote=entry_quote_size
                 )
+
+                # v6.6.10 CRITICAL: persist the real trade + OKX order log immediately.
+                # Previously, later lifecycle/update exceptions could rollback the trade row
+                # after OKX had already bought on exchange.
+                if not okx_entry_result.get("success"):
+                    cur.execute("""
+                        UPDATE bot_trades_v4
+                        SET status = 'CLOSED',
+                            closed_at = NOW(),
+                            close_reason = %s
+                        WHERE id = %s
+                    """, (f"okx_entry_failed: {okx_entry_result.get('reason') or okx_entry_result.get('error')}", trade_id))
+                    conn.commit()
+                    print(f"🚨 REAL ENTRY DB SAVED AS FAILED | {symbol} | id={trade_id} | reason={okx_entry_result}", flush=True)
+                    send_telegram_alert(
+                        f"🚨 <b>ENTRY FAILED AFTER DB CREATE</b> | {symbol}\n"
+                        f"Trade row saved/closed for audit. Reason: {okx_entry_result.get('reason') or okx_entry_result.get('error')}\n"
+                        f"ID {trade_id}"
+                    )
+                else:
+                    conn.commit()
+                    print(f"✅ REAL ENTRY PERSISTED | {symbol} | id={trade_id}", flush=True)
 
             else:
                 print(
@@ -4900,7 +4922,9 @@ def webhook():
                 opened_at,
                 peak_pnl_percent,
                 COALESCE(is_shadow, FALSE) AS is_shadow,
-                entry_quality
+                entry_quality,
+                COALESCE(partial_bank_4_done, FALSE) AS partial_bank_done,
+                COALESCE(partial_bank_realized_pnl_gbp, 0) AS partial_bank_realized_gbp
             FROM bot_trades_v4
             WHERE status = 'OPEN'
               AND COALESCE(is_shadow, FALSE) = FALSE
@@ -6193,3 +6217,20 @@ except Exception as e:
 # ❌ OKX CACHE STILL EMPTY after refresh attempts | refreshed_called=False
 #
 # No strategy, banking, scaling, lifecycle, or entry threshold changes.
+
+
+
+# =========================
+# v6.6.10 REAL TRADE PERSISTENCE FIX
+# =========================
+# Critical fixes:
+# 1. Real open-trade exit/update SELECT now includes:
+#    - partial_bank_4_done
+#    - partial_bank_realized_pnl_gbp
+#    matching the 10-field unpack.
+#
+# 2. Real OKX entry path now commits immediately after OKX entry handling.
+#    This prevents later lifecycle/update exceptions from rolling back the real trade row
+#    after OKX has already executed the buy.
+#
+# No strategy thresholds changed.
