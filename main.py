@@ -1,8 +1,8 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v6.6.6
-# TITLE: V6.6.6 STABILIZATION + TELEGRAM FIXES + CACHE SELF-HEAL
+# VERSION: v6.6.7
+# TITLE: V6.6.7 EMERGENCY DUPLICATE ENTRY GUARD + TIMEZONE HARDENING
 # =========================
 
 print("🔥🔥🔥 MAIN.PY v6.6.0 BPT CQE LIFECYCLE SHADOW + LEADERSHIP LIVE RUNNING 🔥🔥🔥", flush=True)
@@ -136,6 +136,58 @@ def safe_send_telegram_message(message):
         return False
 
 
+
+
+# =========================
+# 🚨 v6.6.7 EMERGENCY LIVE ENTRY GUARD
+# =========================
+
+RECENT_REAL_ENTRY_SYMBOLS = {}
+EMERGENCY_REAL_SAME_SYMBOL_COOLDOWN_MINUTES = 180
+ENABLE_EMERGENCY_SAME_SYMBOL_GUARD = True
+
+def utc_now():
+    return datetime.now(timezone.utc)
+
+def safe_age_minutes(start_dt, end_dt=None):
+    try:
+        start_dt = ensure_utc(start_dt)
+        end_dt = ensure_utc(end_dt or utc_now())
+        if start_dt is None or end_dt is None:
+            return None
+        return (end_dt - start_dt).total_seconds() / 60.0
+    except Exception as e:
+        print(f"⚠️ safe_age_minutes failed: {e}", flush=True)
+        return None
+
+def emergency_same_symbol_guard(symbol):
+    """
+    Last-resort in-memory guard to stop repeated OKX live buys if DB persistence lags/fails.
+    """
+    if not ENABLE_EMERGENCY_SAME_SYMBOL_GUARD:
+        return True, None
+
+    try:
+        now = utc_now()
+        last = RECENT_REAL_ENTRY_SYMBOLS.get(symbol)
+
+        if last is not None:
+            elapsed_min = safe_age_minutes(last, now)
+            if elapsed_min is not None and elapsed_min < EMERGENCY_REAL_SAME_SYMBOL_COOLDOWN_MINUTES:
+                return False, f"emergency_same_symbol_guard_{round(elapsed_min,1)}m"
+
+        return True, None
+    except Exception as e:
+        print(f"⚠️ emergency same-symbol guard failed for {symbol}: {e}", flush=True)
+        return False, "emergency_guard_error"
+
+def mark_emergency_real_entry(symbol):
+    try:
+        RECENT_REAL_ENTRY_SYMBOLS[symbol] = utc_now()
+    except Exception as e:
+        print(f"⚠️ mark emergency entry failed for {symbol}: {e}", flush=True)
+
+
 app = Flask(__name__)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -150,7 +202,7 @@ MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 3
 
 
 
-DATA_VERSION = "v6.6.0_MARKET_OS_PARTIAL_BANK"
+DATA_VERSION = "v6.6.7_EMERGENCY_DUPLICATE_ENTRY_GUARD"
 
 
 # =========================
@@ -5943,3 +5995,18 @@ try:
 except Exception as e:
     print(f"⚠️ Cache guard failed: {e}", flush=True)
 
+
+
+
+# =========================
+# v6.6.7 EMERGENCY STABILIZATION NOTES
+# =========================
+# Fixes:
+# - Prevents repeated same-symbol real buys when OKX execution succeeds but DB persistence is missing/lagging.
+# - Adds in-memory same-symbol live cooldown guard.
+# - Adds safe_age_minutes() timezone-safe helper.
+#
+# Operational impact:
+# - If NEAR/any symbol was just bought, additional same-symbol live buys are blocked for 180 minutes.
+# - Strategy thresholds unchanged.
+# - Banking/scaling logic unchanged.
