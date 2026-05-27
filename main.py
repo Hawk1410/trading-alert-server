@@ -1,8 +1,8 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v6.6.0
-# TITLE: V6.6 MARKET OS + PARTIAL BANKING + ROT MICRO + INFRA HARDENING
+# VERSION: v6.6.2
+# TITLE: V6.6.2 TELEGRAM COMMANDS WIRED + MARKET OS + PARTIAL BANKING
 # =========================
 
 print("🔥🔥🔥 MAIN.PY v6.6.0 BPT CQE LIFECYCLE SHADOW + LEADERSHIP LIVE RUNNING 🔥🔥🔥", flush=True)
@@ -5186,42 +5186,236 @@ def build_telegram_telemetry_message(cur, hours=24):
         return f"📡 <b>Telemetry V1</b> unavailable: {e}"
 
 
+
+# =========================
+# 📲 v6.6.2 TELEGRAM MARKET OS COMMAND BUILDERS
+# =========================
+
+def build_telegram_rejection_message(cur, hours=6):
+    """Show recent block/rejection reasons so silence is explainable from Telegram."""
+    try:
+        cur.execute("""
+            SELECT
+                COALESCE(block_reason, decision, 'no_reason_recorded') AS reason,
+                COUNT(*) AS count
+            FROM signals_raw
+            WHERE timestamp >= NOW() - (%s || ' hours')::INTERVAL
+            GROUP BY 1
+            ORDER BY count DESC
+            LIMIT 12
+        """, (hours,))
+        rows = cur.fetchall() or []
+
+        cur.execute("""
+            SELECT
+                COUNT(*) AS total_signals,
+                COUNT(*) FILTER (WHERE decision = 'LONG') AS long_decisions,
+                COUNT(*) FILTER (WHERE block_reason IS NOT NULL) AS blocked_with_reason,
+                MAX(timestamp) AS last_signal
+            FROM signals_raw
+            WHERE timestamp >= NOW() - (%s || ' hours')::INTERVAL
+        """, (hours,))
+        total_signals, long_decisions, blocked_with_reason, last_signal = cur.fetchone() or (0, 0, 0, None)
+
+        lines = [
+            f"🚫 <b>Rejections / Blocks {hours}h</b>",
+            f"Signals: <b>{total_signals}</b> | LONG decisions: <b>{long_decisions}</b>",
+            f"Blocked/reason-tagged: <b>{blocked_with_reason}</b>",
+            f"Last signal: {last_signal}",
+        ]
+
+        if rows:
+            lines.append("\n<b>Top reasons</b>")
+            for reason, count in rows:
+                lines.append(f"{reason}: <b>{count}</b>")
+        else:
+            lines.append("\nNo signal rows found in this window.")
+
+        lines.append(
+            "\n<b>Note</b>\n"
+            "If most rows show no_reason_recorded, the next refinement should tag soft blocks "
+            "as weak_trend / weak_momentum / leadership_too_low / no_regime_alignment."
+        )
+        return "\n".join(lines)
+
+    except Exception as e:
+        print(f"⚠️ rejection message failed: {e}", flush=True)
+        safe_telemetry_rollback(cur)
+        return f"🚫 <b>Rejections</b> unavailable: {e}"
+
+
+def build_telegram_recent_message(cur, hours=6):
+    """Show recent entries, exits, banks, and current activity."""
+    try:
+        cur.execute("""
+            SELECT
+                opened_at,
+                closed_at,
+                symbol,
+                status,
+                COALESCE(is_shadow, FALSE) AS is_shadow,
+                COALESCE(entry_quality, current_archetype, 'UNKNOWN') AS engine,
+                COALESCE(pnl_percent, 0) AS pnl_percent,
+                COALESCE(peak_pnl_percent, 0) AS peak_pnl_percent,
+                COALESCE(close_reason, exit_architecture, '') AS reason,
+                COALESCE(partial_bank_4_done, FALSE) AS banked
+            FROM bot_trades_v4
+            WHERE opened_at >= NOW() - (%s || ' hours')::INTERVAL
+               OR closed_at >= NOW() - (%s || ' hours')::INTERVAL
+            ORDER BY COALESCE(closed_at, opened_at) DESC
+            LIMIT 12
+        """, (hours, hours))
+        rows = cur.fetchall() or []
+
+        cur.execute("""
+            SELECT
+                COUNT(*) FILTER (WHERE opened_at >= NOW() - (%s || ' hours')::INTERVAL AND COALESCE(is_shadow,FALSE)=FALSE) AS real_opened,
+                COUNT(*) FILTER (WHERE opened_at >= NOW() - (%s || ' hours')::INTERVAL AND COALESCE(is_shadow,FALSE)=TRUE) AS shadow_opened,
+                COUNT(*) FILTER (WHERE closed_at >= NOW() - (%s || ' hours')::INTERVAL AND COALESCE(is_shadow,FALSE)=FALSE) AS real_closed,
+                COUNT(*) FILTER (WHERE status='OPEN' AND COALESCE(is_shadow,FALSE)=FALSE) AS open_real,
+                COUNT(*) FILTER (WHERE status='OPEN' AND COALESCE(is_shadow,FALSE)=TRUE) AS open_shadow
+            FROM bot_trades_v4
+        """, (hours, hours, hours))
+        real_opened, shadow_opened, real_closed, open_real, open_shadow = cur.fetchone() or (0,0,0,0,0)
+
+        lines = [
+            f"🕒 <b>Recent Bot Activity {hours}h</b>",
+            f"Real opened: <b>{real_opened}</b> | Real closed: <b>{real_closed}</b> | Shadow opened: <b>{shadow_opened}</b>",
+            f"Open real: <b>{open_real}</b> | Open shadow: <b>{open_shadow}</b>",
+        ]
+
+        if rows:
+            lines.append("\n<b>Latest trades/events</b>")
+            for opened_at, closed_at, sym, status, is_shadow, engine, pnl, peak, reason, banked in rows:
+                mode = "SHADOW" if is_shadow else "REAL"
+                bank_txt = " | banked ✅" if banked else ""
+                time_txt = closed_at or opened_at
+                reason_txt = f" | {reason}" if reason else ""
+                lines.append(
+                    f"{sym} {mode} {status} | pnl {fmt_num(pnl)}% | peak {fmt_num(peak)}%{bank_txt}{reason_txt} | {time_txt}"
+                )
+        else:
+            lines.append("\nNo trade events in this window.")
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        print(f"⚠️ recent message failed: {e}", flush=True)
+        safe_telemetry_rollback(cur)
+        return f"🕒 <b>Recent Activity</b> unavailable: {e}"
+
+
+def build_telegram_regime_message(cur, hours=3):
+    """More regime-focused version of /market."""
+    try:
+        market_msg = build_market_state_message(cur, hours)
+
+        cur.execute("""
+            WITH recent AS (
+                SELECT
+                    s.symbol,
+                    s.momentum,
+                    s.trend,
+                    COALESCE(l.leadership_score,0) AS leadership_score
+                FROM signals_raw s
+                LEFT JOIN LATERAL (
+                    SELECT leadership_score
+                    FROM leadership_state_history h
+                    WHERE h.symbol = s.symbol
+                      AND h.snapshot_time <= s.timestamp
+                    ORDER BY h.snapshot_time DESC
+                    LIMIT 1
+                ) l ON true
+                WHERE s.timestamp >= NOW() - (%s || ' hours')::INTERVAL
+            )
+            SELECT
+                COUNT(*) AS signals,
+                COUNT(DISTINCT symbol) AS symbols,
+                COUNT(*) FILTER (WHERE leadership_score >= 2.0) AS elite_leader_hits,
+                COUNT(*) FILTER (WHERE momentum >= 0.5 AND trend >= 0.25 AND leadership_score >= 1.25) AS core_hits,
+                COUNT(*) FILTER (WHERE momentum >= 0.3 AND trend >= 0.10 AND leadership_score >= 0.75 AND leadership_score < 1.0) AS rot_hits,
+                ROUND(AVG(momentum)::numeric,3) AS avg_momentum,
+                ROUND(AVG(trend)::numeric,3) AS avg_trend,
+                ROUND(MAX(leadership_score)::numeric,3) AS max_leadership
+            FROM recent
+        """, (hours,))
+        sigs, syms, elite_hits, core_hits, rot_hits, avg_mom, avg_trend, max_lead = cur.fetchone() or (0,0,0,0,0,0,0,0)
+
+        lines = [
+            f"🧠 <b>Regime Detail {hours}h</b>",
+            f"Signals: <b>{sigs}</b> | Symbols: <b>{syms}</b>",
+            f"Elite leader hits: <b>{elite_hits}</b> | Core hits: <b>{core_hits}</b> | Rot hits: <b>{rot_hits}</b>",
+            f"Avg momentum/trend: <b>{avg_mom}</b> / <b>{avg_trend}</b>",
+            f"Max leadership: <b>{max_lead}</b>",
+            "",
+            market_msg,
+        ]
+        return "\n".join(lines)
+
+    except Exception as e:
+        print(f"⚠️ regime message failed: {e}", flush=True)
+        safe_telemetry_rollback(cur)
+        return f"🧠 <b>Regime</b> unavailable: {e}"
+
+
 def handle_telegram_command(text):
     cmd = (text or "").strip().lower().split()[0] if text else "/help"
     conn = get_db()
     cur = conn.cursor()
     try:
         ensure_signal_leadership_scores_table(cur)
+
         if cmd in ["/status", "/daily", "/summary", "/pnl"]:
             return build_telegram_summary_message(cur, 24)
-        if cmd in ["/open", "/trades"]:
+
+        if cmd in ["/open", "/trades", "/positions", "/pos"]:
             return build_telegram_open_trades_message(cur)
+
         if cmd in ["/leaders", "/leadership"]:
             return "🧠 <b>Top Leadership States</b>\n" + get_top_leaders_text(cur, 10)
+
         if cmd in ["/lifecycle", "/phases"]:
             return "🧬 <b>Leadership Lifecycle</b>\n" + get_lifecycle_dashboard_text(cur, 12)
+
         if cmd in ["/telemetry", "/tel"]:
             return build_telegram_telemetry_message(cur, 24)
-        if cmd in ["/market", "/regime", "/why", "/state"]:
+
+        if cmd in ["/market", "/why", "/state"]:
             return build_market_state_message(cur, 3)
+
+        if cmd in ["/regime"]:
+            return build_telegram_regime_message(cur, 3)
+
+        if cmd in ["/rejections", "/rejects", "/blocks", "/blocked"]:
+            return build_telegram_rejection_message(cur, 6)
+
+        if cmd in ["/recent", "/activity", "/events"]:
+            return build_telegram_recent_message(cur, 6)
+
         if cmd in ["/shadows", "/shadow", "/cqe"]:
             return build_telegram_shadow_watch_message(cur, 12)
+
         if cmd in ["/hunter", "/ph", "/persistence"]:
             return build_telegram_persistence_hunter_message(cur, 24)
+
         if cmd == "/health":
             return build_telegram_health_message(cur)
+
         if cmd == "/help":
             return (
                 "🤖 <b>Trading Bot Commands</b>\n"
-                "/status - rolling 24h summary + leaders\n"
-                "/daily - rolling 24h summary + leaders\n"
-                "/open - open trades with latest signal/leadership\n"
+                "/market - explain current market state + why bot is/isn't trading\n"
+                "/regime - deeper regime detail\n"
+                "/rejections - recent block/rejection reasons\n"
+                "/recent - recent entries/exits/banks/activity\n"
+                "/positions - open positions\n"
                 "/leaders - current leadership leaderboard\n"
-                "/lifecycle - lifecycle phases + deltas\n"
-                "/shadows - CQE shadow watch + open paper trades\n"
+                "/status - rolling 24h PnL summary\n"
+                "/telemetry - Telemetry V1 summary\n"
+                "/shadows - CQE shadow watch\n"
                 "/hunter - Persistence Hunter shadow report\n"
-                "/health - webhook/server health\n"
-                "/telemetry - Telemetry V1 market-state summary\n"
+                "/lifecycle - leadership lifecycle dashboard\n"
+                "/health - server/bot health\n"
                 "/help - command list"
             )
         return "Unknown command. Send /help."
@@ -5541,3 +5735,67 @@ def should_force_live_trade(lifecycle_row):
 # - Telegram /market command explains market state, silence, leadership breadth and rejection reasons.
 # - OKX tradability self-heal attempts forced refresh when runtime cache returns 0 pairs.
 # - Stale shadow sweeper prevents old shadow rows clogging capacity.
+
+
+# =========================
+# 🤖 v6.6.1 TELEGRAM MARKET OS COMMAND SCAFFOLD (superseded by v6.6.2)
+# =========================
+
+ENABLE_MARKET_OS_COMMANDS = True  # legacy scaffold flag; real handlers wired in v6.6.2
+
+MARKET_OS_COMMANDS = [
+    "/market",
+    "/health",
+    "/leaders",
+    "/positions",
+    "/rejections",
+    "/recent",
+    "/regime"
+]
+
+def build_market_state_summary():
+    return (
+        "📡 MARKET STATE\n"
+        "• Regime classification active\n"
+        "• Leadership breadth tracking enabled\n"
+        "• Rejection telemetry tracking enabled\n"
+        "• Partial bank telemetry enabled\n"
+        "• Market OS framework online"
+    )
+
+def build_rejection_summary():
+    return (
+        "🚫 REJECTION SUMMARY\n"
+        "weak_trend\n"
+        "leadership_decay\n"
+        "fragmented_market\n"
+        "failed_persistence\n"
+        "rotational_low_quality"
+    )
+
+def build_regime_summary():
+    return (
+        "🧠 REGIME ENGINE\n"
+        "DEAD_CHOP\n"
+        "FRAGMENTED_ROTATION\n"
+        "HEALTHY_ROTATION\n"
+        "IGNITION\n"
+        "EUPHORIC_EXPANSION"
+    )
+
+print("✅ v6.6.2 Telegram Market OS commands wired", flush=True)
+
+
+
+
+# =========================
+# v6.6.2 PATCH NOTES
+# =========================
+# Telegram command layer is now wired:
+# - /market: current market state and why bot is/isn't trading.
+# - /regime: deeper regime metrics.
+# - /rejections: recent block/rejection reasons.
+# - /recent: recent entries/exits/banks/activity.
+# - /positions: alias for open trades.
+#
+# No strategy, sizing, banking, or execution logic changed from v6.6.1.
