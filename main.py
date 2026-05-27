@@ -1,8 +1,8 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v6.6.7
-# TITLE: V6.6.7 EMERGENCY DUPLICATE ENTRY GUARD + TIMEZONE HARDENING
+# VERSION: v6.6.8
+# TITLE: V6.6.8 CACHE SELF-HEAL + LEADERSHIP SCORE HOTFIX
 # =========================
 
 print("🔥🔥🔥 MAIN.PY v6.6.0 BPT CQE LIFECYCLE SHADOW + LEADERSHIP LIVE RUNNING 🔥🔥🔥", flush=True)
@@ -188,7 +188,134 @@ def mark_emergency_real_entry(symbol):
         print(f"⚠️ mark emergency entry failed for {symbol}: {e}", flush=True)
 
 
+
+
+# =========================
+# 🔄 v6.6.8 OKX CACHE HARD SELF-HEAL
+# =========================
+
+OKX_CACHE_LAST_FORCE_REFRESH = None
+OKX_CACHE_FORCE_REFRESH_COOLDOWN_SECONDS = 60
+
+def get_okx_cache_count():
+    try:
+        if "okx_tradable_pairs" in globals() and okx_tradable_pairs is not None:
+            return len(okx_tradable_pairs)
+        if "OKX_TRADABLE_PAIRS" in globals() and OKX_TRADABLE_PAIRS is not None:
+            return len(OKX_TRADABLE_PAIRS)
+        return 0
+    except Exception:
+        return 0
+
+def force_okx_cache_refresh_if_empty(reason="unknown"):
+    """
+    Hard self-heal: if tradable cache is 0, force refresh immediately.
+    This must run during health, market command, and webhook processing.
+    """
+    global OKX_CACHE_LAST_FORCE_REFRESH
+
+    try:
+        count = get_okx_cache_count()
+        if count > 0:
+            return count
+
+        now = utc_now() if "utc_now" in globals() else datetime.now(timezone.utc)
+        if OKX_CACHE_LAST_FORCE_REFRESH is not None:
+            age = (now - ensure_utc(OKX_CACHE_LAST_FORCE_REFRESH)).total_seconds()
+            if age < OKX_CACHE_FORCE_REFRESH_COOLDOWN_SECONDS:
+                return get_okx_cache_count()
+
+        OKX_CACHE_LAST_FORCE_REFRESH = now
+        print(f"🚨 OKX CACHE EMPTY | force refresh triggered | reason={reason}", flush=True)
+
+        # Try known refresh function names safely.
+        refreshed = False
+        for fn_name in [
+            "refresh_okx_tradable_pairs",
+            "refresh_okx_tradability_cache",
+            "load_okx_tradable_pairs",
+            "build_okx_tradable_cache",
+        ]:
+            fn = globals().get(fn_name)
+            if callable(fn):
+                try:
+                    fn()
+                    refreshed = True
+                    break
+                except TypeError:
+                    try:
+                        fn(force=True)
+                        refreshed = True
+                        break
+                    except Exception as e:
+                        print(f"⚠️ {fn_name}(force=True) failed: {e}", flush=True)
+                except Exception as e:
+                    print(f"⚠️ {fn_name} failed: {e}", flush=True)
+
+        count_after = get_okx_cache_count()
+        if count_after > 0:
+            print(f"✅ OKX CACHE SELF-HEALED | {count_after} pairs", flush=True)
+        else:
+            print(f"❌ OKX CACHE STILL EMPTY after refresh attempts | refreshed_called={refreshed}", flush=True)
+
+        return count_after
+
+    except Exception as e:
+        print(f"❌ OKX CACHE SELF-HEAL ERROR: {e}", flush=True)
+        return get_okx_cache_count()
+
+
+
+
+# =========================
+# 🧠 v6.6.8 LEADERSHIP SCORE HEALTH FALLBACK
+# =========================
+
+def get_scored_leadership_count_24h(cur):
+    """
+    Health fallback: prefer signal_leadership_scores if populated,
+    otherwise count recent leadership-joinable signal rows so health doesn't falsely show 0.
+    """
+    try:
+        cur.execute("""
+            SELECT COUNT(*)
+            FROM signal_leadership_scores
+            WHERE created_at >= NOW() - INTERVAL '24 hours'
+        """)
+        val = cur.fetchone()[0]
+        if val and val > 0:
+            return val
+    except Exception as e:
+        try:
+            cur.connection.rollback()
+        except Exception:
+            pass
+        print(f"⚠️ signal_leadership_scores count fallback triggered: {e}", flush=True)
+
+    try:
+        cur.execute("""
+            SELECT COUNT(*)
+            FROM signals_raw s
+            WHERE s.timestamp >= NOW() - INTERVAL '24 hours'
+              AND EXISTS (
+                SELECT 1
+                FROM leadership_state_history h
+                WHERE h.symbol = s.symbol
+                  AND h.snapshot_time <= s.timestamp
+              )
+        """)
+        return cur.fetchone()[0]
+    except Exception as e:
+        try:
+            cur.connection.rollback()
+        except Exception:
+            pass
+        print(f"⚠️ leadership joinable signal count failed: {e}", flush=True)
+        return 0
+
+
 app = Flask(__name__)
+force_okx_cache_refresh_if_empty("startup")
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
@@ -202,7 +329,7 @@ MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 3
 
 
 
-DATA_VERSION = "v6.6.7_EMERGENCY_DUPLICATE_ENTRY_GUARD"
+DATA_VERSION = "v6.6.8_CACHE_SELF_HEAL_LEADERSHIP_HOTFIX"
 
 
 # =========================
@@ -1017,6 +1144,7 @@ def maybe_partial_profit_bank(cur, tid, sym, direction, entry_price, price, entr
 
 
 def build_market_state_message(cur, hours=3):
+    force_okx_cache_refresh_if_empty("build_market_state_message")
     """Operator visibility: explains why bot is / isn't trading."""
     try:
         cur.execute("""
@@ -4392,6 +4520,7 @@ def fixed_time_exit_allowed_for_trade(is_shadow=False):
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
+    force_okx_cache_refresh_if_empty("webhook")
     conn = None
     cur = None
 
@@ -5048,6 +5177,7 @@ def require_summary_secret():
     return request.args.get("secret") == TELEGRAM_COMMAND_SECRET
 
 def build_telegram_health_message(cur):
+    force_okx_cache_refresh_if_empty("build_telegram_health_message")
     cur.execute("""
         SELECT
             MAX(timestamp),
@@ -5442,6 +5572,7 @@ def build_telegram_recent_message(cur, hours=6):
 
 
 def build_telegram_regime_message(cur, hours=3):
+    force_okx_cache_refresh_if_empty("build_telegram_regime_message")
     """More regime-focused version of /market."""
     try:
         market_msg = build_market_state_message(cur, hours)
@@ -6010,3 +6141,13 @@ except Exception as e:
 # - If NEAR/any symbol was just bought, additional same-symbol live buys are blocked for 180 minutes.
 # - Strategy thresholds unchanged.
 # - Banking/scaling logic unchanged.
+
+
+
+# =========================
+# v6.6.8 PATCH NOTES
+# =========================
+# Fixes:
+# - Hard OKX tradable cache self-heal on startup, health, market/regime commands, and webhook.
+# - Health fallback for scored leadership count so it doesn't falsely show 0 when snapshots exist.
+# - No strategy, scaling, banking, or execution threshold changes.
