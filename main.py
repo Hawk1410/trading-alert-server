@@ -1,8 +1,8 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v6.6.4
-# TITLE: V6.6.4 LEADERSHIP QUERY HOTFIX + TELEGRAM COMMANDS
+# VERSION: v6.6.6
+# TITLE: V6.6.6 STABILIZATION + TELEGRAM FIXES + CACHE SELF-HEAL
 # =========================
 
 print("🔥🔥🔥 MAIN.PY v6.6.0 BPT CQE LIFECYCLE SHADOW + LEADERSHIP LIVE RUNNING 🔥🔥🔥", flush=True)
@@ -51,6 +51,90 @@ import hashlib
 import requests
 import psycopg2
 from datetime import datetime, timezone
+
+
+
+# =========================
+# 🕒 TIMEZONE SAFETY HELPERS
+# =========================
+
+from datetime import timezone
+
+def ensure_utc(dt):
+    """
+    Convert naive/aware datetimes safely into UTC-aware datetimes.
+    Prevents:
+    can't subtract offset-naive and offset-aware datetimes
+    """
+    if dt is None:
+        return None
+
+    try:
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return dt
+
+
+
+
+# =========================
+# 🔄 OKX CACHE SELF-HEAL
+# =========================
+
+LAST_OKX_CACHE_REFRESH = None
+
+def okx_cache_health_summary():
+    try:
+        count = len(okx_tradable_pairs) if 'okx_tradable_pairs' in globals() else 0
+        return f"{count} pairs"
+    except Exception:
+        return "unknown"
+
+def emergency_refresh_okx_cache():
+    global LAST_OKX_CACHE_REFRESH
+
+    try:
+        print("🚨 OKX CACHE EMPTY — triggering emergency refresh", flush=True)
+
+        refresh_okx_tradable_pairs()
+
+        LAST_OKX_CACHE_REFRESH = datetime.now(timezone.utc)
+
+        refreshed_count = len(okx_tradable_pairs) if 'okx_tradable_pairs' in globals() else 0
+
+        print(f"✅ OKX CACHE RECOVERED | {refreshed_count} pairs", flush=True)
+
+        return refreshed_count
+
+    except Exception as e:
+        print(f"❌ OKX CACHE RECOVERY FAILED: {e}", flush=True)
+        return 0
+
+
+
+
+# =========================
+# 📲 TELEGRAM DELIVERY FLAGS
+# =========================
+
+# Future DB migration placeholders:
+# telegram_entry_sent
+# telegram_exit_sent
+# telegram_bank_sent
+
+def safe_send_telegram_message(message):
+    """
+    Wrapper placeholder for safer Telegram delivery.
+    Future versions can attach DB dedupe tracking here.
+    """
+    try:
+        return send_telegram_message(message)
+    except Exception as e:
+        print(f"⚠️ Telegram send failed: {e}", flush=True)
+        return False
+
 
 app = Flask(__name__)
 
@@ -4274,7 +4358,7 @@ def webhook():
         if decision in ["", "NONE", "NULL", "UPDATE"]:
             decision = None
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         conn = get_db()
         cur = conn.cursor()
@@ -5822,3 +5906,40 @@ print("✅ v6.6.2 Telegram Market OS commands wired", flush=True)
 # ERROR: missing FROM-clause entry for table "h"
 #
 # No strategy logic changed.
+
+
+# =========================
+# v6.6.5 TIMEZONE HOTFIX
+# =========================
+# Fixed:
+# can't subtract offset-naive and offset-aware datetimes
+#
+# Standardized runtime timestamps to timezone-aware UTC.
+# Added ensure_utc() helper for safe datetime comparisons.
+#
+# No strategy logic changed.
+
+
+# =========================
+# v6.6.6 STABILIZATION PATCH
+# =========================
+# Included fixes:
+#
+# ✅ Timezone-safe datetime handling
+# ✅ Leadership SQL alias fixes
+# ✅ Telegram command wiring
+# ✅ OKX cache self-heal framework
+# ✅ Rich rejection telemetry
+# ✅ Telegram notification tracking placeholders
+#
+# No strategy logic changed.
+
+
+# Defensive tradability cache guard
+try:
+    if 'okx_tradable_pairs' in globals():
+        if len(okx_tradable_pairs) == 0:
+            emergency_refresh_okx_cache()
+except Exception as e:
+    print(f"⚠️ Cache guard failed: {e}", flush=True)
+
