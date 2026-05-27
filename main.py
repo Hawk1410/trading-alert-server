@@ -1,8 +1,8 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v6.6.3
-# TITLE: V6.6.3 SQL ALIAS FIX + TELEGRAM COMMANDS + MARKET OS
+# VERSION: v6.6.4
+# TITLE: V6.6.4 LEADERSHIP QUERY HOTFIX + TELEGRAM COMMANDS
 # =========================
 
 print("🔥🔥🔥 MAIN.PY v6.6.0 BPT CQE LIFECYCLE SHADOW + LEADERSHIP LIVE RUNNING 🔥🔥🔥", flush=True)
@@ -1567,7 +1567,7 @@ def get_leadership_context(cur, symbol):
                 leadership_mode
             FROM leadership_state_history
             WHERE symbol = %s
-            ORDER BY h.snapshot_time DESC
+            ORDER BY snapshot_time DESC
             LIMIT 1
         )
         SELECT
@@ -2625,7 +2625,7 @@ def get_persistence_hunter_context(cur, symbol, signal_time):
                 SELECT leadership_score, leadership_rank, snapshot_time
                 FROM ranked
                 WHERE symbol = %s
-                ORDER BY h.snapshot_time DESC
+                ORDER BY snapshot_time DESC
                 LIMIT 1
             ), counts AS (
                 SELECT
@@ -3044,7 +3044,7 @@ def get_score_at_or_before(cur, symbol, anchor_time, minutes_back):
             FROM leadership_state_history
             WHERE symbol = %s
               AND snapshot_time <= %s - (%s || ' minutes')::INTERVAL
-            ORDER BY h.snapshot_time DESC
+            ORDER BY snapshot_time DESC
             LIMIT 1
         """, (symbol, anchor_time, minutes_back))
         row = cur.fetchone()
@@ -3060,7 +3060,7 @@ def get_lifecycle_context(cur, symbol):
                runners, monsters, avg_peak, avg_worst, leadership_mode
         FROM leadership_state_history
         WHERE symbol = %s
-        ORDER BY h.snapshot_time DESC
+        ORDER BY snapshot_time DESC
         LIMIT 1
     """, (symbol,))
     row = cur.fetchone()
@@ -3290,7 +3290,7 @@ def get_latest_leadership_state(cur, symbol):
                 snapshot_time
             FROM leadership_state_history
             WHERE symbol = %s
-            ORDER BY h.snapshot_time DESC
+            ORDER BY snapshot_time DESC
             LIMIT 1
         """, (symbol,))
         row = cur.fetchone()
@@ -3512,7 +3512,7 @@ def get_ranked_leadership_context_for_telemetry(cur, symbol):
 
         cur.execute("""
             WITH latest_snapshot AS (
-                SELECT MAX(h.snapshot_time) AS snapshot_time
+                SELECT MAX(snapshot_time) AS snapshot_time
                 FROM leadership_state_history lsh
             ),
             ranked AS (
@@ -3585,7 +3585,7 @@ def get_ranked_leadership_context_for_telemetry(cur, symbol):
             FROM leadership_state_history
             WHERE symbol = %s
               AND snapshot_time <= %s - INTERVAL '30 minutes'
-            ORDER BY h.snapshot_time DESC
+            ORDER BY snapshot_time DESC
             LIMIT 1
         """, (symbol, snapshot_time))
         prev = cur.fetchone()
@@ -3656,7 +3656,7 @@ def get_ranked_leadership_context_for_telemetry(cur, symbol):
                 prior_snapshot AS (
                     SELECT MAX(snapshot_time) AS snapshot_time
                     FROM leadership_state_history
-                    WHERE h.snapshot_time <= %s - INTERVAL '60 minutes'
+                    WHERE snapshot_time <= %s - INTERVAL '60 minutes'
                 ),
                 prior_top AS (
                     SELECT l.symbol
@@ -5322,8 +5322,8 @@ def build_telegram_regime_message(cur, hours=3):
                     SELECT leadership_score
                     FROM leadership_state_history h
                     WHERE h.symbol = s.symbol
-                      AND h.snapshot_time <= s.timestamp
-                    ORDER BY h.snapshot_time DESC
+                      AND snapshot_time <= s.timestamp
+                    ORDER BY snapshot_time DESC
                     LIMIT 1
                 ) l ON true
                 WHERE s.timestamp >= NOW() - (%s || ' hours')::INTERVAL
@@ -5808,4 +5808,17 @@ print("✅ v6.6.2 Telegram Market OS commands wired", flush=True)
 # lsh.snapshot_time -> h.snapshot_time
 # Prevents:
 # ERROR: missing FROM-clause entry for table "lsh"
+# No strategy logic changed.
+
+
+# =========================
+# v6.6.4 LEADERSHIP QUERY HOTFIX
+# =========================
+# Fixed lingering leadership SQL alias issues:
+# ORDER BY h.snapshot_time DESC
+# -> ORDER BY snapshot_time DESC
+#
+# Prevents:
+# ERROR: missing FROM-clause entry for table "h"
+#
 # No strategy logic changed.
