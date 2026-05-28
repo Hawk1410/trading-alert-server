@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v6.6.11
-# TITLE: V6.6.11 TIMEZONE LIFECYCLE FIX
+# VERSION: v6.6.12
+# TITLE: V6.6.12 EXCHANGE RECONCILIATION SAFETY FIX
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v6.6.0 BPT CQE LIFECYCLE SHADOW + LEADERSHIP LIVE RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v6.6.12 EXCHANGE RECONCILIATION SAFETY FIX RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -356,7 +356,7 @@ MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 3
 
 
 
-DATA_VERSION = "v6.6.11_TIMEZONE_LIFECYCLE_FIX"
+DATA_VERSION = "v6.6.12_EXCHANGE_RECONCILIATION_FIX"
 
 
 # =========================
@@ -678,6 +678,11 @@ OKX_BASE_URL = os.environ.get("OKX_BASE_URL", "https://www.okx.com").rstrip("/")
 
 ENABLE_ORDER_LOGGING = os.environ.get("ENABLE_ORDER_LOGGING", "true").lower() == "true"
 ENABLE_LIVE_ORDERS = os.environ.get("ENABLE_LIVE_ORDERS", "false").lower() == "true"
+
+# v6.6.12: exchange truth safety guards. These prevent duplicate live buys
+# if DB open-trade reconstruction/persistence is out of sync with OKX.
+ENABLE_OKX_POSITION_ENTRY_GUARD = os.environ.get("ENABLE_OKX_POSITION_ENTRY_GUARD", "true").lower() == "true"
+OKX_POSITION_DUST_USD = float(os.environ.get("OKX_POSITION_DUST_USD", "1.0") or 1.0)
 
 MAX_LIVE_OPEN_TRADES = int(os.environ.get("MAX_LIVE_OPEN_TRADES", "5") or 5)
 
@@ -1521,6 +1526,53 @@ def okx_get_available_balance(ccy):
 
     except Exception as e:
         return {"success": False, "available": 0.0, "error": str(e), "response": response_payload}
+
+def okx_has_live_position(symbol, reference_price=None):
+    """
+    v6.6.12 exchange-truth guard.
+    For spot LONGs, a live position means OKX has meaningful available base balance.
+    This is intentionally conservative: if OKX says we hold the asset, block new buys
+    even when Supabase says open_real = 0.
+    """
+    if not ENABLE_LIVE_ORDERS:
+        return False, {"reason": "live_orders_disabled"}
+
+    try:
+        okx_inst_id = okx_symbol_to_inst_id(symbol)
+        base_ccy = okx_inst_id_to_base_ccy(okx_inst_id)
+        if not base_ccy:
+            return False, {"reason": "missing_base_currency", "symbol": symbol, "okx_inst_id": okx_inst_id}
+
+        balance_result = okx_get_available_balance(base_ccy)
+        if not balance_result.get("success"):
+            # Fail closed for entry safety: if we cannot verify exchange position, do not buy.
+            return True, {
+                "reason": "could_not_verify_okx_balance_fail_closed",
+                "symbol": symbol,
+                "base_ccy": base_ccy,
+                "error": balance_result.get("error"),
+                "response": balance_result.get("response"),
+            }
+
+        available = float(balance_result.get("available") or 0)
+        ref_price = float(reference_price or 0)
+        notional = available * ref_price if ref_price > 0 else 0
+        has_position = available > 0 and (notional >= OKX_POSITION_DUST_USD if ref_price > 0 else True)
+
+        return has_position, {
+            "reason": "okx_base_balance_check",
+            "symbol": symbol,
+            "okx_inst_id": okx_inst_id,
+            "base_ccy": base_ccy,
+            "available": available,
+            "reference_price": ref_price,
+            "estimated_notional_usd": notional,
+            "dust_usd": OKX_POSITION_DUST_USD,
+        }
+
+    except Exception as e:
+        # Fail closed: the worst outcome is another duplicate buy, so block on guard errors.
+        return True, {"reason": "okx_position_guard_error_fail_closed", "symbol": symbol, "error": str(e)}
 
 def has_successful_okx_live_entry(cur, trade_id):
     if not ENABLE_ORDER_LOGGING:
@@ -4798,87 +4850,115 @@ def webhook():
         # ================= REAL ENTRY EXECUTION =================
         if decision in ["LONG", "SHORT"]:
             if entry_allowed:
-                trade_id = open_trade(
-                    cur,
-                    symbol,
-                    "LONG",
-                    price,
-                    momentum,
-                    trend,
-                    entry_quality,
-                    signal_id,
-                    signal_time,
-                    leadership_context
-                )
+                # v6.6.12 EMERGENCY EXCHANGE RECONCILIATION GUARD:
+                # OKX exchange truth overrides Supabase state. If OKX already holds
+                # this base asset, block the live entry to prevent repeated duplicate buys.
+                if ENABLE_OKX_POSITION_ENTRY_GUARD:
+                    okx_position_exists, okx_position_context = okx_has_live_position(symbol, price)
+                    if okx_position_exists:
+                        entry_allowed = False
+                        block_reason = f"okx_live_position_guard_{okx_position_context.get('reason')}"
+                        print(
+                            f"🚫 BLOCKED LIVE ENTRY | {symbol} | existing/unknown OKX position | {okx_position_context}",
+                            flush=True
+                        )
+                        send_telegram_alert(
+                            f"🚫 <b>LIVE ENTRY BLOCKED</b> | {symbol}\n"
+                            f"OKX position guard triggered before buy.\n"
+                            f"Reason: {okx_position_context.get('reason')}\n"
+                            f"Available: {okx_position_context.get('available')} {okx_position_context.get('base_ccy')}\n"
+                            f"Estimated notional: {fmt_money(okx_position_context.get('estimated_notional_usd'))}"
+                        )
 
-                entry_trade_size = get_trade_size_for_context(entry_quality, leadership_context)
-                entry_quote_size = get_trade_size_quote_for_context(entry_quality, leadership_context)
-
-                print(
-                    f"🚀 OPEN REAL | {symbol} | LONG | id={trade_id} | "
-                    f"tier={entry_quality} | size=£{entry_trade_size} | "
-                    f"prior_avg_peak={round(leadership_context.get('prior_avg_peak', 0), 3)} | "
-                    f"prior_runners={leadership_context.get('prior_runners')}",
-                    flush=True
-                )
-
-                live_open_after_entry = get_live_real_open_count(cur)
-                same_symbol_after_entry = get_open_same_symbol_real_count(cur, symbol)
-                current_leadership_state = get_latest_leadership_state(cur, symbol)
-                top_leaders_text = get_top_leaders_text(cur, 4)
-
-                send_telegram_alert(
-                    f"🚀 <b>ENTRY</b> | {symbol} LONG\n"
-                    f"{entry_quality} | {fmt_money(entry_trade_size)} | OKX {fmt_money(entry_quote_size)}\n"
-                    f"Entry {price} | T/M {fmt_num(trend)} / {fmt_num(momentum)}\n"
-                    f"Phase: {short_phase(leadership_context.get('lifecycle_phase') or leadership_context.get('leadership_phase'))} "
-                    f"({leadership_context.get('leadership_transition') or 'n/a'})\n"
-                    f"Score {fmt_num(leadership_context.get('prior_avg_peak'))} | "
-                    f"Δ30 {fmt_num(leadership_context.get('leadership_delta_30m') or leadership_context.get('delta_30m'))} | "
-                    f"Age {fmt_num(leadership_context.get('leadership_age_minutes'), 1)}m | "
-                    f"Rank #{leadership_context.get('leadership_rank') or 'n/a'}\n"
-                    f"S/R/M: {leadership_context.get('prior_successes')} / {leadership_context.get('prior_runners')} / {leadership_context.get('monsters') or 0}\n"
-                    f"Breadth N/C/A/M: {leadership_context.get('market_near_count') or 0}/"
-                    f"{leadership_context.get('market_core_count') or 0}/"
-                    f"{leadership_context.get('market_aggressive_count') or 0}/"
-                    f"{leadership_context.get('market_monster_count') or 0}\n"
-                    f"Slots {live_open_after_entry}/{MAX_OPEN_TRADES} | Same {same_symbol_after_entry}/{MAX_SAME_SYMBOL_OPEN}\n"
-                    f"ID {trade_id}\n\n"
-                    f"<b>Leaders</b>\n{top_leaders_text}"
-                )
-
-                okx_entry_result = okx_place_market_order(
-                    cur=cur,
-                    trade_id=trade_id,
-                    symbol=symbol,
-                    direction="LONG",
-                    action="entry",
-                    price=price,
-                    entry_price=price,
-                    trade_size_quote=entry_quote_size
-                )
-
-                # v6.6.10 CRITICAL: persist the real trade + OKX order log immediately.
-                # Previously, later lifecycle/update exceptions could rollback the trade row
-                # after OKX had already bought on exchange.
-                if not okx_entry_result.get("success"):
-                    cur.execute("""
-                        UPDATE bot_trades_v4
-                        SET status = 'CLOSED',
-                            closed_at = NOW(),
-                            close_reason = %s
-                        WHERE id = %s
-                    """, (f"okx_entry_failed: {okx_entry_result.get('reason') or okx_entry_result.get('error')}", trade_id))
-                    conn.commit()
-                    print(f"🚨 REAL ENTRY DB SAVED AS FAILED | {symbol} | id={trade_id} | reason={okx_entry_result}", flush=True)
-                    send_telegram_alert(
-                        f"🚨 <b>ENTRY FAILED AFTER DB CREATE</b> | {symbol}\n"
-                        f"Trade row saved/closed for audit. Reason: {okx_entry_result.get('reason') or okx_entry_result.get('error')}\n"
-                        f"ID {trade_id}"
+                if not entry_allowed:
+                    print(
+                        f"⛔ BLOCKED | {symbol} | {decision} | "
+                        f"mom={round(momentum,3)} trend={round(trend,3)} | "
+                        f"reason={block_reason}",
+                        flush=True
                     )
                 else:
-                    conn.commit()
-                    print(f"✅ REAL ENTRY PERSISTED | {symbol} | id={trade_id}", flush=True)
+                    trade_id = open_trade(
+                        cur,
+                        symbol,
+                        "LONG",
+                        price,
+                        momentum,
+                        trend,
+                        entry_quality,
+                        signal_id,
+                        signal_time,
+                        leadership_context
+                    )
+
+                    entry_trade_size = get_trade_size_for_context(entry_quality, leadership_context)
+                    entry_quote_size = get_trade_size_quote_for_context(entry_quality, leadership_context)
+
+                    print(
+                        f"🚀 OPEN REAL | {symbol} | LONG | id={trade_id} | "
+                        f"tier={entry_quality} | size=£{entry_trade_size} | "
+                        f"prior_avg_peak={round(leadership_context.get('prior_avg_peak', 0), 3)} | "
+                        f"prior_runners={leadership_context.get('prior_runners')}",
+                        flush=True
+                    )
+
+                    live_open_after_entry = get_live_real_open_count(cur)
+                    same_symbol_after_entry = get_open_same_symbol_real_count(cur, symbol)
+                    current_leadership_state = get_latest_leadership_state(cur, symbol)
+                    top_leaders_text = get_top_leaders_text(cur, 4)
+
+                    send_telegram_alert(
+                        f"🚀 <b>ENTRY</b> | {symbol} LONG\n"
+                        f"{entry_quality} | {fmt_money(entry_trade_size)} | OKX {fmt_money(entry_quote_size)}\n"
+                        f"Entry {price} | T/M {fmt_num(trend)} / {fmt_num(momentum)}\n"
+                        f"Phase: {short_phase(leadership_context.get('lifecycle_phase') or leadership_context.get('leadership_phase'))} "
+                        f"({leadership_context.get('leadership_transition') or 'n/a'})\n"
+                        f"Score {fmt_num(leadership_context.get('prior_avg_peak'))} | "
+                        f"Δ30 {fmt_num(leadership_context.get('leadership_delta_30m') or leadership_context.get('delta_30m'))} | "
+                        f"Age {fmt_num(leadership_context.get('leadership_age_minutes'), 1)}m | "
+                        f"Rank #{leadership_context.get('leadership_rank') or 'n/a'}\n"
+                        f"S/R/M: {leadership_context.get('prior_successes')} / {leadership_context.get('prior_runners')} / {leadership_context.get('monsters') or 0}\n"
+                        f"Breadth N/C/A/M: {leadership_context.get('market_near_count') or 0}/"
+                        f"{leadership_context.get('market_core_count') or 0}/"
+                        f"{leadership_context.get('market_aggressive_count') or 0}/"
+                        f"{leadership_context.get('market_monster_count') or 0}\n"
+                        f"Slots {live_open_after_entry}/{MAX_OPEN_TRADES} | Same {same_symbol_after_entry}/{MAX_SAME_SYMBOL_OPEN}\n"
+                        f"ID {trade_id}\n\n"
+                        f"<b>Leaders</b>\n{top_leaders_text}"
+                    )
+
+                    okx_entry_result = okx_place_market_order(
+                        cur=cur,
+                        trade_id=trade_id,
+                        symbol=symbol,
+                        direction="LONG",
+                        action="entry",
+                        price=price,
+                        entry_price=price,
+                        trade_size_quote=entry_quote_size
+                    )
+
+                    # v6.6.10 CRITICAL: persist the real trade + OKX order log immediately.
+                    # Previously, later lifecycle/update exceptions could rollback the trade row
+                    # after OKX had already bought on exchange.
+                    if not okx_entry_result.get("success"):
+                        cur.execute("""
+                            UPDATE bot_trades_v4
+                            SET status = 'CLOSED',
+                                closed_at = NOW(),
+                                close_reason = %s
+                            WHERE id = %s
+                        """, (f"okx_entry_failed: {okx_entry_result.get('reason') or okx_entry_result.get('error')}", trade_id))
+                        conn.commit()
+                        print(f"🚨 REAL ENTRY DB SAVED AS FAILED | {symbol} | id={trade_id} | reason={okx_entry_result}", flush=True)
+                        send_telegram_alert(
+                            f"🚨 <b>ENTRY FAILED AFTER DB CREATE</b> | {symbol}\n"
+                            f"Trade row saved/closed for audit. Reason: {okx_entry_result.get('reason') or okx_entry_result.get('error')}\n"
+                            f"ID {trade_id}"
+                        )
+                    else:
+                        conn.commit()
+                        print(f"✅ REAL ENTRY PERSISTED | {symbol} | id={trade_id}", flush=True)
 
             else:
                 print(
@@ -4933,216 +5013,42 @@ def webhook():
         open_trades = cur.fetchall()
 
         for (tid, sym, direction, entry_price, opened_at, peak_pnl, is_shadow, entry_quality, partial_bank_done, partial_bank_realized_gbp) in open_trades:
-            if sym != symbol:
-                continue
-
-            if direction != "LONG":
-                continue
-
-            pnl = ((price - entry_price) / entry_price)
-            pnl_percent = pnl * 100
-            mins = (now - opened_at).total_seconds() / 60
-            current_peak = peak_pnl or 0
-
-            if pnl_percent > current_peak:
-                current_peak = pnl_percent
-                if column_exists(cur, "bot_trades_v4", "peak_time_minutes"):
-                    cur.execute("""
-                        UPDATE bot_trades_v4
-                        SET peak_pnl_percent = %s,
-                            peak_time_minutes = %s
-                        WHERE id = %s
-                    """, (current_peak, mins, tid))
-                else:
-                    cur.execute("""
-                        UPDATE bot_trades_v4
-                        SET peak_pnl_percent = %s
-                        WHERE id = %s
-                    """, (current_peak, tid))
-
             try:
-                log_trade_event(
-                    cur,
-                    tid,
-                    sym,
-                    "update",
-                    price,
-                    pnl_percent,
-                    current_peak,
-                    mins,
-                    momentum,
-                    trend,
-                    False
-                )
-            except Exception as e:
-                print(f"⚠️ trade_events update log failed: {e}", flush=True)
+                if sym != symbol:
+                    continue
 
-            try:
-                update_trade_telemetry_v1(
-                    cur,
-                    tid,
-                    sym,
-                    opened_at=opened_at,
-                    peak_pnl_percent=current_peak,
-                    is_exit=False
-                )
-            except Exception as e:
-                print(f"⚠️ TELEMETRY real update failed: {e}", flush=True)
+                if direction != "LONG":
+                    continue
 
-            close_reason = None
-            exit_architecture = None
-            decay_triggered = False
-            adaptive_exit_triggered = False
-            slot_recycle_candidate = False
-            drawdown_from_peak = current_peak - pnl_percent
+                pnl = ((price - entry_price) / entry_price)
+                pnl_percent = pnl * 100
+                safe_now = ensure_utc(now)
+                safe_opened_at = ensure_utc(opened_at)
+                mins = (safe_now - safe_opened_at).total_seconds() / 60
+                current_peak = peak_pnl or 0
 
-            # v6.6 partial profit bank: take 25% at +4%, leave runner open.
-            maybe_partial_profit_bank(
-                cur, tid, sym, direction, entry_price, price, entry_quality,
-                current_peak, pnl_percent, opened_at, mins,
-                {"leadership_max_60m": get_recent_leadership_max(cur, sym, 60)}
-            )
-
-            if (
-                not close_reason
-                and ENABLE_DEAD_LEADER_RECYCLER
-                and mins >= DEAD_LEADER_MINUTES
-                and current_peak < DEAD_LEADER_MAX_PEAK
-                and trend < DEAD_LEADER_TREND_THRESHOLD
-            ):
-                close_reason = "dead_leader_recycle_exit"
-                exit_architecture = "leadership_dead_recycler"
-                decay_triggered = True
-                slot_recycle_candidate = True
-
-            if (
-                not close_reason
-                and ENABLE_ADAPTIVE_WINNER_PROTECTION
-            ):
-                if (
-                    current_peak >= ADAPTIVE_LARGE_PEAK_TRIGGER
-                    and trend < ADAPTIVE_TREND_WEAK_THRESHOLD
-                    and drawdown_from_peak >= ADAPTIVE_LARGE_DRAWDOWN
-                ):
-                    close_reason = "adaptive_winner_protect_large"
-                    exit_architecture = "leadership_adaptive_winner_protection"
-                    adaptive_exit_triggered = True
-
-                elif (
-                    current_peak >= ADAPTIVE_MEDIUM_PEAK_TRIGGER
-                    and current_peak < ADAPTIVE_LARGE_PEAK_TRIGGER
-                    and trend < ADAPTIVE_TREND_WEAK_THRESHOLD
-                    and drawdown_from_peak >= ADAPTIVE_MEDIUM_DRAWDOWN
-                ):
-                    close_reason = "adaptive_winner_protect_medium"
-                    exit_architecture = "leadership_adaptive_winner_protection"
-                    adaptive_exit_triggered = True
-
-                elif (
-                    current_peak >= ADAPTIVE_SMALL_PEAK_TRIGGER
-                    and current_peak < ADAPTIVE_MEDIUM_PEAK_TRIGGER
-                    and trend < ADAPTIVE_TREND_WEAK_THRESHOLD
-                    and drawdown_from_peak >= ADAPTIVE_SMALL_DRAWDOWN
-                ):
-                    close_reason = "adaptive_winner_protect_small"
-                    exit_architecture = "leadership_adaptive_winner_protection"
-                    adaptive_exit_triggered = True
-
-            if not close_reason and ENABLE_PROFIT_LOCKS:
-                if current_peak >= LONG_LOCK_4_TRIGGER:
-                    lock_floor = current_peak * LONG_LOCK_4_RATIO
-                    if pnl_percent <= lock_floor:
-                        close_reason = "long_lock_4"
-                        exit_architecture = "long_profit_lock"
-
-                elif current_peak >= LONG_LOCK_3_TRIGGER:
-                    lock_floor = current_peak * LONG_LOCK_3_RATIO
-                    if pnl_percent <= lock_floor:
-                        close_reason = "long_lock_3"
-                        exit_architecture = "long_profit_lock"
-
-                elif current_peak >= LONG_LOCK_2_TRIGGER:
-                    lock_floor = current_peak * LONG_LOCK_2_RATIO
-                    if pnl_percent <= lock_floor:
-                        close_reason = "long_lock_2"
-                        exit_architecture = "long_profit_lock"
-
-                elif current_peak >= LONG_LOCK_1_TRIGGER:
-                    lock_floor = current_peak * LONG_LOCK_1_RATIO
-                    if pnl_percent <= lock_floor:
-                        close_reason = "long_lock_1"
-                        exit_architecture = "long_profit_lock"
-
-            if not close_reason and current_peak >= LONG_NO_RED_AFTER_WIN_TRIGGER and pnl_percent < 0:
-                close_reason = "long_gave_back_winner"
-                exit_architecture = "long_no_red_after_win"
-
-            if not close_reason and pnl_percent <= LONG_HARD_STOP:
-                close_reason = "long_hard_stop"
-                exit_architecture = "long_hard_stop"
-
-            if close_reason:
-                trade_size_for_pnl = get_trade_size_for_quality(entry_quality)
-                remaining_fraction = (1.0 - PARTIAL_BANK_FRACTION) if partial_bank_done else 1.0
-                pnl_gbp = ((pnl_percent / 100) * trade_size_for_pnl * remaining_fraction) + float(partial_bank_realized_gbp or 0)
-
-                cur.execute("""
-                    UPDATE bot_trades_v4
-                    SET status = 'CLOSED',
-                        closed_at = NOW(),
-                        close_price = %s,
-                        pnl_percent = %s,
-                        pnl_gbp = %s,
-                        close_reason = %s
-                    WHERE id = %s
-                """, (
-                    price,
-                    pnl_percent,
-                    pnl_gbp,
-                    close_reason,
-                    tid
-                ))
-
-                exit_lifecycle_context = get_lifecycle_context(cur, sym)
-
-                safe_update_trade_telemetry(cur, tid, {
-                    "decay_triggered": decay_triggered,
-                    "decay_checked_at_minutes": mins if decay_triggered else None,
-                    "decay_peak_at_check": current_peak if decay_triggered else None,
-                    "decay_trend_at_check": trend if decay_triggered else None,
-                    "decay_momentum_at_check": momentum if decay_triggered else None,
-                    "slot_recycle_candidate": slot_recycle_candidate,
-                    "exit_architecture": exit_architecture,
-                    "adaptive_exit_triggered": adaptive_exit_triggered,
-                    "drawdown_from_peak_at_exit": drawdown_from_peak,
-                    "leadership_trend_at_exit": trend,
-                    "leadership_momentum_at_exit": momentum,
-                    "lifecycle_phase_at_exit": exit_lifecycle_context.get("lifecycle_phase"),
-                    "prior_lifecycle_phase_at_exit": exit_lifecycle_context.get("prior_lifecycle_phase"),
-                    "leadership_transition_at_exit": exit_lifecycle_context.get("leadership_transition"),
-                    "leadership_score_at_exit": exit_lifecycle_context.get("leadership_score"),
-                    "leadership_delta_30m_at_exit": exit_lifecycle_context.get("leadership_delta_30m"),
-                    "leadership_rank_at_exit": exit_lifecycle_context.get("leadership_rank")
-                })
-
-                try:
-                    update_trade_telemetry_v1(
-                        cur,
-                        tid,
-                        sym,
-                        opened_at=opened_at,
-                        peak_pnl_percent=current_peak,
-                        is_exit=True
-                    )
-                except Exception as e:
-                    print(f"⚠️ TELEMETRY exit update failed: {e}", flush=True)
+                if pnl_percent > current_peak:
+                    current_peak = pnl_percent
+                    if column_exists(cur, "bot_trades_v4", "peak_time_minutes"):
+                        cur.execute("""
+                            UPDATE bot_trades_v4
+                            SET peak_pnl_percent = %s,
+                                peak_time_minutes = %s
+                            WHERE id = %s
+                        """, (current_peak, mins, tid))
+                    else:
+                        cur.execute("""
+                            UPDATE bot_trades_v4
+                            SET peak_pnl_percent = %s
+                            WHERE id = %s
+                        """, (current_peak, tid))
 
                 try:
                     log_trade_event(
                         cur,
                         tid,
                         sym,
-                        f"exit_{close_reason}",
+                        "update",
                         price,
                         pnl_percent,
                         current_peak,
@@ -5152,49 +5058,238 @@ def webhook():
                         False
                     )
                 except Exception as e:
-                    print(f"⚠️ trade_events exit log failed: {e}", flush=True)
+                    print(f"⚠️ trade_events update log failed: {e}", flush=True)
 
-                if has_successful_okx_live_entry(cur, tid):
-                    okx_place_market_order(
-                        cur=cur,
-                        trade_id=tid,
-                        symbol=sym,
-                        direction=direction,
-                        action="exit",
-                        price=price,
-                        entry_price=entry_price,
-                        trade_size_quote=get_trade_size_quote_for_quality(entry_quality)
+                try:
+                    update_trade_telemetry_v1(
+                        cur,
+                        tid,
+                        sym,
+                        opened_at=opened_at,
+                        peak_pnl_percent=current_peak,
+                        is_exit=False
                     )
-                else:
-                    log_okx_exit_skip_no_live_entry(
-                        cur=cur,
-                        trade_id=tid,
-                        symbol=sym,
-                        direction=direction,
-                        price=price
+                except Exception as e:
+                    print(f"⚠️ TELEMETRY real update failed: {e}", flush=True)
+
+                close_reason = None
+                exit_architecture = None
+                decay_triggered = False
+                adaptive_exit_triggered = False
+                slot_recycle_candidate = False
+                drawdown_from_peak = current_peak - pnl_percent
+
+                # v6.6 partial profit bank: take 25% at +4%, leave runner open.
+                maybe_partial_profit_bank(
+                    cur, tid, sym, direction, entry_price, price, entry_quality,
+                    current_peak, pnl_percent, opened_at, mins,
+                    {"leadership_max_60m": get_recent_leadership_max(cur, sym, 60)}
+                )
+
+                if (
+                    not close_reason
+                    and ENABLE_DEAD_LEADER_RECYCLER
+                    and mins >= DEAD_LEADER_MINUTES
+                    and current_peak < DEAD_LEADER_MAX_PEAK
+                    and trend < DEAD_LEADER_TREND_THRESHOLD
+                ):
+                    close_reason = "dead_leader_recycle_exit"
+                    exit_architecture = "leadership_dead_recycler"
+                    decay_triggered = True
+                    slot_recycle_candidate = True
+
+                if (
+                    not close_reason
+                    and ENABLE_ADAPTIVE_WINNER_PROTECTION
+                ):
+                    if (
+                        current_peak >= ADAPTIVE_LARGE_PEAK_TRIGGER
+                        and trend < ADAPTIVE_TREND_WEAK_THRESHOLD
+                        and drawdown_from_peak >= ADAPTIVE_LARGE_DRAWDOWN
+                    ):
+                        close_reason = "adaptive_winner_protect_large"
+                        exit_architecture = "leadership_adaptive_winner_protection"
+                        adaptive_exit_triggered = True
+
+                    elif (
+                        current_peak >= ADAPTIVE_MEDIUM_PEAK_TRIGGER
+                        and current_peak < ADAPTIVE_LARGE_PEAK_TRIGGER
+                        and trend < ADAPTIVE_TREND_WEAK_THRESHOLD
+                        and drawdown_from_peak >= ADAPTIVE_MEDIUM_DRAWDOWN
+                    ):
+                        close_reason = "adaptive_winner_protect_medium"
+                        exit_architecture = "leadership_adaptive_winner_protection"
+                        adaptive_exit_triggered = True
+
+                    elif (
+                        current_peak >= ADAPTIVE_SMALL_PEAK_TRIGGER
+                        and current_peak < ADAPTIVE_MEDIUM_PEAK_TRIGGER
+                        and trend < ADAPTIVE_TREND_WEAK_THRESHOLD
+                        and drawdown_from_peak >= ADAPTIVE_SMALL_DRAWDOWN
+                    ):
+                        close_reason = "adaptive_winner_protect_small"
+                        exit_architecture = "leadership_adaptive_winner_protection"
+                        adaptive_exit_triggered = True
+
+                if not close_reason and ENABLE_PROFIT_LOCKS:
+                    if current_peak >= LONG_LOCK_4_TRIGGER:
+                        lock_floor = current_peak * LONG_LOCK_4_RATIO
+                        if pnl_percent <= lock_floor:
+                            close_reason = "long_lock_4"
+                            exit_architecture = "long_profit_lock"
+
+                    elif current_peak >= LONG_LOCK_3_TRIGGER:
+                        lock_floor = current_peak * LONG_LOCK_3_RATIO
+                        if pnl_percent <= lock_floor:
+                            close_reason = "long_lock_3"
+                            exit_architecture = "long_profit_lock"
+
+                    elif current_peak >= LONG_LOCK_2_TRIGGER:
+                        lock_floor = current_peak * LONG_LOCK_2_RATIO
+                        if pnl_percent <= lock_floor:
+                            close_reason = "long_lock_2"
+                            exit_architecture = "long_profit_lock"
+
+                    elif current_peak >= LONG_LOCK_1_TRIGGER:
+                        lock_floor = current_peak * LONG_LOCK_1_RATIO
+                        if pnl_percent <= lock_floor:
+                            close_reason = "long_lock_1"
+                            exit_architecture = "long_profit_lock"
+
+                if not close_reason and current_peak >= LONG_NO_RED_AFTER_WIN_TRIGGER and pnl_percent < 0:
+                    close_reason = "long_gave_back_winner"
+                    exit_architecture = "long_no_red_after_win"
+
+                if not close_reason and pnl_percent <= LONG_HARD_STOP:
+                    close_reason = "long_hard_stop"
+                    exit_architecture = "long_hard_stop"
+
+                if close_reason:
+                    trade_size_for_pnl = get_trade_size_for_quality(entry_quality)
+                    remaining_fraction = (1.0 - PARTIAL_BANK_FRACTION) if partial_bank_done else 1.0
+                    pnl_gbp = ((pnl_percent / 100) * trade_size_for_pnl * remaining_fraction) + float(partial_bank_realized_gbp or 0)
+
+                    cur.execute("""
+                        UPDATE bot_trades_v4
+                        SET status = 'CLOSED',
+                            closed_at = NOW(),
+                            close_price = %s,
+                            pnl_percent = %s,
+                            pnl_gbp = %s,
+                            close_reason = %s
+                        WHERE id = %s
+                    """, (
+                        price,
+                        pnl_percent,
+                        pnl_gbp,
+                        close_reason,
+                        tid
+                    ))
+
+                    exit_lifecycle_context = get_lifecycle_context(cur, sym)
+
+                    safe_update_trade_telemetry(cur, tid, {
+                        "decay_triggered": decay_triggered,
+                        "decay_checked_at_minutes": mins if decay_triggered else None,
+                        "decay_peak_at_check": current_peak if decay_triggered else None,
+                        "decay_trend_at_check": trend if decay_triggered else None,
+                        "decay_momentum_at_check": momentum if decay_triggered else None,
+                        "slot_recycle_candidate": slot_recycle_candidate,
+                        "exit_architecture": exit_architecture,
+                        "adaptive_exit_triggered": adaptive_exit_triggered,
+                        "drawdown_from_peak_at_exit": drawdown_from_peak,
+                        "leadership_trend_at_exit": trend,
+                        "leadership_momentum_at_exit": momentum,
+                        "lifecycle_phase_at_exit": exit_lifecycle_context.get("lifecycle_phase"),
+                        "prior_lifecycle_phase_at_exit": exit_lifecycle_context.get("prior_lifecycle_phase"),
+                        "leadership_transition_at_exit": exit_lifecycle_context.get("leadership_transition"),
+                        "leadership_score_at_exit": exit_lifecycle_context.get("leadership_score"),
+                        "leadership_delta_30m_at_exit": exit_lifecycle_context.get("leadership_delta_30m"),
+                        "leadership_rank_at_exit": exit_lifecycle_context.get("leadership_rank")
+                    })
+
+                    try:
+                        update_trade_telemetry_v1(
+                            cur,
+                            tid,
+                            sym,
+                            opened_at=opened_at,
+                            peak_pnl_percent=current_peak,
+                            is_exit=True
+                        )
+                    except Exception as e:
+                        print(f"⚠️ TELEMETRY exit update failed: {e}", flush=True)
+
+                    try:
+                        log_trade_event(
+                            cur,
+                            tid,
+                            sym,
+                            f"exit_{close_reason}",
+                            price,
+                            pnl_percent,
+                            current_peak,
+                            mins,
+                            momentum,
+                            trend,
+                            False
+                        )
+                    except Exception as e:
+                        print(f"⚠️ trade_events exit log failed: {e}", flush=True)
+
+                    if has_successful_okx_live_entry(cur, tid):
+                        okx_place_market_order(
+                            cur=cur,
+                            trade_id=tid,
+                            symbol=sym,
+                            direction=direction,
+                            action="exit",
+                            price=price,
+                            entry_price=entry_price,
+                            trade_size_quote=get_trade_size_quote_for_quality(entry_quality)
+                        )
+                    else:
+                        log_okx_exit_skip_no_live_entry(
+                            cur=cur,
+                            trade_id=tid,
+                            symbol=sym,
+                            direction=direction,
+                            price=price
+                        )
+
+                    print(
+                        f"💰 CLOSED REAL | {sym} | LONG | "
+                        f"{round(pnl_percent,3)}% | peak={round(current_peak,3)} | "
+                        f"dd_from_peak={round(drawdown_from_peak,3)} | {close_reason}",
+                        flush=True
                     )
 
+                    exit_leadership_state = get_latest_leadership_state(cur, sym)
+                    latest_signal_state = get_latest_signal_state(cur, sym)
+
+                    send_telegram_alert(
+                        f"💰 <b>CLOSED</b> | {sym} LONG\n"
+                        f"PnL <b>{fmt_num(pnl_percent)}%</b> | {fmt_money(pnl_gbp)} | Peak {fmt_num(current_peak)}%\n"
+                        f"DD {fmt_num(drawdown_from_peak)}% | {close_reason}\n"
+                        f"Exit T/M {fmt_num(trend)} / {fmt_num(momentum)}\n"
+                        f"Phase: {format_leadership_compact(exit_lifecycle_context)}\n"
+                        f"Latest: mom {fmt_num((latest_signal_state or {}).get('momentum'))} "
+                        f"trend {fmt_num((latest_signal_state or {}).get('trend'))} | "
+                        f"{(latest_signal_state or {}).get('decision') or 'NONE'} / "
+                        f"{(latest_signal_state or {}).get('block_reason') or 'no_reason'}"
+                    )
+            except Exception as e:
                 print(
-                    f"💰 CLOSED REAL | {sym} | LONG | "
-                    f"{round(pnl_percent,3)}% | peak={round(current_peak,3)} | "
-                    f"dd_from_peak={round(drawdown_from_peak,3)} | {close_reason}",
+                    f"🚨 REAL EXIT ENGINE TRADE FAILURE | {sym} | id={tid} | error={e}",
                     flush=True
                 )
-
-                exit_leadership_state = get_latest_leadership_state(cur, sym)
-                latest_signal_state = get_latest_signal_state(cur, sym)
-
                 send_telegram_alert(
-                    f"💰 <b>CLOSED</b> | {sym} LONG\n"
-                    f"PnL <b>{fmt_num(pnl_percent)}%</b> | {fmt_money(pnl_gbp)} | Peak {fmt_num(current_peak)}%\n"
-                    f"DD {fmt_num(drawdown_from_peak)}% | {close_reason}\n"
-                    f"Exit T/M {fmt_num(trend)} / {fmt_num(momentum)}\n"
-                    f"Phase: {format_leadership_compact(exit_lifecycle_context)}\n"
-                    f"Latest: mom {fmt_num((latest_signal_state or {}).get('momentum'))} "
-                    f"trend {fmt_num((latest_signal_state or {}).get('trend'))} | "
-                    f"{(latest_signal_state or {}).get('decision') or 'NONE'} / "
-                    f"{(latest_signal_state or {}).get('block_reason') or 'no_reason'}"
+                    f"🚨 <b>REAL EXIT ENGINE FAILURE</b>\n"
+                    f"{sym}\n"
+                    f"Trade ID: {tid}\n"
+                    f"Error: {str(e)[:300]}"
                 )
+                continue
 
 
         conn.commit()
