@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v6.6.14
-# TITLE: V6.6.14 REAL ENTRY DB COMMIT HARDENING
+# VERSION: v6.6.15
+# TITLE: V6.6.15 ENTRY SNAPSHOT FREEZE + CONTROL PANEL
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v6.6.14 REAL ENTRY DB COMMIT HARDENING RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v6.6.15 ENTRY SNAPSHOT FREEZE + CONTROL PANEL RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -75,6 +75,13 @@ def ensure_utc(dt):
         return dt.astimezone(timezone.utc)
     except Exception:
         return dt
+
+
+def env_bool(name, default=False):
+    raw = os.environ.get(name)
+    if raw is None:
+        return bool(default)
+    return str(raw).strip().lower() in ("1", "true", "yes", "y", "on")
 
 
 
@@ -356,7 +363,7 @@ MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 3
 
 
 
-DATA_VERSION = "v6.6.14_REAL_ENTRY_DB_COMMIT_HARDENING"
+DATA_VERSION = "v6.6.15_ENTRY_SNAPSHOT_CONTROL_PANEL"
 
 
 # =========================
@@ -676,8 +683,21 @@ OKX_API_SECRET = os.environ.get("OKX_API_SECRET")
 OKX_API_PASSPHRASE = os.environ.get("OKX_API_PASSPHRASE")
 OKX_BASE_URL = os.environ.get("OKX_BASE_URL", "https://www.okx.com").rstrip("/")
 
-ENABLE_ORDER_LOGGING = os.environ.get("ENABLE_ORDER_LOGGING", "true").lower() == "true"
-ENABLE_LIVE_ORDERS = os.environ.get("ENABLE_LIVE_ORDERS", "true").lower() == "true"
+ENABLE_ORDER_LOGGING = env_bool("ENABLE_ORDER_LOGGING", True)
+
+# =========================
+# 🧭 CONTROL PANEL ARCHITECTURE v6.6.15
+# =========================
+ENABLE_LIVE_TRADING = env_bool("ENABLE_LIVE_TRADING", env_bool("LIVE_ORDERS_ENABLED", True))
+ENABLE_NEW_ENTRIES = env_bool("ENABLE_NEW_ENTRIES", True)
+ENABLE_OKX_EXITS = env_bool("ENABLE_OKX_EXITS", True)
+ENABLE_SHADOWS = env_bool("ENABLE_SHADOWS", True)
+ENABLE_PROBES = env_bool("ENABLE_PROBES", True)
+ENABLE_LONGS = env_bool("ENABLE_LONGS", True)
+ENABLE_SHORTS = env_bool("ENABLE_SHORTS", False)
+ENABLE_PARTIAL_BANKING = env_bool("ENABLE_PARTIAL_BANKING", True)
+EMERGENCY_CLOSE_ONLY_MODE = env_bool("EMERGENCY_CLOSE_ONLY_MODE", False)
+ENABLE_LIVE_ORDERS = env_bool("ENABLE_LIVE_ORDERS", ENABLE_LIVE_TRADING)
 
 # v6.6.12: exchange truth safety guards. These prevent duplicate live buys
 # if DB open-trade reconstruction/persistence is out of sync with OKX.
@@ -804,6 +824,55 @@ def safe_update_signal_telemetry(cur, signal_id, telemetry):
         SET {set_sql}
         WHERE id = %s
     """, values)
+
+def live_entry_allowed_by_control_panel():
+    return ENABLE_LIVE_ORDERS and ENABLE_LIVE_TRADING and ENABLE_NEW_ENTRIES and not EMERGENCY_CLOSE_ONLY_MODE and ENABLE_LONGS
+
+
+def live_exit_allowed_by_control_panel():
+    return ENABLE_LIVE_ORDERS and ENABLE_LIVE_TRADING and ENABLE_OKX_EXITS
+
+
+def first_non_empty(*values, default=None):
+    for val in values:
+        if val is not None and val != "":
+            return val
+    return default
+
+
+def build_entry_leadership_snapshot(quality, leadership_context=None):
+    ctx = leadership_context or {}
+    score = first_non_empty(ctx.get("leadership_score"), ctx.get("prior_avg_peak"), ctx.get("avg_peak"), default=0)
+    return {
+        "trade_size_gbp": get_trade_size_for_context(quality, ctx),
+        "dynamic_trade_size_gbp": get_trade_size_for_context(quality, ctx),
+        "leadership_prior_successes": first_non_empty(ctx.get("prior_successes"), ctx.get("successful_signals"), default=0),
+        "leadership_prior_runners": first_non_empty(ctx.get("prior_runners"), ctx.get("runners"), default=0),
+        "leadership_prior_avg_peak": score,
+        "leadership_tier": quality,
+        "leadership_mode": first_non_empty(ctx.get("leadership_mode"), quality),
+        "leadership_score": score,
+        "lifecycle_phase_at_entry": first_non_empty(ctx.get("lifecycle_phase"), ctx.get("leadership_phase")),
+        "prior_lifecycle_phase_at_entry": ctx.get("prior_lifecycle_phase"),
+        "leadership_transition_at_entry": ctx.get("leadership_transition"),
+        "leadership_delta_5m_at_entry": ctx.get("leadership_delta_5m"),
+        "leadership_delta_15m_at_entry": ctx.get("leadership_delta_15m"),
+        "leadership_delta_30m_at_entry": first_non_empty(ctx.get("leadership_delta_30m"), ctx.get("delta_30m")),
+        "leadership_delta_60m_at_entry": ctx.get("leadership_delta_60m"),
+        "leadership_score_30m_ago_at_entry": first_non_empty(ctx.get("leadership_score_30m_ago"), ctx.get("score_30m_ago")),
+        "leadership_age_minutes_at_entry": ctx.get("leadership_age_minutes"),
+        "leadership_peak_score_last_4h_at_entry": ctx.get("leadership_peak_score_last_4h"),
+        "leadership_rank_at_entry": ctx.get("leadership_rank"),
+        "market_near_count_at_entry": ctx.get("market_near_count"),
+        "market_core_count_at_entry": ctx.get("market_core_count"),
+        "market_aggressive_count_at_entry": ctx.get("market_aggressive_count"),
+        "market_monster_count_at_entry": ctx.get("market_monster_count"),
+        "shadow_emergence_detected_at_entry": ctx.get("shadow_emergence_detected"),
+        "shadow_emergence_reason_at_entry": ctx.get("shadow_emergence_reason"),
+        "market_os_engine": ctx.get("market_os_engine"),
+        "size_scaling_reason": ctx.get("size_scaling_reason"),
+    }
+
 
 def ensure_okx_order_log_table(cur):
     if not ENABLE_ORDER_LOGGING:
@@ -1673,7 +1742,7 @@ def okx_place_market_order(cur, trade_id, symbol, direction, action, price=None,
         side = "sell"
         base_ccy = okx_inst_id_to_base_ccy(okx_inst_id)
 
-        if ENABLE_LIVE_ORDERS:
+        if live_exit_allowed_by_control_panel():
             balance_result = okx_get_available_balance(base_ccy)
             if not balance_result.get("success"):
                 request_payload = {
@@ -1762,7 +1831,7 @@ def okx_place_market_order(cur, trade_id, symbol, direction, action, price=None,
         )
         return {"success": False, "dry_run": True, "blocked": True, "reason": "unknown_okx_action"}
 
-    dry_run = not ENABLE_LIVE_ORDERS
+    dry_run = not ((action == "entry" and live_entry_allowed_by_control_panel()) or (action == "exit" and live_exit_allowed_by_control_panel()))
 
     if dry_run:
         response_payload = {
@@ -3761,7 +3830,11 @@ def build_telegram_open_trades_message(cur):
             b.entry_price,
             b.opened_at,
             COALESCE(b.peak_pnl_percent, 0) AS peak_pnl_percent,
-            COALESCE(b.leadership_prior_avg_peak, b.leadership_score, 0) AS entry_leadership,
+            COALESCE(b.leadership_score, b.leadership_prior_avg_peak, 0) AS entry_leadership,
+            b.leadership_rank_at_entry,
+            b.leadership_age_minutes_at_entry,
+            b.leadership_delta_30m_at_entry,
+            b.lifecycle_phase_at_entry,
             COALESCE(b.dynamic_trade_size_gbp, b.trade_size_gbp, 0) AS trade_size_gbp,
             lp.price AS current_price,
             lp.momentum AS latest_momentum,
@@ -3785,7 +3858,8 @@ def build_telegram_open_trades_message(cur):
     lines = ["📈 <b>Open Trades</b>"]
     for (
         trade_id, symbol, quality, entry_price, opened_at, peak,
-        entry_leadership, trade_size_gbp, current_price, latest_momentum,
+        entry_leadership, entry_rank, entry_leadership_age, entry_delta_30m,
+        entry_lifecycle_phase, trade_size_gbp, current_price, latest_momentum,
         latest_trend, latest_decision, latest_block_reason, latest_signal_time
     ) in rows:
         if current_price and entry_price:
@@ -3806,7 +3880,9 @@ def build_telegram_open_trades_message(cur):
         lines.append(
             f"\n<b>{symbol}</b> | {quality}\n"
             f"Size {fmt_money(trade_size_gbp)} | Age {fmt_num(age_mins,1)}m | PnL {fmt_num(current_pnl)}% | Peak {fmt_num(peak)}%\n"
-            f"Entry score {fmt_num(entry_leadership)} | {format_leadership_compact(lifecycle_ctx)}\n"
+            f"Entry score {fmt_num(entry_leadership)} | Entry age {fmt_num(entry_leadership_age,1)}m | "
+            f"Entry Δ30 {fmt_num(entry_delta_30m)} | Entry rank #{entry_rank or 'n/a'}\n"
+            f"Entry phase {short_phase(entry_lifecycle_phase)} | Now {format_leadership_compact(lifecycle_ctx)}\n"
             f"Latest T/M {fmt_num(latest_trend)} / {fmt_num(latest_momentum)} | "
             f"{latest_decision or 'NONE'} / {latest_block_reason or 'no_reason'}"
         )
@@ -4221,133 +4297,101 @@ def log_trade_event(cur, trade_id, symbol, event_type, price, pnl_percent,
 
 def open_trade(cur, symbol, direction, price, momentum, trend, quality,
                signal_id, signal_time, leadership_context):
+    entry_snapshot = build_entry_leadership_snapshot(quality, leadership_context)
+
     cur.execute("""
         INSERT INTO bot_trades_v4 (
-            symbol,
-            direction,
-            entry_price,
-            status,
-            opened_at,
-            data_version,
-            momentum_strength,
-            trend_strength,
-            entry_quality,
-            peak_pnl_percent,
-            signal_id,
-            signal_timestamp
+            symbol, direction, entry_price, status, opened_at, data_version,
+            momentum_strength, trend_strength, entry_quality, peak_pnl_percent,
+            signal_id, signal_timestamp,
+            trade_size_gbp, dynamic_trade_size_gbp,
+            leadership_prior_successes, leadership_prior_runners, leadership_prior_avg_peak,
+            leadership_tier, leadership_mode, leadership_score,
+            lifecycle_phase_at_entry, prior_lifecycle_phase_at_entry, leadership_transition_at_entry,
+            leadership_delta_5m_at_entry, leadership_delta_15m_at_entry, leadership_delta_30m_at_entry,
+            leadership_delta_60m_at_entry, leadership_score_30m_ago_at_entry,
+            leadership_age_minutes_at_entry, leadership_peak_score_last_4h_at_entry, leadership_rank_at_entry,
+            market_near_count_at_entry, market_core_count_at_entry, market_aggressive_count_at_entry,
+            market_monster_count_at_entry, shadow_emergence_detected_at_entry, shadow_emergence_reason_at_entry,
+            is_shadow
         )
-        VALUES (%s,%s,%s,'OPEN',NOW(),%s,%s,%s,%s,0,%s,%s)
+        VALUES (
+            %s,%s,%s,'OPEN',NOW(),%s,%s,%s,%s,0,%s,%s,
+            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+            FALSE
+        )
         RETURNING id
     """, (
-        symbol,
-        direction,
-        price,
-        DATA_VERSION,
-        momentum,
-        trend,
-        quality,
-        signal_id,
-        signal_time
+        symbol, direction, price, DATA_VERSION, momentum, trend, quality, signal_id, signal_time,
+        entry_snapshot.get("trade_size_gbp"), entry_snapshot.get("dynamic_trade_size_gbp"),
+        entry_snapshot.get("leadership_prior_successes"), entry_snapshot.get("leadership_prior_runners"),
+        entry_snapshot.get("leadership_prior_avg_peak"), entry_snapshot.get("leadership_tier"),
+        entry_snapshot.get("leadership_mode"), entry_snapshot.get("leadership_score"),
+        entry_snapshot.get("lifecycle_phase_at_entry"), entry_snapshot.get("prior_lifecycle_phase_at_entry"),
+        entry_snapshot.get("leadership_transition_at_entry"), entry_snapshot.get("leadership_delta_5m_at_entry"),
+        entry_snapshot.get("leadership_delta_15m_at_entry"), entry_snapshot.get("leadership_delta_30m_at_entry"),
+        entry_snapshot.get("leadership_delta_60m_at_entry"), entry_snapshot.get("leadership_score_30m_ago_at_entry"),
+        entry_snapshot.get("leadership_age_minutes_at_entry"), entry_snapshot.get("leadership_peak_score_last_4h_at_entry"),
+        entry_snapshot.get("leadership_rank_at_entry"), entry_snapshot.get("market_near_count_at_entry"),
+        entry_snapshot.get("market_core_count_at_entry"), entry_snapshot.get("market_aggressive_count_at_entry"),
+        entry_snapshot.get("market_monster_count_at_entry"), entry_snapshot.get("shadow_emergence_detected_at_entry"),
+        entry_snapshot.get("shadow_emergence_reason_at_entry"),
     ))
 
     trade_id = cur.fetchone()[0]
 
-    # v6.6.14 CRITICAL REAL ENTRY FIX:
-    # Persist the base REAL trade row immediately after INSERT and BEFORE any
-    # telemetry, Telegram, OKX, lifecycle, or later helper work.
-    # This prevents the dangerous failure mode:
-    # OKX buy succeeds -> later exception/rollback -> bot_trades_v4 row disappears.
     try:
         cur.connection.commit()
-        print(f"✅ REAL BASE TRADE ROW PERSISTED FIRST | {symbol} | id={trade_id}", flush=True)
+        print(
+            f"✅ REAL ENTRY SNAPSHOT PERSISTED FIRST | {symbol} | id={trade_id} | "
+            f"score={entry_snapshot.get('leadership_score')} | rank={entry_snapshot.get('leadership_rank_at_entry')} | "
+            f"age={entry_snapshot.get('leadership_age_minutes_at_entry')} | d30={entry_snapshot.get('leadership_delta_30m_at_entry')}",
+            flush=True
+        )
     except Exception as e:
-        print(f"🚨 REAL BASE TRADE ROW EARLY COMMIT FAILED | {symbol} | id={trade_id} | {e}", flush=True)
+        print(f"🚨 REAL ENTRY SNAPSHOT EARLY COMMIT FAILED | {symbol} | id={trade_id} | {e}", flush=True)
         raise
 
-    safe_update_trade_telemetry(cur, trade_id, {
-        "entry_architecture": quality,
-        "trade_size_gbp": get_trade_size_for_context(quality, leadership_context),
-        "dynamic_trade_size_gbp": get_trade_size_for_context(quality, leadership_context),
-        "market_os_engine": leadership_context.get("market_os_engine"),
-        "size_scaling_reason": leadership_context.get("size_scaling_reason"),
-        "leadership_prior_successes": leadership_context.get("prior_successes"),
-        "leadership_prior_runners": leadership_context.get("prior_runners"),
-        "leadership_prior_avg_peak": leadership_context.get("prior_avg_peak"),
-        "leadership_tier": quality,
-        "leadership_mode": leadership_context.get("leadership_mode") or quality,
-        "leadership_score": leadership_context.get("prior_avg_peak"),
-        "lifecycle_phase_at_entry": leadership_context.get("lifecycle_phase") or leadership_context.get("leadership_phase"),
-        "prior_lifecycle_phase_at_entry": leadership_context.get("prior_lifecycle_phase"),
-        "leadership_transition_at_entry": leadership_context.get("leadership_transition"),
-        "leadership_delta_5m_at_entry": leadership_context.get("leadership_delta_5m"),
-        "leadership_delta_15m_at_entry": leadership_context.get("leadership_delta_15m"),
-        "leadership_delta_30m_at_entry": leadership_context.get("leadership_delta_30m") or leadership_context.get("delta_30m"),
-        "leadership_delta_60m_at_entry": leadership_context.get("leadership_delta_60m"),
-        "leadership_score_30m_ago_at_entry": leadership_context.get("leadership_score_30m_ago") or leadership_context.get("score_30m_ago"),
-        "leadership_age_minutes_at_entry": leadership_context.get("leadership_age_minutes"),
-        "leadership_peak_score_last_4h_at_entry": leadership_context.get("leadership_peak_score_last_4h"),
-        "leadership_rank_at_entry": leadership_context.get("leadership_rank"),
-        "market_near_count_at_entry": leadership_context.get("market_near_count"),
-        "market_core_count_at_entry": leadership_context.get("market_core_count"),
-        "market_aggressive_count_at_entry": leadership_context.get("market_aggressive_count"),
-        "market_monster_count_at_entry": leadership_context.get("market_monster_count"),
-        "shadow_emergence_detected_at_entry": leadership_context.get("shadow_emergence_detected"),
-        "shadow_emergence_reason_at_entry": leadership_context.get("shadow_emergence_reason"),
-        "shadow_quiet_continuation_detected_at_entry": leadership_context.get("shadow_quiet_continuation_detected"),
-        "shadow_quiet_continuation_reason_at_entry": leadership_context.get("shadow_quiet_continuation_reason")
-    })
-
     try:
-        log_trade_event(
-            cur,
-            trade_id,
-            symbol,
-            "entry",
-            price,
-            0,
-            0,
-            0,
-            momentum,
-            trend,
-            True
-        )
-    except Exception as e:
-        print(f"⚠️ trade_events entry log failed: {e}", flush=True)
-
-    try:
-        update_trade_telemetry_v1(
-            cur,
-            trade_id,
-            symbol,
-            opened_at=signal_time,
-            peak_pnl_percent=0,
-            is_exit=False
-        )
-    except Exception as e:
-        print(f"⚠️ TELEMETRY entry update failed: {e}", flush=True)
-        try:
-            cur.connection.rollback()
-            print(f"⚠️ TELEMETRY transaction rolled back safely after base row persisted | {symbol} | id={trade_id}", flush=True)
-        except Exception as rb_e:
-            print(f"⚠️ TELEMETRY rollback failed | {symbol} | id={trade_id} | {rb_e}", flush=True)
-
-    # v6.6.14: verify the base row is still visible before any OKX order is allowed.
-    try:
-        cur.execute("SELECT COUNT(*) FROM bot_trades_v4 WHERE id = %s", (str(trade_id),))
-        visible_count = cur.fetchone()[0] or 0
-        if visible_count < 1:
-            raise Exception("base_trade_row_not_visible_after_commit")
+        safe_update_trade_telemetry(cur, trade_id, {"market_os_engine": entry_snapshot.get("market_os_engine"), "size_scaling_reason": entry_snapshot.get("size_scaling_reason")})
         cur.connection.commit()
-        print(f"✅ REAL BASE TRADE ROW VERIFIED VISIBLE | {symbol} | id={trade_id}", flush=True)
     except Exception as e:
-        print(f"🚨 REAL BASE TRADE ROW VERIFY FAILED | {symbol} | id={trade_id} | {e}", flush=True)
-        try:
-            cur.connection.rollback()
-        except Exception:
-            pass
+        print(f"⚠️ optional entry telemetry update failed after snapshot persisted: {e}", flush=True)
+        safe_telemetry_rollback(cur)
+
+    try:
+        log_trade_event(cur, trade_id, symbol, "entry", price, 0, 0, 0, momentum, trend, True)
+        cur.connection.commit()
+    except Exception as e:
+        print(f"⚠️ trade_events entry log failed after snapshot persisted: {e}", flush=True)
+        safe_telemetry_rollback(cur)
+
+    try:
+        update_trade_telemetry_v1(cur, trade_id, symbol, opened_at=signal_time, peak_pnl_percent=0, is_exit=False)
+        cur.connection.commit()
+    except Exception as e:
+        print(f"⚠️ TELEMETRY entry update failed after snapshot persisted: {e}", flush=True)
+        safe_telemetry_rollback(cur)
+
+    try:
+        cur.execute("""
+            SELECT COALESCE(leadership_score,0), leadership_rank_at_entry,
+                   leadership_age_minutes_at_entry, leadership_delta_30m_at_entry
+            FROM bot_trades_v4
+            WHERE id = %s
+        """, (str(trade_id),))
+        verify_row = cur.fetchone()
+        if not verify_row:
+            raise Exception("base_trade_row_not_visible_after_snapshot_commit")
+        cur.connection.commit()
+        print(f"✅ REAL ENTRY SNAPSHOT VERIFIED | {symbol} | id={trade_id} | score={verify_row[0]} | rank={verify_row[1]} | age={verify_row[2]} | d30={verify_row[3]}", flush=True)
+    except Exception as e:
+        print(f"🚨 REAL ENTRY SNAPSHOT VERIFY FAILED | {symbol} | id={trade_id} | {e}", flush=True)
+        safe_telemetry_rollback(cur)
         raise
 
     return trade_id
+
 
 
 def write_leadership_state_snapshots(cur):
@@ -4894,6 +4938,10 @@ def webhook():
 
         # ================= REAL ENTRY EXECUTION =================
         if decision in ["LONG", "SHORT"]:
+            if entry_allowed and not live_entry_allowed_by_control_panel():
+                entry_allowed = False
+                block_reason = "control_panel_entries_disabled"
+
             if entry_allowed:
                 # v6.6.12 EMERGENCY EXCHANGE RECONCILIATION GUARD:
                 # OKX exchange truth overrides Supabase state. If OKX already holds
@@ -5409,7 +5457,7 @@ def build_telegram_health_message(cur):
         f"🩺 <b>Bot Health</b>\n"
         f"Version: {DATA_VERSION}\n"
         f"Engine: LEADERSHIP_LIVE + BPT_CQE_LIFECYCLE_V1 + SHADOW_CQE_V1 + SHADOW_EMERGENCE\n"
-        f"Live orders: {ENABLE_LIVE_ORDERS}\n"
+        f"Live orders: {ENABLE_LIVE_ORDERS} | New entries: {ENABLE_NEW_ENTRIES} | OKX exits: {ENABLE_OKX_EXITS} | Emergency close-only: {EMERGENCY_CLOSE_ONLY_MODE}\n"
         f"Last signal: {last_signal}\n"
         f"Signals 1h: {signals_1h}\n"
         f"Last real trade: {last_trade}\n"
@@ -5941,7 +5989,7 @@ def telegram_test():
         sent = send_telegram_alert(
             f"📲 <b>Telegram test successful</b>\n"
             f"Bot version: {DATA_VERSION}\n"
-            f"Live orders: {ENABLE_LIVE_ORDERS}\n"
+            f"Live orders: {ENABLE_LIVE_ORDERS} | Entries: {ENABLE_NEW_ENTRIES} | Exits: {ENABLE_OKX_EXITS}\n"
             f"Leadership threshold: {LEADERSHIP_MIN_PRIOR_AVG_PEAK}"
         )
         return jsonify({
