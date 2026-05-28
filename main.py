@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v6.6.20
-# TITLE: V6.6.15 ENTRY SNAPSHOT FREEZE + CONTROL PANEL
+# VERSION: v6.6.21
+# TITLE: FREE THE UNICORNS ENTRY OVERRIDE
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v6.6.20 ADAPTIVE LEADERSHIP TREND ENGINE RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v6.6.21 FREE THE UNICORNS ENTRY OVERRIDE RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -363,7 +363,7 @@ MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 3
 
 
 
-DATA_VERSION = "v6.6.20_ADAPTIVE_LEADERSHIP_TREND_ENGINE"
+DATA_VERSION = "v6.6.21_FREE_THE_UNICORNS_ENTRY_OVERRIDE"
 
 
 # =========================
@@ -479,6 +479,44 @@ LEADERSHIP_MIN_TREND = float(os.environ.get("LEADERSHIP_MIN_TREND", "0.20") or 0
 LEADERSHIP_MIN_MOMENTUM = float(os.environ.get("LEADERSHIP_MIN_MOMENTUM", "0.00") or 0.00)
 LEADERSHIP_MIN_PRIOR_AVG_PEAK = float(os.environ.get("LEADERSHIP_MIN_PRIOR_AVG_PEAK", "1.25") or 1.25)
 
+# =========================
+# 🧠 ADAPTIVE LEADERSHIP TREND ENGINE (v6.6.20)
+# =========================
+ENABLE_ADAPTIVE_LEADERSHIP_TREND = os.environ.get(
+    "ENABLE_ADAPTIVE_LEADERSHIP_TREND",
+    "true"
+).lower() == "true"
+
+ADAPTIVE_LEADER_MIN_TREND = float(os.environ.get("ADAPTIVE_LEADER_MIN_TREND", "0.16") or 0.16)
+ADAPTIVE_CQE_MIN_TREND = float(os.environ.get("ADAPTIVE_CQE_MIN_TREND", "0.17") or 0.17)
+ADAPTIVE_STABLE_LEADER_MIN_TREND = float(os.environ.get("ADAPTIVE_STABLE_LEADER_MIN_TREND", "0.18") or 0.18)
+
+ADAPTIVE_LEADERSHIP_SCORE_THRESHOLD = float(os.environ.get("ADAPTIVE_LEADERSHIP_SCORE_THRESHOLD", "2.5") or 2.5)
+ADAPTIVE_CQE_SCORE_THRESHOLD = float(os.environ.get("ADAPTIVE_CQE_SCORE_THRESHOLD", "4") or 4)
+
+# =========================
+# 🦄 FREE THE UNICORNS ENTRY OVERRIDE (v6.6.21)
+# =========================
+ENABLE_UNICORN_ENTRY_OVERRIDE = os.environ.get(
+    "ENABLE_UNICORN_ENTRY_OVERRIDE",
+    "true"
+).lower() == "true"
+
+UNICORN_MIN_LEADERSHIP_SCORE = float(os.environ.get("UNICORN_MIN_LEADERSHIP_SCORE", "2.0") or 2.0)
+UNICORN_MAX_LEADERSHIP_SCORE = float(os.environ.get("UNICORN_MAX_LEADERSHIP_SCORE", "3.0") or 3.0)
+UNICORN_MIN_CQE_SCORE = float(os.environ.get("UNICORN_MIN_CQE_SCORE", "4.0") or 4.0)
+UNICORN_MIN_PRESSURE_SCORE = float(os.environ.get("UNICORN_MIN_PRESSURE_SCORE", "7.0") or 7.0)
+
+# Allows one extra same-symbol continuation slot only for validated Unicorn Candidates.
+# Normal MAX_SAME_SYMBOL_OPEN remains unchanged for all ordinary trades.
+UNICORN_MAX_SAME_SYMBOL_OPEN = int(os.environ.get("UNICORN_MAX_SAME_SYMBOL_OPEN", "3") or 3)
+
+UNICORN_OVERRIDE_REASONS = {
+    "leadership_climax_delta_blocked",
+    "max_same_symbol_open",
+}
+
+
 # v6.1.4 phase gating:
 # Live data showed explosive score acceleration was climax/exhaustion.
 # Preferred entry state is stable dominant leadership.
@@ -584,6 +622,24 @@ ENABLE_BPT_CQE_LIVE_PROBES = os.environ.get(
 ENABLE_BPT_CQE_LIVE_UPGRADES = os.environ.get(
     "ENABLE_BPT_CQE_LIVE_UPGRADES", "false"
 ).lower() == "true"
+
+# v6.6.19/v6.6.20: real capital only added AFTER CQE confirmation.
+ENABLE_CQE_REAL_SCALEINS = os.environ.get(
+    "ENABLE_CQE_REAL_SCALEINS",
+    "true"
+).lower() == "true"
+
+CQE_REAL_SCALEIN_ALLOWED_ROWS = [
+    "HIGH_MONSTER_ROW",
+    "EXTREME_RUNNER_ROW",
+]
+
+CQE_SCALEIN_MIN_LIVE_PRESSURE = float(os.environ.get("CQE_SCALEIN_MIN_LIVE_PRESSURE", "0.35") or 0.35)
+CQE_SCALEIN_MIN_DELTA_30M = float(os.environ.get("CQE_SCALEIN_MIN_DELTA_30M", "0.00") or 0.00)
+
+# Minimum order protection for tiny OKX scale-ins.
+MIN_OKX_ORDER_NOTIONAL_GBP = float(os.environ.get("MIN_OKX_ORDER_NOTIONAL_GBP", "15.0") or 15.0)
+
 
 BPT_CQE_ENTRY_QUALITY = "BPT_CQE_LIFECYCLE_V1"
 BPT_CQE_PROBE_SIZE_GBP = float(os.environ.get("BPT_CQE_PROBE_SIZE_GBP", "5") or 5)
@@ -3555,6 +3611,124 @@ def build_telegram_persistence_hunter_message(cur, hours=24):
         print(f"⚠️ PH telegram summary failed: {e}", flush=True)
         return f"🧲 <b>Persistence Hunter</b> unavailable: {e}"
 
+
+def calculate_unicorn_pressure_score(leadership_context, momentum, trend):
+    """
+    v6.6.21 FREE THE UNICORNS:
+    Positive-only pressure formula matching the research sweeps that found:
+    Leadership 2-3 + Pressure >= 7 + CQE >= 4 as the strongest expansion predictor.
+    """
+    ctx = leadership_context or {}
+
+    leadership_score = safe_float(
+        first_non_empty(ctx.get("leadership_score"), ctx.get("prior_avg_peak"), default=0),
+        0
+    )
+    delta_30m = safe_float(
+        first_non_empty(ctx.get("leadership_delta_30m"), ctx.get("delta_30m"), default=0),
+        0
+    )
+    cqe_score = safe_float(ctx.get("cqe_quality_score"), 0)
+    momentum_f = safe_float(momentum, 0)
+    trend_f = safe_float(trend, 0)
+
+    pressure = 0
+
+    if leadership_score >= 3:
+        pressure += 3
+    elif leadership_score >= 2:
+        pressure += 2
+    elif leadership_score >= 1:
+        pressure += 1
+
+    if delta_30m > 0.25:
+        pressure += 2
+    elif delta_30m > 0:
+        pressure += 1
+
+    if cqe_score >= 5:
+        pressure += 2
+    elif cqe_score >= 4:
+        pressure += 1
+
+    if momentum_f > 0.7:
+        pressure += 2
+    elif momentum_f > 0.3:
+        pressure += 1
+
+    if trend_f >= 0.20:
+        pressure += 2
+    elif trend_f >= 0.16:
+        pressure += 1
+
+    return pressure
+
+
+def is_unicorn_entry_candidate(leadership_context, momentum, trend):
+    """
+    Returns (is_candidate, pressure_score, reason).
+    This is intentionally strict and only defines the candidate;
+    it does not decide which legacy block reasons are allowed to be overridden.
+    """
+    if not ENABLE_UNICORN_ENTRY_OVERRIDE:
+        return False, 0, "unicorn_override_disabled"
+
+    ctx = leadership_context or {}
+
+    leadership_score = safe_float(
+        first_non_empty(ctx.get("leadership_score"), ctx.get("prior_avg_peak"), default=0),
+        0
+    )
+    cqe_score = safe_float(ctx.get("cqe_quality_score"), 0)
+    pressure_score = calculate_unicorn_pressure_score(ctx, momentum, trend)
+
+    if leadership_score < UNICORN_MIN_LEADERSHIP_SCORE:
+        return False, pressure_score, "unicorn_leadership_too_low"
+
+    if leadership_score >= UNICORN_MAX_LEADERSHIP_SCORE:
+        return False, pressure_score, "unicorn_leadership_too_mature"
+
+    if cqe_score < UNICORN_MIN_CQE_SCORE:
+        return False, pressure_score, "unicorn_cqe_too_low"
+
+    if pressure_score < UNICORN_MIN_PRESSURE_SCORE:
+        return False, pressure_score, "unicorn_pressure_too_low"
+
+    return True, pressure_score, "unicorn_candidate"
+
+
+def apply_unicorn_entry_override(leadership_context, momentum, trend, original_block_reason):
+    """
+    Medium-risk live version:
+    Only parole the two tested Unicorn subclasses:
+    - leadership_climax_delta_blocked
+    - max_same_symbol_open
+
+    Does not override trend_too_low, phase_not_tradable, max_open_trades,
+    OKX position guard, control panel, or exchange tradability.
+    """
+    ctx = leadership_context or {}
+    candidate, pressure_score, candidate_reason = is_unicorn_entry_candidate(ctx, momentum, trend)
+
+    ctx["unicorn_candidate"] = candidate
+    ctx["unicorn_pressure_score"] = pressure_score
+    ctx["unicorn_candidate_reason"] = candidate_reason
+    ctx["unicorn_original_block_reason"] = original_block_reason
+
+    if not candidate:
+        return False, ctx, candidate_reason
+
+    if original_block_reason not in UNICORN_OVERRIDE_REASONS:
+        return False, ctx, "unicorn_block_reason_not_paroled"
+
+    ctx["unicorn_override_triggered"] = True
+    ctx["unicorn_override_reason"] = original_block_reason
+    ctx["market_os_engine"] = "UNICORN_OVERRIDE"
+    ctx["size_scaling_reason"] = f"unicorn_override_{original_block_reason}"
+
+    return True, ctx, f"unicorn_override_{original_block_reason}"
+
+
 def passes_leadership_engine(cur, symbol, momentum, trend):
     if not ENABLE_LEADERSHIP_ENGINE:
         return False, None, "leadership_engine_disabled"
@@ -5092,6 +5266,27 @@ def webhook():
                 leadership_context["cqe_quality_score"] = cqe_context.get("cqe_quality_score")
                 leadership_context["cqe_context"] = cqe_context
 
+                # v6.6.21 FREE THE UNICORNS:
+                # If the only reason the leadership gate blocked this was a tested Unicorn subclass,
+                # allow it through to the normal OKX / max-open / sizing checks.
+                if not entry_allowed and block_reason == "leadership_climax_delta_blocked":
+                    unicorn_ok, leadership_context, unicorn_reason = apply_unicorn_entry_override(
+                        leadership_context,
+                        momentum,
+                        trend,
+                        block_reason
+                    )
+                    if unicorn_ok:
+                        entry_allowed = True
+                        block_reason = unicorn_reason
+                        print(
+                            f"🦄 UNICORN OVERRIDE | {symbol} | {unicorn_reason} | "
+                            f"pressure={leadership_context.get('unicorn_pressure_score')} | "
+                            f"score={leadership_context.get('prior_avg_peak')} | "
+                            f"cqe={leadership_context.get('cqe_quality_score')}",
+                            flush=True
+                        )
+
             if entry_allowed:
                 entry_quality = classify_leadership_tier(leadership_context["prior_avg_peak"])
                 leadership_context["leadership_max_60m"] = max(
@@ -5121,8 +5316,28 @@ def webhook():
                     same_symbol_count = get_open_same_symbol_real_count(cur, symbol)
 
                     if same_symbol_count >= MAX_SAME_SYMBOL_OPEN:
-                        entry_allowed = False
-                        block_reason = "max_same_symbol_open"
+                        # v6.6.21 FREE THE UNICORNS:
+                        # Allow one extra same-symbol continuation only if the signal matches
+                        # the validated Unicorn Candidate profile.
+                        unicorn_ok, leadership_context, unicorn_reason = apply_unicorn_entry_override(
+                            leadership_context,
+                            momentum,
+                            trend,
+                            "max_same_symbol_open"
+                        )
+
+                        if unicorn_ok and same_symbol_count < UNICORN_MAX_SAME_SYMBOL_OPEN:
+                            entry_allowed = True
+                            block_reason = unicorn_reason
+                            print(
+                                f"🦄 UNICORN SAME-SYMBOL CONTINUATION | {symbol} | "
+                                f"same={same_symbol_count}/{MAX_SAME_SYMBOL_OPEN} -> allowed up to {UNICORN_MAX_SAME_SYMBOL_OPEN} | "
+                                f"pressure={leadership_context.get('unicorn_pressure_score')}",
+                                flush=True
+                            )
+                        else:
+                            entry_allowed = False
+                            block_reason = "max_same_symbol_open"
 
 
             # v6.6 ROT_MICRO: independent tiny continuation harvester.
@@ -5199,7 +5414,13 @@ def webhook():
                     "cqe_trend_std_30m": (leadership_context.get("cqe_context") or {}).get("cqe_trend_std_30m"),
                     "cqe_min_trend_30m": (leadership_context.get("cqe_context") or {}).get("cqe_min_trend_30m"),
                     "cqe_trend_range_30m": (leadership_context.get("cqe_context") or {}).get("cqe_trend_range_30m"),
-                    "cqe_positive_trend_ratio_30m": (leadership_context.get("cqe_context") or {}).get("cqe_positive_trend_ratio_30m")
+                    "cqe_positive_trend_ratio_30m": (leadership_context.get("cqe_context") or {}).get("cqe_positive_trend_ratio_30m"),
+                    "unicorn_candidate": leadership_context.get("unicorn_candidate"),
+                    "unicorn_pressure_score": leadership_context.get("unicorn_pressure_score"),
+                    "unicorn_candidate_reason": leadership_context.get("unicorn_candidate_reason"),
+                    "unicorn_override_triggered": leadership_context.get("unicorn_override_triggered"),
+                    "unicorn_override_reason": leadership_context.get("unicorn_override_reason"),
+                    "unicorn_original_block_reason": leadership_context.get("unicorn_original_block_reason")
                 })
         except Exception as e:
             print(f"⚠️ signals_raw intelligence update skipped: {e}", flush=True)
@@ -5322,6 +5543,7 @@ def webhook():
                         f"🚀 <b>ENTRY</b> | {symbol} LONG\n"
                         f"{entry_quality} | {fmt_money(entry_trade_size)} | OKX {fmt_money(entry_quote_size)}\n"
                         f"Entry {price} | T/M {fmt_num(trend)} / {fmt_num(momentum)}\n"
+                        f"{'🦄 Unicorn override: ' + str(leadership_context.get('unicorn_override_reason')) + ' | P ' + str(leadership_context.get('unicorn_pressure_score')) + chr(10) if leadership_context.get('unicorn_override_triggered') else ''}"
                         f"Phase: {short_phase(leadership_context.get('lifecycle_phase') or leadership_context.get('leadership_phase'))} "
                         f"({leadership_context.get('leadership_transition') or 'n/a'})\n"
                         f"Score {fmt_num(leadership_context.get('prior_avg_peak'))} | "
@@ -6818,3 +7040,28 @@ except Exception as e:
 # Minimum order protection added to prevent
 # tiny OKX scale-ins / exits failing due to
 # exchange minimum notional limits.
+
+# =========================
+# PATCH NOTE v6.6.21
+# =========================
+# FREE THE UNICORNS ENTRY OVERRIDE
+#
+# Data-backed medium version:
+# - Defines Unicorn Candidate as:
+#     Leadership 2 <= score < 3
+#     CQE >= 4
+#     Pressure >= 7
+# - Live override ONLY for:
+#     leadership_climax_delta_blocked
+#     max_same_symbol_open
+# - Same-symbol override allows one extra continuation slot:
+#     normal MAX_SAME_SYMBOL_OPEN remains unchanged
+#     unicorn continuation cap = UNICORN_MAX_SAME_SYMBOL_OPEN
+# - Does NOT override:
+#     leadership_trend_too_low
+#     leadership_phase_not_tradable
+#     max_open_trades
+#     OKX position guard
+#     control panel
+#     exits
+#     sizing
