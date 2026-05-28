@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v6.6.13
-# TITLE: V6.6.13 ENTRY PERSISTENCE FIRST FIX
+# VERSION: v6.6.14
+# TITLE: V6.6.14 REAL ENTRY DB COMMIT HARDENING
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v6.6.13 ENTRY PERSISTENCE FIRST FIX RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v6.6.14 REAL ENTRY DB COMMIT HARDENING RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -356,7 +356,7 @@ MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 3
 
 
 
-DATA_VERSION = "v6.6.12_EXCHANGE_RECONCILIATION_FIX"
+DATA_VERSION = "v6.6.14_REAL_ENTRY_DB_COMMIT_HARDENING"
 
 
 # =========================
@@ -677,7 +677,7 @@ OKX_API_PASSPHRASE = os.environ.get("OKX_API_PASSPHRASE")
 OKX_BASE_URL = os.environ.get("OKX_BASE_URL", "https://www.okx.com").rstrip("/")
 
 ENABLE_ORDER_LOGGING = os.environ.get("ENABLE_ORDER_LOGGING", "true").lower() == "true"
-ENABLE_LIVE_ORDERS = os.environ.get("ENABLE_LIVE_ORDERS", "false").lower() == "true"
+ENABLE_LIVE_ORDERS = os.environ.get("ENABLE_LIVE_ORDERS", "true").lower() == "true"
 
 # v6.6.12: exchange truth safety guards. These prevent duplicate live buys
 # if DB open-trade reconstruction/persistence is out of sync with OKX.
@@ -4252,6 +4252,18 @@ def open_trade(cur, symbol, direction, price, momentum, trend, quality,
 
     trade_id = cur.fetchone()[0]
 
+    # v6.6.14 CRITICAL REAL ENTRY FIX:
+    # Persist the base REAL trade row immediately after INSERT and BEFORE any
+    # telemetry, Telegram, OKX, lifecycle, or later helper work.
+    # This prevents the dangerous failure mode:
+    # OKX buy succeeds -> later exception/rollback -> bot_trades_v4 row disappears.
+    try:
+        cur.connection.commit()
+        print(f"✅ REAL BASE TRADE ROW PERSISTED FIRST | {symbol} | id={trade_id}", flush=True)
+    except Exception as e:
+        print(f"🚨 REAL BASE TRADE ROW EARLY COMMIT FAILED | {symbol} | id={trade_id} | {e}", flush=True)
+        raise
+
     safe_update_trade_telemetry(cur, trade_id, {
         "entry_architecture": quality,
         "trade_size_gbp": get_trade_size_for_context(quality, leadership_context),
@@ -4313,6 +4325,27 @@ def open_trade(cur, symbol, direction, price, momentum, trend, quality,
         )
     except Exception as e:
         print(f"⚠️ TELEMETRY entry update failed: {e}", flush=True)
+        try:
+            cur.connection.rollback()
+            print(f"⚠️ TELEMETRY transaction rolled back safely after base row persisted | {symbol} | id={trade_id}", flush=True)
+        except Exception as rb_e:
+            print(f"⚠️ TELEMETRY rollback failed | {symbol} | id={trade_id} | {rb_e}", flush=True)
+
+    # v6.6.14: verify the base row is still visible before any OKX order is allowed.
+    try:
+        cur.execute("SELECT COUNT(*) FROM bot_trades_v4 WHERE id = %s", (str(trade_id),))
+        visible_count = cur.fetchone()[0] or 0
+        if visible_count < 1:
+            raise Exception("base_trade_row_not_visible_after_commit")
+        cur.connection.commit()
+        print(f"✅ REAL BASE TRADE ROW VERIFIED VISIBLE | {symbol} | id={trade_id}", flush=True)
+    except Exception as e:
+        print(f"🚨 REAL BASE TRADE ROW VERIFY FAILED | {symbol} | id={trade_id} | {e}", flush=True)
+        try:
+            cur.connection.rollback()
+        except Exception:
+            pass
+        raise
 
     return trade_id
 
