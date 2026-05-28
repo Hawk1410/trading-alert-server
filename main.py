@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v6.6.17
+# VERSION: v6.6.18
 # TITLE: V6.6.15 ENTRY SNAPSHOT FREEZE + CONTROL PANEL
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v6.6.17 TELEMETRY ALIAS + BPT TIMEZONE FIX RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v6.6.18 LIVE LEADERSHIP PRESSURE FIX RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -363,7 +363,7 @@ MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 3
 
 
 
-DATA_VERSION = "v6.6.17_TELEMETRY_ALIAS_BPT_TIMEZONE_FIX"
+DATA_VERSION = "v6.6.18_LIVE_LEADERSHIP_PRESSURE_FIX"
 
 
 # =========================
@@ -947,6 +947,153 @@ def ensure_leadership_state_history_table(cur):
         CREATE INDEX IF NOT EXISTS idx_leadership_state_history_snapshot_time
         ON leadership_state_history(snapshot_time)
     """)
+
+
+def live_pressure_sql_expr():
+    """
+    v6.6.18:
+    Live leadership pressure is derived from recent raw market signals, not the
+    slower/future-quality leadership_state_history score. This gives moving
+    deltas during short/none/weak markets and prevents frozen lifecycle displays.
+    """
+    return """
+        CASE
+            WHEN UPPER(COALESCE(decision,'')) LIKE '%LONG%'
+                THEN GREATEST(COALESCE(momentum,0),0) * 0.7 + GREATEST(COALESCE(trend,0),0) * 1.3
+            WHEN UPPER(COALESCE(decision,'')) LIKE '%SHORT%'
+                THEN -1 * (ABS(COALESCE(momentum,0)) * 0.7 + ABS(COALESCE(trend,0)) * 1.3)
+            ELSE COALESCE(momentum,0) * 0.4 + COALESCE(trend,0) * 0.6
+        END
+    """
+
+
+def get_live_leadership_pressure_context(cur, symbol):
+    """
+    Returns live pressure context from signals_raw.
+    This complements leadership_state_history, which is a slower structural
+    quality/history table and can legitimately stay flat for long periods.
+    """
+    try:
+        cur.execute(f"""
+            WITH scored AS (
+                SELECT
+                    symbol,
+                    timestamp,
+                    momentum,
+                    trend,
+                    decision,
+                    {live_pressure_sql_expr()} AS live_pressure
+                FROM signals_raw
+                WHERE symbol = %s
+                  AND timestamp >= NOW() - INTERVAL '90 minutes'
+            ),
+            latest AS (
+                SELECT *
+                FROM scored
+                ORDER BY timestamp DESC
+                LIMIT 1
+            ),
+            agg AS (
+                SELECT
+                    AVG(live_pressure) FILTER (WHERE timestamp >= NOW() - INTERVAL '5 minutes') AS pressure_5m,
+                    AVG(live_pressure) FILTER (WHERE timestamp >= NOW() - INTERVAL '15 minutes') AS pressure_15m,
+                    AVG(live_pressure) FILTER (WHERE timestamp >= NOW() - INTERVAL '30 minutes') AS pressure_30m,
+                    AVG(live_pressure) FILTER (WHERE timestamp >= NOW() - INTERVAL '60 minutes') AS pressure_60m,
+                    COUNT(*) FILTER (WHERE timestamp >= NOW() - INTERVAL '30 minutes') AS signals_30m,
+                    SUM(CASE WHEN UPPER(COALESCE(decision,'')) LIKE '%LONG%' THEN 1 ELSE 0 END)
+                        FILTER (WHERE timestamp >= NOW() - INTERVAL '30 minutes') AS long_signals_30m,
+                    SUM(CASE WHEN UPPER(COALESCE(decision,'')) LIKE '%SHORT%' THEN 1 ELSE 0 END)
+                        FILTER (WHERE timestamp >= NOW() - INTERVAL '30 minutes') AS short_signals_30m
+                FROM scored
+            )
+            SELECT
+                latest.timestamp,
+                latest.momentum,
+                latest.trend,
+                latest.decision,
+                latest.live_pressure,
+                agg.pressure_5m,
+                agg.pressure_15m,
+                agg.pressure_30m,
+                agg.pressure_60m,
+                agg.signals_30m,
+                agg.long_signals_30m,
+                agg.short_signals_30m
+            FROM latest
+            CROSS JOIN agg
+        """, (symbol,))
+        row = cur.fetchone()
+        if not row:
+            return {
+                "live_pressure_available": False,
+                "live_pressure_phase": "NO_RECENT_SIGNALS",
+            }
+
+        (
+            latest_ts,
+            momentum,
+            trend,
+            decision,
+            latest_pressure,
+            pressure_5m,
+            pressure_15m,
+            pressure_30m,
+            pressure_60m,
+            signals_30m,
+            long_signals_30m,
+            short_signals_30m,
+        ) = row
+
+        p5 = safe_float(pressure_5m, None)
+        p15 = safe_float(pressure_15m, None)
+        p30 = safe_float(pressure_30m, None)
+        p60 = safe_float(pressure_60m, None)
+
+        live_delta_30m = (p15 - p60) if p15 is not None and p60 is not None else None
+        live_delta_15m = (p5 - p30) if p5 is not None and p30 is not None else None
+
+        if p30 is None:
+            phase = "NO_PRESSURE"
+        elif p30 >= 0.75 and (live_delta_30m or 0) > 0:
+            phase = "LIVE_EXPANDING"
+        elif p30 >= 0.75:
+            phase = "LIVE_STRONG_FLAT"
+        elif p30 >= 0.35 and (live_delta_30m or 0) > 0:
+            phase = "LIVE_ROTATION_IMPROVING"
+        elif p30 >= 0.35:
+            phase = "LIVE_WATCH"
+        elif p30 < 0:
+            phase = "LIVE_BEARISH_PRESSURE"
+        else:
+            phase = "LIVE_WEAK"
+
+        return {
+            "live_pressure_available": True,
+            "live_pressure_phase": phase,
+            "live_pressure_latest": safe_float(latest_pressure, None),
+            "live_pressure_5m": p5,
+            "live_pressure_15m": p15,
+            "live_pressure_30m": p30,
+            "live_pressure_60m": p60,
+            "live_delta_15m": live_delta_15m,
+            "live_delta_30m": live_delta_30m,
+            "live_signal_timestamp": latest_ts,
+            "live_momentum": safe_float(momentum, None),
+            "live_trend": safe_float(trend, None),
+            "live_decision": decision,
+            "live_signals_30m": safe_int(signals_30m, 0),
+            "live_long_signals_30m": safe_int(long_signals_30m, 0),
+            "live_short_signals_30m": safe_int(short_signals_30m, 0),
+        }
+
+    except Exception as e:
+        print(f"⚠️ live leadership pressure context failed for {symbol}: {e}", flush=True)
+        safe_telemetry_rollback(cur)
+        return {
+            "live_pressure_available": False,
+            "live_pressure_phase": "LIVE_PRESSURE_ERROR",
+        }
+
 
 # =========================
 # TELEGRAM HELPERS
@@ -2063,13 +2210,15 @@ def get_leadership_context(cur, symbol):
     lifecycle_ctx = get_lifecycle_context(cur, symbol)
     lifecycle_phase = lifecycle_ctx.get("lifecycle_phase") or phase
 
+    live_score = first_non_empty(lifecycle_ctx.get("live_pressure_30m"), lifecycle_ctx.get("leadership_score"), leadership_score)
+    live_delta = first_non_empty(lifecycle_ctx.get("live_pressure_delta_30m"), lifecycle_ctx.get("leadership_delta_30m"), delta_30m)
     return {
         "prior_successes": successful_signals or 0,
         "prior_runners": runners or 0,
-        "prior_avg_peak": leadership_score,
-        "leadership_score": leadership_score,
+        "prior_avg_peak": live_score,
+        "leadership_score": live_score,
         "score_30m_ago": score_30m_ago_float,
-        "delta_30m": delta_30m,
+        "delta_30m": live_delta,
         "leadership_phase": phase,
         "lifecycle_phase": lifecycle_phase,
         "prior_lifecycle_phase": lifecycle_ctx.get("prior_lifecycle_phase"),
@@ -3521,6 +3670,19 @@ def get_lifecycle_context(cur, symbol):
     delta_30 = score - score_30 if score_30 is not None else None
     delta_60 = score - score_60 if score_60 is not None else None
 
+    # v6.6.18: augment static structural score with live signal pressure.
+    live_ctx = get_live_leadership_pressure_context(cur, symbol)
+    live_pressure_30m = live_ctx.get("live_pressure_30m")
+    live_delta_30m = live_ctx.get("live_delta_30m")
+    if live_pressure_30m is not None:
+        score = live_pressure_30m
+        score_30 = live_ctx.get("live_pressure_60m")
+        delta_30 = live_delta_30m
+        delta_15 = live_ctx.get("live_delta_15m")
+        delta_5 = live_ctx.get("live_pressure_latest")
+        # Keep score_60 as pressure_60 for telemetry meaning.
+        score_60 = live_ctx.get("live_pressure_60m")
+
     current_phase = phase_from_score(score)
     prior_phase = phase_from_score(score_30) if score_30 is not None else None
     transition = f"{prior_phase}->{current_phase}" if prior_phase else None
@@ -3625,6 +3787,10 @@ def get_lifecycle_context(cur, symbol):
         "snapshot_time": snapshot_time,
         "shadow_emergence_detected": shadow_emergence,
         "shadow_emergence_reason": "controlled_ignition_candidate" if shadow_emergence else None,
+        "live_pressure_phase": live_ctx.get("live_pressure_phase") if 'live_ctx' in locals() else None,
+        "live_pressure_30m": live_ctx.get("live_pressure_30m") if 'live_ctx' in locals() else None,
+        "live_pressure_delta_30m": live_ctx.get("live_delta_30m") if 'live_ctx' in locals() else None,
+        "live_signal_timestamp": live_ctx.get("live_signal_timestamp") if 'live_ctx' in locals() else None,
         **breadth,
     }
 
@@ -3651,58 +3817,100 @@ def format_leadership_compact(ctx):
 
 def get_lifecycle_dashboard_text(cur, limit=10):
     try:
-        ensure_leadership_state_history_table(cur)
-        cur.execute("""
-            WITH latest AS (
-                SELECT DISTINCT ON (symbol) symbol, snapshot_time, leadership_score,
-                       successful_signals, runners, monsters, avg_worst, leadership_mode
-                FROM leadership_state_history
-                ORDER BY symbol, snapshot_time DESC
-            ), lagged AS (
-                SELECT l.*, (
-                    SELECT p.leadership_score
-                    FROM leadership_state_history p
-                    WHERE p.symbol = l.symbol
-                      AND p.snapshot_time <= l.snapshot_time - INTERVAL '30 minutes'
-                    ORDER BY p.snapshot_time DESC
-                    LIMIT 1
-                ) AS score_30m_ago
+        cur.execute(f"""
+            WITH scored AS (
+                SELECT
+                    symbol,
+                    timestamp,
+                    momentum,
+                    trend,
+                    decision,
+                    {live_pressure_sql_expr()} AS live_pressure
+                FROM signals_raw
+                WHERE timestamp >= NOW() - INTERVAL '90 minutes'
+            ),
+            latest AS (
+                SELECT DISTINCT ON (symbol)
+                    symbol,
+                    timestamp,
+                    momentum,
+                    trend,
+                    decision,
+                    live_pressure
+                FROM scored
+                ORDER BY symbol, timestamp DESC
+            ),
+            agg AS (
+                SELECT
+                    symbol,
+                    AVG(live_pressure) FILTER (WHERE timestamp >= NOW() - INTERVAL '5 minutes') AS p5,
+                    AVG(live_pressure) FILTER (WHERE timestamp >= NOW() - INTERVAL '15 minutes') AS p15,
+                    AVG(live_pressure) FILTER (WHERE timestamp >= NOW() - INTERVAL '30 minutes') AS p30,
+                    AVG(live_pressure) FILTER (WHERE timestamp >= NOW() - INTERVAL '60 minutes') AS p60,
+                    COUNT(*) FILTER (WHERE timestamp >= NOW() - INTERVAL '30 minutes') AS signals_30m
+                FROM scored
+                GROUP BY symbol
+            ),
+            combined AS (
+                SELECT
+                    l.symbol,
+                    l.timestamp,
+                    l.live_pressure,
+                    l.decision,
+                    a.p15,
+                    a.p30,
+                    a.p60,
+                    (a.p15 - a.p60) AS live_delta,
+                    a.signals_30m
                 FROM latest l
-            ), classified AS (
-                SELECT *, leadership_score - score_30m_ago AS delta_30m,
-                    CASE
-                        WHEN score_30m_ago IS NULL THEN 'NO_PRIOR'
-                        WHEN leadership_score BETWEEN %s AND %s AND (leadership_score - score_30m_ago) BETWEEN %s AND %s THEN 'IGNITION'
-                        WHEN leadership_score >= %s AND (leadership_score - score_30m_ago) BETWEEN %s AND %s THEN 'STABLE'
-                        WHEN (leadership_score - score_30m_ago) > %s THEN 'CLIMAX'
-                        WHEN leadership_score >= 1.25 AND (leadership_score - score_30m_ago) < -0.30 THEN 'DECAY'
-                        WHEN leadership_score >= 0.75 THEN 'WATCH'
-                        ELSE 'WEAK'
-                    END AS lifecycle_phase
-                FROM lagged
+                JOIN agg a USING(symbol)
             )
-            SELECT symbol, lifecycle_phase, ROUND(leadership_score::numeric,3),
-                   ROUND(delta_30m::numeric,3), successful_signals, runners, ROUND(avg_worst::numeric,3)
-            FROM classified
-            ORDER BY CASE lifecycle_phase WHEN 'IGNITION' THEN 1 WHEN 'STABLE' THEN 2 WHEN 'WATCH' THEN 3 WHEN 'CLIMAX' THEN 4 WHEN 'DECAY' THEN 5 ELSE 6 END,
-                     leadership_score DESC
+            SELECT
+                symbol,
+                CASE
+                    WHEN p30 >= 0.75 AND live_delta > 0 THEN 'EXPANDING'
+                    WHEN p30 >= 0.75 THEN 'STRONG_FLAT'
+                    WHEN p30 >= 0.35 AND live_delta > 0 THEN 'ROTATION_UP'
+                    WHEN p30 >= 0.35 THEN 'WATCH'
+                    WHEN p30 < 0 THEN 'BEARISH'
+                    ELSE 'WEAK'
+                END AS lifecycle_phase,
+                ROUND(p30::numeric, 3) AS pressure_30m,
+                ROUND(live_delta::numeric, 3) AS delta_30m,
+                ROUND(live_pressure::numeric, 3) AS latest_pressure,
+                decision,
+                signals_30m
+            FROM combined
+            ORDER BY
+                CASE
+                    WHEN p30 >= 0.75 AND live_delta > 0 THEN 1
+                    WHEN p30 >= 0.75 THEN 2
+                    WHEN p30 >= 0.35 AND live_delta > 0 THEN 3
+                    WHEN p30 >= 0.35 THEN 4
+                    WHEN p30 < 0 THEN 6
+                    ELSE 5
+                END,
+                p30 DESC NULLS LAST
             LIMIT %s
-        """, (
-            CONTROLLED_IGNITION_MIN_SCORE, CONTROLLED_IGNITION_MAX_SCORE,
-            CONTROLLED_IGNITION_DELTA_MIN, CONTROLLED_IGNITION_DELTA_MAX,
-            STABLE_LEADER_MIN_SCORE, STABLE_LEADER_DELTA_MIN, STABLE_LEADER_DELTA_MAX,
-            CLIMAX_LEADER_DELTA_BLOCK, limit,
-        ))
+        """, (limit,))
         rows = cur.fetchall()
         if not rows:
             return "Lifecycle: n/a"
         lines = []
-        for sym, phase, score, delta, successes, runners, avg_worst in rows:
-            icon = {"IGNITION":"🚀", "STABLE":"✅", "CLIMAX":"🔥", "DECAY":"📉", "WATCH":"👀", "WEAK":"⚪"}.get(phase, "⚪")
-            lines.append(f"{icon} {sym} {phase} | {score} | Δ{delta} | S{successes} R{runners} | W{avg_worst}")
+        for sym, phase, p30, delta, latest_pressure, decision, sigs in rows:
+            icon = {
+                "EXPANDING": "🚀",
+                "STRONG_FLAT": "✅",
+                "ROTATION_UP": "👀",
+                "WATCH": "⚪",
+                "BEARISH": "📉",
+                "WEAK": "⚪",
+            }.get(phase, "⚪")
+            lines.append(f"{icon} {sym} {phase} | P30 {p30} | Δ{delta} | latest {latest_pressure} | {decision or 'NONE'} | sigs{sigs}")
         return "\n".join(lines)
     except Exception as e:
-        print(f"⚠️ lifecycle dashboard failed: {e}", flush=True)
+        print(f"⚠️ live pressure lifecycle dashboard failed: {e}", flush=True)
+        safe_telemetry_rollback(cur)
         return "Lifecycle: n/a"
 
 def get_latest_leadership_state(cur, symbol):
@@ -3755,35 +3963,62 @@ def format_leadership_state_for_telegram(state):
 def get_top_leaders_text(cur, limit=5):
     try:
         ensure_leadership_state_history_table(cur)
-        cur.execute("""
-            WITH latest AS (
-                SELECT MAX(snapshot_time) AS snapshot_time
-                FROM leadership_state_history
+        cur.execute(f"""
+            WITH scored AS (
+                SELECT
+                    symbol,
+                    timestamp,
+                    momentum,
+                    trend,
+                    decision,
+                    {live_pressure_sql_expr()} AS live_pressure
+                FROM signals_raw
+                WHERE timestamp >= NOW() - INTERVAL '90 minutes'
+            ),
+            latest AS (
+                SELECT DISTINCT ON (symbol)
+                    symbol,
+                    timestamp,
+                    momentum,
+                    trend,
+                    decision,
+                    live_pressure
+                FROM scored
+                ORDER BY symbol, timestamp DESC
+            ),
+            agg AS (
+                SELECT
+                    symbol,
+                    AVG(live_pressure) FILTER (WHERE timestamp >= NOW() - INTERVAL '30 minutes') AS pressure_30m,
+                    AVG(live_pressure) FILTER (WHERE timestamp >= NOW() - INTERVAL '60 minutes') AS pressure_60m,
+                    COUNT(*) FILTER (WHERE timestamp >= NOW() - INTERVAL '30 minutes') AS signals_30m
+                FROM scored
+                GROUP BY symbol
             )
             SELECT
                 l.symbol,
-                ROUND(l.leadership_score::numeric, 3),
-                l.leadership_mode,
-                l.successful_signals,
-                l.runners,
-                l.tradable
-            FROM leadership_state_history l
-            JOIN latest x
-              ON x.snapshot_time = l.snapshot_time
-            ORDER BY l.leadership_score DESC NULLS LAST
+                ROUND(l.live_pressure::numeric, 3) AS latest_pressure,
+                ROUND(a.pressure_30m::numeric, 3) AS pressure_30m,
+                ROUND((a.pressure_30m - a.pressure_60m)::numeric, 3) AS live_delta,
+                l.decision,
+                a.signals_30m
+            FROM latest l
+            JOIN agg a USING(symbol)
+            ORDER BY a.pressure_30m DESC NULLS LAST
             LIMIT %s
         """, (limit,))
         rows = cur.fetchall()
         if not rows:
-            return "Top leaders: n/a"
+            return "Top live pressure leaders: n/a"
         parts = []
-        for symbol, score, mode, successes, runners, tradable in rows:
-            icon = "✅" if tradable else "👀"
-            parts.append(f"{icon} {symbol} {score} {mode} S{successes} R{runners}")
+        for symbol, latest_pressure, pressure_30m, live_delta, decision, sigs in rows:
+            icon = "✅" if (pressure_30m or 0) >= 0.75 and (live_delta or 0) > 0 else ("👀" if (pressure_30m or 0) >= 0.35 else "⚪")
+            parts.append(f"{icon} {symbol} P30 {pressure_30m} | Δ{live_delta} | latest {latest_pressure} | {decision or 'NONE'} | sigs{sigs}")
         return "\n".join(parts)
     except Exception as e:
-        print(f"⚠️ top leaders lookup failed: {e}", flush=True)
-        return "Top leaders: n/a"
+        print(f"⚠️ top live pressure leaders lookup failed: {e}", flush=True)
+        safe_telemetry_rollback(cur)
+        return "Top live pressure leaders: n/a"
 
 def get_latest_signal_state(cur, symbol):
     try:
@@ -4016,6 +4251,11 @@ def get_ranked_leadership_context_for_telemetry(cur, symbol):
         leadership_score_f = safe_float(leadership_score, 0.0)
         leadership_rank_i = safe_int(leadership_rank, None)
 
+        # v6.6.18: use live signal pressure for velocity/phase when available.
+        live_ctx = get_live_leadership_pressure_context(cur, symbol)
+        if live_ctx.get("live_pressure_30m") is not None:
+            leadership_score_f = safe_float(live_ctx.get("live_pressure_30m"), leadership_score_f)
+
         cur.execute("""
             SELECT
                 leadership_score,
@@ -4033,6 +4273,8 @@ def get_ranked_leadership_context_for_telemetry(cur, symbol):
             if prev_score is not None
             else None
         )
+        if 'live_ctx' in locals() and live_ctx.get("live_delta_30m") is not None:
+            leadership_velocity = safe_float(live_ctx.get("live_delta_30m"), leadership_velocity)
 
         cur.execute("""
             WITH ranked_history AS (
@@ -4127,6 +4369,10 @@ def get_ranked_leadership_context_for_telemetry(cur, symbol):
             "top3_concentration": safe_float(top3_concentration, None),
             "market_leadership_quality": safe_float(market_leadership_quality, None),
             "leader_rotation_velocity": leader_rotation_velocity,
+            "live_pressure_phase": live_ctx.get("live_pressure_phase") if 'live_ctx' in locals() else None,
+            "live_pressure_30m": live_ctx.get("live_pressure_30m") if 'live_ctx' in locals() else None,
+            "live_pressure_delta_30m": live_ctx.get("live_delta_30m") if 'live_ctx' in locals() else None,
+            "live_signal_timestamp": live_ctx.get("live_signal_timestamp") if 'live_ctx' in locals() else None,
         }
 
     except Exception as e:
@@ -6458,3 +6704,13 @@ except Exception as e:
 # - Fixed TELEMETRY leadership context SQL ambiguity by qualifying ranked.snapshot_time.
 # - Fixed BPT CQE lifecycle timezone subtraction by normalising now/opened_at with ensure_utc().
 # - Keeps strategy logic unchanged.
+
+
+# =========================
+# PATCH NOTE v6.6.18
+# =========================
+# - Adds live leadership pressure from signals_raw momentum/trend/decision.
+# - /leaders and /lifecycle now show moving live pressure and deltas.
+# - Entry leadership context now prefers live pressure for score/delta snapshots.
+# - leadership_state_history remains structural history; signals_raw supplies live market pressure.
+# - Strategy thresholds unchanged except entry telemetry context source is made live.
