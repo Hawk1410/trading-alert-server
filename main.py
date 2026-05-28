@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v6.6.15
+# VERSION: v6.6.17
 # TITLE: V6.6.15 ENTRY SNAPSHOT FREEZE + CONTROL PANEL
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v6.6.15 ENTRY SNAPSHOT FREEZE + CONTROL PANEL RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v6.6.17 TELEMETRY ALIAS + BPT TIMEZONE FIX RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -363,7 +363,7 @@ MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 3
 
 
 
-DATA_VERSION = "v6.6.15_ENTRY_SNAPSHOT_CONTROL_PANEL"
+DATA_VERSION = "v6.6.17_TELEMETRY_ALIAS_BPT_TIMEZONE_FIX"
 
 
 # =========================
@@ -2743,8 +2743,10 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
     if peak_time_minutes is None:
         peak_time_minutes = 999999
 
-    metrics = get_bpt_confirmation_metrics(cur, sym, opened_at, entry_price, now)
-    age_mins = (now - opened_at).total_seconds() / 60
+    safe_now = ensure_utc(now)
+    safe_opened_at = ensure_utc(opened_at)
+    metrics = get_bpt_confirmation_metrics(cur, sym, safe_opened_at, entry_price, safe_now)
+    age_mins = (safe_now - safe_opened_at).total_seconds() / 60
     peak_for_confirmation = max(float(current_peak or 0), metrics["peak_window"])
 
     confirmed = (
@@ -2865,8 +2867,13 @@ def process_bpt_cqe_lifecycle_trades(cur, symbol, price, momentum, trend, now):
         if direction != "LONG" or not entry_price:
             continue
 
+        safe_now = ensure_utc(now)
+        safe_opened_at = ensure_utc(opened_at)
+
         pnl_percent = ((price - entry_price) / entry_price) * 100
-        mins = (now - opened_at).total_seconds() / 60
+        mins = (safe_now - safe_opened_at).total_seconds() / 60
+        opened_at = safe_opened_at
+        now = safe_now
         current_peak = float(peak_pnl or 0)
         old_peak = current_peak
 
@@ -3948,39 +3955,39 @@ def get_ranked_leadership_context_for_telemetry(cur, symbol):
             ),
             ranked AS (
                 SELECT
-                    symbol,
-                    snapshot_time,
-                    leadership_score,
-                    avg_peak,
-                    avg_worst,
-                    leadership_mode,
-                    RANK() OVER (ORDER BY leadership_score DESC NULLS LAST) AS leadership_rank,
-                    COUNT(*) FILTER (WHERE leadership_score >= 2.0) OVER () AS leader_count_2p0,
-                    COUNT(*) FILTER (WHERE leadership_score >= 1.25) OVER () AS leader_count_1p25,
-                    AVG(leadership_score) OVER () AS market_leadership_quality,
-                    SUM(leadership_score) OVER () AS total_leadership_score
+                    l.symbol,
+                    l.snapshot_time,
+                    l.leadership_score,
+                    l.avg_peak,
+                    l.avg_worst,
+                    l.leadership_mode,
+                    RANK() OVER (ORDER BY l.leadership_score DESC NULLS LAST) AS leadership_rank,
+                    COUNT(*) FILTER (WHERE l.leadership_score >= 2.0) OVER () AS leader_count_2p0,
+                    COUNT(*) FILTER (WHERE l.leadership_score >= 1.25) OVER () AS leader_count_1p25,
+                    AVG(l.leadership_score) OVER () AS market_leadership_quality,
+                    SUM(l.leadership_score) OVER () AS total_leadership_score
                 FROM leadership_state_history l
                 JOIN latest_snapshot x
                   ON x.snapshot_time = l.snapshot_time
             )
             SELECT
-                symbol,
-                snapshot_time,
-                leadership_score,
-                avg_peak,
-                avg_worst,
-                leadership_mode,
-                leadership_rank,
-                leader_count_2p0,
-                leader_count_1p25,
-                market_leadership_quality,
+                ranked.symbol,
+                ranked.snapshot_time,
+                ranked.leadership_score,
+                ranked.avg_peak,
+                ranked.avg_worst,
+                ranked.leadership_mode,
+                ranked.leadership_rank,
+                ranked.leader_count_2p0,
+                ranked.leader_count_1p25,
+                ranked.market_leadership_quality,
                 CASE
-                    WHEN total_leadership_score > 0
-                    THEN leadership_score / total_leadership_score
+                    WHEN ranked.total_leadership_score > 0
+                    THEN ranked.leadership_score / ranked.total_leadership_score
                     ELSE NULL
                 END AS top3_concentration
             FROM ranked
-            WHERE symbol = %s
+            WHERE ranked.symbol = %s
             LIMIT 1
         """, (symbol,))
         row = cur.fetchone()
@@ -6443,3 +6450,11 @@ except Exception as e:
 # Replaced utcnow() occurrences: 0
 #
 # No strategy logic changed.
+
+
+# =========================
+# PATCH NOTE v6.6.17
+# =========================
+# - Fixed TELEMETRY leadership context SQL ambiguity by qualifying ranked.snapshot_time.
+# - Fixed BPT CQE lifecycle timezone subtraction by normalising now/opened_at with ensure_utc().
+# - Keeps strategy logic unchanged.
