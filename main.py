@@ -958,9 +958,9 @@ def live_pressure_sql_expr():
     """
     return """
         CASE
-            WHEN UPPER(COALESCE(decision,'')) LIKE '%LONG%'
+            WHEN UPPER(COALESCE(decision,'')) LIKE '%%LONG%%'
                 THEN GREATEST(COALESCE(momentum,0),0) * 0.7 + GREATEST(COALESCE(trend,0),0) * 1.3
-            WHEN UPPER(COALESCE(decision,'')) LIKE '%SHORT%'
+            WHEN UPPER(COALESCE(decision,'')) LIKE '%%SHORT%%'
                 THEN -1 * (ABS(COALESCE(momentum,0)) * 0.7 + ABS(COALESCE(trend,0)) * 1.3)
             ELSE COALESCE(momentum,0) * 0.4 + COALESCE(trend,0) * 0.6
         END
@@ -1000,9 +1000,9 @@ def get_live_leadership_pressure_context(cur, symbol):
                     AVG(live_pressure) FILTER (WHERE timestamp >= NOW() - INTERVAL '30 minutes') AS pressure_30m,
                     AVG(live_pressure) FILTER (WHERE timestamp >= NOW() - INTERVAL '60 minutes') AS pressure_60m,
                     COUNT(*) FILTER (WHERE timestamp >= NOW() - INTERVAL '30 minutes') AS signals_30m,
-                    SUM(CASE WHEN UPPER(COALESCE(decision,'')) LIKE '%LONG%' THEN 1 ELSE 0 END)
+                    SUM(CASE WHEN UPPER(COALESCE(decision,'')) LIKE '%%LONG%%' THEN 1 ELSE 0 END)
                         FILTER (WHERE timestamp >= NOW() - INTERVAL '30 minutes') AS long_signals_30m,
-                    SUM(CASE WHEN UPPER(COALESCE(decision,'')) LIKE '%SHORT%' THEN 1 ELSE 0 END)
+                    SUM(CASE WHEN UPPER(COALESCE(decision,'')) LIKE '%%SHORT%%' THEN 1 ELSE 0 END)
                         FILTER (WHERE timestamp >= NOW() - INTERVAL '30 minutes') AS short_signals_30m
                 FROM scored
             )
