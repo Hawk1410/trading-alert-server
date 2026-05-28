@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v6.6.19
+# VERSION: v6.6.20
 # TITLE: V6.6.15 ENTRY SNAPSHOT FREEZE + CONTROL PANEL
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v6.6.19 CQE CONFIRMED SCALE-IN ENGINE RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v6.6.20 ADAPTIVE LEADERSHIP TREND ENGINE RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -363,7 +363,7 @@ MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 3
 
 
 
-DATA_VERSION = "v6.6.19_CQE_CONFIRMED_SCALEIN_ENGINE"
+DATA_VERSION = "v6.6.20_ADAPTIVE_LEADERSHIP_TREND_ENGINE"
 
 
 # =========================
@@ -2930,6 +2930,13 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
     row = cur.fetchone()
     lifecycle_row = row[0] if row else None
     upgrade_size = float(row[1] or get_bpt_row_params(lifecycle_row).get("upgrade_size", 0)) if row else 0
+
+    # v6.6.20:
+    # ensure OKX minimum notional compatibility
+    upgrade_size = max(
+        upgrade_size,
+        MIN_OKX_ORDER_NOTIONAL_GBP
+    )
     current_dynamic_size = float(row[2] or BPT_CQE_PROBE_SIZE_GBP) if row else BPT_CQE_PROBE_SIZE_GBP
     new_dynamic_size = current_dynamic_size + upgrade_size
 
@@ -3555,7 +3562,50 @@ def passes_leadership_engine(cur, symbol, momentum, trend):
     # v6.1.6: always fetch context first so blocked early signals still get lifecycle telemetry.
     leadership = get_leadership_context(cur, symbol)
 
-    if trend < LEADERSHIP_MIN_TREND:
+    required_trend = LEADERSHIP_MIN_TREND
+
+    # =========================
+    # v6.6.20 ADAPTIVE LEADERSHIP THRESHOLDS
+    # =========================
+    if ENABLE_ADAPTIVE_LEADERSHIP_TREND:
+
+        leadership_score_signal = safe_float(
+            leadership.get("leadership_score", 0),
+            0
+        )
+
+        cqe_score_signal = safe_float(
+            leadership.get("cqe_quality_score", 0),
+            0
+        )
+
+        lifecycle_phase_signal = str(
+            leadership.get("lifecycle_phase", "")
+        ).upper()
+
+        if leadership_score_signal >= ADAPTIVE_LEADERSHIP_SCORE_THRESHOLD:
+            required_trend = min(
+                required_trend,
+                ADAPTIVE_LEADER_MIN_TREND
+            )
+
+        if cqe_score_signal >= ADAPTIVE_CQE_SCORE_THRESHOLD:
+            required_trend = min(
+                required_trend,
+                ADAPTIVE_CQE_MIN_TREND
+            )
+
+        if lifecycle_phase_signal in [
+            "STABLE_LEADER",
+            "IGNITION",
+            "EARLY_EXPANSION"
+        ]:
+            required_trend = min(
+                required_trend,
+                ADAPTIVE_STABLE_LEADER_MIN_TREND
+            )
+
+    if trend < required_trend:
         return False, leadership, "leadership_trend_too_low"
 
     if momentum <= LEADERSHIP_MIN_MOMENTUM:
@@ -6747,3 +6797,24 @@ except Exception as e:
 # - Requires live pressure still positive.
 # - Requires live delta still positive/non-decaying.
 # - Prevents scaling into dead volatility spikes.
+
+
+# =========================
+# PATCH NOTE v6.6.20
+# =========================
+# ADAPTIVE LEADERSHIP TREND ENGINE
+#
+# DISCOVERY:
+# Strong ignition leaders were being blocked
+# by legacy mature-trend thresholds.
+#
+# SOLUTION:
+# Adaptive trend thresholds based on:
+# - leadership score
+# - CQE quality
+# - lifecycle phase
+#
+# ADDITIONAL FIX:
+# Minimum order protection added to prevent
+# tiny OKX scale-ins / exits failing due to
+# exchange minimum notional limits.
