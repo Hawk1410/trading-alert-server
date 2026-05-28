@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v6.6.12
-# TITLE: V6.6.12 EXCHANGE RECONCILIATION SAFETY FIX
+# VERSION: v6.6.13
+# TITLE: V6.6.13 ENTRY PERSISTENCE FIRST FIX
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v6.6.12 EXCHANGE RECONCILIATION SAFETY FIX RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v6.6.13 ENTRY PERSISTENCE FIRST FIX RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -2198,6 +2198,18 @@ def open_shadow_cqe_trade(cur, symbol, price, momentum, trend, signal_id, signal
         signal_time,
     ))
     trade_id = cur.fetchone()[0]
+
+    # v6.6.13 CRITICAL: persist the base trade row immediately BEFORE any
+    # telemetry/event/OKX work. Previous versions could insert the trade row,
+    # then a telemetry helper rollback would erase it while the OKX order log
+    # and exchange buy still survived, creating orphan OKX buys invisible to
+    # the exit engine.
+    try:
+        cur.connection.commit()
+        print(f"✅ BASE TRADE ROW PERSISTED FIRST | {symbol} | id={trade_id}", flush=True)
+    except Exception as e:
+        print(f"🚨 BASE TRADE ROW EARLY COMMIT FAILED | {symbol} | id={trade_id} | {e}", flush=True)
+        raise
 
     safe_update_trade_telemetry(cur, trade_id, {
         "is_shadow": False,
