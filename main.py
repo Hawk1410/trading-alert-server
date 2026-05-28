@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v6.6.18
+# VERSION: v6.6.19
 # TITLE: V6.6.15 ENTRY SNAPSHOT FREEZE + CONTROL PANEL
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v6.6.18 LIVE LEADERSHIP PRESSURE FIX RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v6.6.19 CQE CONFIRMED SCALE-IN ENGINE RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -363,7 +363,7 @@ MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 3
 
 
 
-DATA_VERSION = "v6.6.18_LIVE_LEADERSHIP_PRESSURE_FIX"
+DATA_VERSION = "v6.6.19_CQE_CONFIRMED_SCALEIN_ENGINE"
 
 
 # =========================
@@ -2906,6 +2906,11 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
         and metrics["signal_count"] >= BPT_CQE_CONFIRM_MIN_SIGNAL_COUNT
     )
 
+    # v6.6.19:
+    # CQE confirmation alone is not enough for real scale-in.
+    # We also require live market pressure to still be healthy.
+    live_ctx = get_live_leadership_pressure_context(cur, sym)
+
     safe_update_trade_telemetry(cur, tid, {
         "confirmation_peak_30m": peak_for_confirmation,
         "confirmation_avg_trend": metrics["avg_trend"],
@@ -2928,6 +2933,16 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
     current_dynamic_size = float(row[2] or BPT_CQE_PROBE_SIZE_GBP) if row else BPT_CQE_PROBE_SIZE_GBP
     new_dynamic_size = current_dynamic_size + upgrade_size
 
+    live_pressure_30m = safe_float(live_ctx.get("live_pressure_30m"), 0)
+    live_delta_30m = safe_float(live_ctx.get("live_delta_30m"), 0)
+
+    scalein_allowed = (
+        ENABLE_CQE_REAL_SCALEINS
+        and lifecycle_row in CQE_REAL_SCALEIN_ALLOWED_ROWS
+        and live_pressure_30m >= CQE_SCALEIN_MIN_LIVE_PRESSURE
+        and live_delta_30m >= CQE_SCALEIN_MIN_DELTA_30M
+    )
+
     cur.execute("""
         UPDATE bot_trades_v4
         SET cqe_confirmed = TRUE,
@@ -2946,7 +2961,7 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
     except Exception as e:
         print(f"⚠️ BPT CQE upgrade trade_events log failed: {e}", flush=True)
 
-    if ENABLE_BPT_CQE_LIVE_UPGRADES:
+    if ENABLE_BPT_CQE_LIVE_UPGRADES and scalein_allowed:
         okx_place_market_order(
             cur=cur,
             trade_id=tid,
@@ -6714,3 +6729,21 @@ except Exception as e:
 # - Entry leadership context now prefers live pressure for score/delta snapshots.
 # - leadership_state_history remains structural history; signals_raw supplies live market pressure.
 # - Strategy thresholds unchanged except entry telemetry context source is made live.
+
+
+# =========================
+# PATCH NOTE v6.6.19
+# =========================
+# CQE CONFIRMED SCALE-IN ENGINE
+#
+# Architecture:
+# Probe -> Confirm -> Scale
+#
+# - Tiny exploratory probe enters first.
+# - Real capital added ONLY after CQE confirmation.
+# - Restricted to:
+#     HIGH_MONSTER_ROW
+#     EXTREME_RUNNER_ROW
+# - Requires live pressure still positive.
+# - Requires live delta still positive/non-decaying.
+# - Prevents scaling into dead volatility spikes.
