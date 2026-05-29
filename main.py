@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v6.6.21
-# TITLE: FREE THE UNICORNS ENTRY OVERRIDE
+# VERSION: v6.7
+# TITLE: TREND PERSISTENCE EXIT + TELEGRAM CLEANUP
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v6.6.21 FREE THE UNICORNS ENTRY OVERRIDE RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v6.7 TREND PERSISTENCE EXIT + TELEGRAM CLEANUP RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -363,7 +363,40 @@ MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 3
 
 
 
-DATA_VERSION = "v6.6.21_FREE_THE_UNICORNS_ENTRY_OVERRIDE"
+DATA_VERSION = "v6.7_TREND_PERSISTENCE_TELEGRAM_CLEANUP"
+
+# =========================
+# 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
+# =========================
+# Research-backed finding from CQE, BPT and Leadership simulations:
+# trades that cannot sustain trend structure ~30m after entry have poor expectancy.
+# Keep this isolated behind toggles so live behaviour can be reverted instantly.
+
+CQE_CONTINUATION_ENTRY_QUALITY = os.environ.get(
+    "CQE_CONTINUATION_ENTRY_QUALITY",
+    "CQE_CONTINUATION_V1"
+)
+LEGACY_CQE_ENTRY_QUALITY = "SHADOW_CQE_V1"
+
+ENABLE_TREND_PERSISTENCE_EXIT = os.environ.get(
+    "ENABLE_TREND_PERSISTENCE_EXIT",
+    "true"
+).lower() == "true"
+TREND_PERSISTENCE_CHECK_MINUTES = float(os.environ.get("TREND_PERSISTENCE_CHECK_MINUTES", "30") or 30)
+TREND_PERSISTENCE_MIN_TREND = float(os.environ.get("TREND_PERSISTENCE_MIN_TREND", "0.15") or 0.15)
+
+# v6.7: apply to continuation / lifecycle / leadership engines only.
+# ROT_MICRO_V1 is deliberately excluded because the sweep did not support the same 0.15 rule.
+TREND_PERSISTENCE_ENGINE_QUALITIES = {
+    CQE_CONTINUATION_ENTRY_QUALITY,
+    LEGACY_CQE_ENTRY_QUALITY,
+    "LEADERSHIP_SCALED",
+    "BPT_CQE_LIFECYCLE_V1",
+}
+
+# Telegram cleanup: keep entries/exits/errors/daily/health, suppress plumbing/debug noise.
+ENABLE_OKX_SUCCESS_TELEGRAM = os.environ.get("ENABLE_OKX_SUCCESS_TELEGRAM", "false").lower() == "true"
+ENABLE_BLOCKED_TRADE_TELEGRAM = os.environ.get("ENABLE_BLOCKED_TRADE_TELEGRAM", "false").lower() == "true"
 
 
 # =========================
@@ -1166,6 +1199,71 @@ def fmt_money(value):
         return f"£{float(value):.2f}"
     except Exception:
         return f"£{value}"
+
+def fee_adjusted_pnl_gbp(pnl_gbp, fee_gbp=0):
+    """Return net GBP PnL after fees when fee_gbp is available.
+    We do not estimate fees here; if fee_gbp is NULL/0, net equals recorded PnL.
+    """
+    try:
+        return float(pnl_gbp or 0) - float(fee_gbp or 0)
+    except Exception:
+        return pnl_gbp
+
+def engine_display_name(entry_quality):
+    mapping = {
+        LEGACY_CQE_ENTRY_QUALITY: CQE_CONTINUATION_ENTRY_QUALITY,
+        CQE_CONTINUATION_ENTRY_QUALITY: CQE_CONTINUATION_ENTRY_QUALITY,
+        "LEADERSHIP_SCALED": "LEADERSHIP_SCALED",
+        "ROT_MICRO_V1": "ROT_MICRO_V1",
+        "BPT_CQE_LIFECYCLE_V1": "BPT_CQE_LIFECYCLE_V1",
+        "PERSISTENCE_HUNTER_V1": "PERSISTENCE_HUNTER_V1",
+    }
+    return mapping.get(entry_quality, entry_quality or "UNKNOWN_ENGINE")
+
+def engine_emoji(entry_quality, is_shadow=False):
+    if is_shadow:
+        return "🧪"
+    if entry_quality in [CQE_CONTINUATION_ENTRY_QUALITY, LEGACY_CQE_ENTRY_QUALITY]:
+        return "🧠"
+    if entry_quality == "LEADERSHIP_SCALED":
+        return "👑"
+    if entry_quality == "ROT_MICRO_V1":
+        return "⚡"
+    if entry_quality == "BPT_CQE_LIFECYCLE_V1":
+        return "🧬"
+    return "🤖"
+
+def live_shadow_label(is_shadow=False):
+    return "🧪 SHADOW" if bool(is_shadow) else "🟢 LIVE"
+
+def trend_persistence_exit_reason(entry_quality):
+    if entry_quality in [CQE_CONTINUATION_ENTRY_QUALITY, LEGACY_CQE_ENTRY_QUALITY]:
+        return "cqe_trend_fail_30m"
+    if entry_quality == "BPT_CQE_LIFECYCLE_V1":
+        return "bpt_trend_fail_30m"
+    if entry_quality == "LEADERSHIP_SCALED":
+        return "leadership_trend_fail_30m"
+    return "trend_fail_30m"
+
+def should_trend_persistence_exit(entry_quality, minutes_in_trade, current_trend):
+    if not ENABLE_TREND_PERSISTENCE_EXIT:
+        return False
+    if entry_quality not in TREND_PERSISTENCE_ENGINE_QUALITIES:
+        return False
+    try:
+        return float(minutes_in_trade or 0) >= TREND_PERSISTENCE_CHECK_MINUTES and float(current_trend or 0) < TREND_PERSISTENCE_MIN_TREND
+    except Exception:
+        return False
+
+def format_trade_pnl_lines(pnl_percent, gross_pnl_gbp, fee_gbp=0):
+    net_gbp = fee_adjusted_pnl_gbp(gross_pnl_gbp, fee_gbp)
+    fee = float(fee_gbp or 0)
+    if fee:
+        return (
+            f"Net PnL: <b>{fmt_num(pnl_percent)}%</b> | <b>{fmt_money(net_gbp)}</b>\n"
+            f"Gross: {fmt_money(gross_pnl_gbp)} | Fees: {fmt_money(fee)}"
+        )
+    return f"Net PnL: <b>{fmt_num(pnl_percent)}%</b> | <b>{fmt_money(net_gbp)}</b>"
 
 def telegram_send_message(chat_id, message):
     if not ENABLE_TELEGRAM_ALERTS:
@@ -2073,11 +2171,12 @@ def okx_place_market_order(cur, trade_id, symbol, direction, action, price=None,
             cur, trade_id, symbol, okx_inst_id, action, side, direction,
             False, payload, response_payload, True, f"okx_live_order_skipped_{tradability_reason}"
         )
-        send_telegram_alert(
-            f"🛡️ <b>OKX ORDER SKIPPED</b>\n"
-            f"{action.upper()} | {symbol} → {okx_inst_id}\n"
-            f"Reason: {tradability_reason}"
-        )
+        if ENABLE_BLOCKED_TRADE_TELEGRAM:
+            send_telegram_alert(
+                f"🛡️ <b>OKX ORDER SKIPPED</b>\n"
+                f"{action.upper()} | {symbol} → {okx_inst_id}\n"
+                f"Reason: {tradability_reason}"
+            )
         return {
             "success": True,
             "dry_run": False,
@@ -2125,12 +2224,13 @@ def okx_place_market_order(cur, trade_id, symbol, direction, action, price=None,
 
         if success:
             print(f"✅ OKX LIVE ORDER SENT | {action.upper()} | {symbol}->{okx_inst_id} | size={payload.get('sz')}", flush=True)
-            send_telegram_alert(
-                f"✅ <b>OKX LIVE ORDER SENT</b>\n"
-                f"{action.upper()} | {symbol} → {okx_inst_id}\n"
-                f"Side: {side}\n"
-                f"Size: {payload.get('sz')}"
-            )
+            if ENABLE_OKX_SUCCESS_TELEGRAM:
+                send_telegram_alert(
+                    f"✅ <b>OKX LIVE ORDER SENT</b>\n"
+                    f"{action.upper()} | {symbol} → {okx_inst_id}\n"
+                    f"Side: {side}\n"
+                    f"Size: {payload.get('sz')}"
+                )
         else:
             print(f"❌ OKX LIVE ORDER FAILED | {action.upper()} | {symbol}->{okx_inst_id} | {response_payload}", flush=True)
             send_telegram_alert(
@@ -2151,6 +2251,11 @@ def okx_place_market_order(cur, trade_id, symbol, direction, action, price=None,
         log_okx_order(
             cur, trade_id, symbol, okx_inst_id, action, side, direction,
             False, payload, None, False, error_message
+        )
+        send_telegram_alert(
+            f"🚨 <b>OKX API ERROR</b>\n"
+            f"{action.upper()} | {symbol} → {okx_inst_id}\n"
+            f"Error: {error_message[:300]}"
         )
         return {"success": False, "dry_run": False, "error": error_message}
 
@@ -2424,9 +2529,9 @@ def get_open_shadow_cqe_count(cur):
         SELECT COUNT(*)
         FROM bot_trades_v4
         WHERE status = 'OPEN'
-          AND COALESCE(is_shadow, FALSE) = TRUE
-          AND entry_quality = 'SHADOW_CQE_V1'
-    """)
+          AND COALESCE(is_shadow, FALSE) = FALSE
+          AND entry_quality IN (%s, %s)
+    """, (LEGACY_CQE_ENTRY_QUALITY, CQE_CONTINUATION_ENTRY_QUALITY))
     return cur.fetchone()[0] or 0
 
 
@@ -2435,10 +2540,10 @@ def get_open_same_symbol_shadow_cqe_count(cur, symbol):
         SELECT COUNT(*)
         FROM bot_trades_v4
         WHERE status = 'OPEN'
-          AND COALESCE(is_shadow, FALSE) = TRUE
-          AND entry_quality = 'SHADOW_CQE_V1'
+          AND COALESCE(is_shadow, FALSE) = FALSE
+          AND entry_quality IN (%s, %s)
           AND symbol = %s
-    """, (symbol,))
+    """, (LEGACY_CQE_ENTRY_QUALITY, CQE_CONTINUATION_ENTRY_QUALITY, symbol))
     return cur.fetchone()[0] or 0
 
 
@@ -2467,7 +2572,7 @@ def open_shadow_cqe_trade(cur, symbol, price, momentum, trend, signal_id, signal
         DATA_VERSION,
         momentum,
         trend,
-        "SHADOW_CQE_V1",
+        CQE_CONTINUATION_ENTRY_QUALITY,
         signal_id,
         signal_time,
     ))
@@ -2487,7 +2592,7 @@ def open_shadow_cqe_trade(cur, symbol, price, momentum, trend, signal_id, signal
 
     safe_update_trade_telemetry(cur, trade_id, {
         "is_shadow": False,
-        "entry_architecture": "SHADOW_CQE_V1",
+        "entry_architecture": CQE_CONTINUATION_ENTRY_QUALITY,
         "trade_size_gbp": CQE_SHADOW_TRADE_SIZE_GBP,
         "dynamic_trade_size_gbp": CQE_SHADOW_TRADE_SIZE_GBP,
         "shadow_cqe_detected_at_entry": cqe_context.get("cqe_detected"),
@@ -2543,7 +2648,7 @@ def maybe_open_shadow_cqe_trade(cur, symbol, price, momentum, trend, signal_id, 
     )
 
     print(
-        f"🧪 OPEN SHADOW CQE | {symbol} | id={trade_id} | "
+        f"🟢 OPEN CQE CONTINUATION | {symbol} | id={trade_id} | "
         f"q={cqe_context.get('cqe_quality_score')} | "
         f"T/M={round(trend,3)}/{round(momentum,3)} | "
         f"m_acc={fmt_num(cqe_context.get('cqe_momentum_accel_30m'))} | "
@@ -2553,15 +2658,15 @@ def maybe_open_shadow_cqe_trade(cur, symbol, price, momentum, trend, signal_id, 
 
     if ENABLE_SHADOW_CQE_TELEGRAM_ALERTS:
         send_telegram_alert(
-            f"🧪 <b>SHADOW CQE ENTRY</b> | {symbol} LONG\n"
-            f"Quality: <b>{cqe_context.get('cqe_quality_score')}/9</b> | Paper size {fmt_money(CQE_SHADOW_TRADE_SIZE_GBP)}\n"
+            f"🟢 <b>LIVE ENTRY</b>\n🧠 <b>CQE_CONTINUATION_V1</b> | {symbol} LONG\n"
+            f"Quality: <b>{cqe_context.get('cqe_quality_score')}/9</b> | Model size {fmt_money(CQE_SHADOW_TRADE_SIZE_GBP)}\n"
             f"Entry {price} | T/M {fmt_num(trend)} / {fmt_num(momentum)}\n"
             f"Accel M/T: {fmt_num(cqe_context.get('cqe_momentum_accel_30m'))} / {fmt_num(cqe_context.get('cqe_trend_accel_30m'))}\n"
             f"Trend health: min {fmt_num(cqe_context.get('cqe_min_trend_30m'))} | "
             f"std {fmt_num(cqe_context.get('cqe_trend_std_30m'))} | "
             f"pos {fmt_num(cqe_context.get('cqe_positive_trend_ratio_30m'))}\n"
             f"Reason: {cqe_context.get('cqe_reason')}\n"
-            f"Shadow ID {trade_id}"
+            f"ID {trade_id}"
         )
 
     return trade_id
@@ -2581,9 +2686,9 @@ def process_shadow_cqe_trades(cur, symbol, price, momentum, trend, now):
         FROM bot_trades_v4
         WHERE status = 'OPEN'
           AND COALESCE(is_shadow, FALSE) = TRUE
-          AND entry_quality = 'SHADOW_CQE_V1'
+          AND entry_quality IN (%s, %s)
           AND symbol = %s
-    """, (symbol,))
+    """, (LEGACY_CQE_ENTRY_QUALITY, CQE_CONTINUATION_ENTRY_QUALITY, symbol))
 
     rows = cur.fetchall()
     for tid, sym, direction, entry_price, opened_at, peak_pnl, entry_quality in rows:
@@ -2621,7 +2726,7 @@ def process_shadow_cqe_trades(cur, symbol, price, momentum, trend, now):
             and old_peak < CQE_PEAK_ALERT_TRIGGER <= current_peak
         ):
             send_telegram_alert(
-                f"🟢 <b>SHADOW CQE PEAK</b> | {sym}\n"
+                f"🟢 <b>CQE PEAK</b> | {sym}\n"
                 f"Peak {fmt_num(current_peak)}% | Current {fmt_num(pnl_percent)}% | Age {fmt_num(mins,1)}m\n"
                 f"T/M {fmt_num(trend)} / {fmt_num(momentum)} | ID {tid}"
             )
@@ -2631,14 +2736,14 @@ def process_shadow_cqe_trades(cur, symbol, price, momentum, trend, now):
             and old_peak < CQE_RUNNER_ALERT_TRIGGER <= current_peak
         ):
             send_telegram_alert(
-                f"🚀 <b>SHADOW CQE RUNNER</b> | {sym}\n"
+                f"🚀 <b>CQE RUNNER</b> | {sym}\n"
                 f"Peak {fmt_num(current_peak)}% | Current {fmt_num(pnl_percent)}% | Age {fmt_num(mins,1)}m\n"
                 f"ID {tid}"
             )
 
         close_reason = None
         if fixed_time_exit_allowed_for_trade(is_shadow=True) and mins >= CQE_SHADOW_HOLD_MINUTES:
-            close_reason = "shadow_cqe_120m_time_exit"
+            close_reason = "cqe_120m_time_exit"
 
         if close_reason:
             pnl_gbp = (pnl_percent / 100) * CQE_SHADOW_TRADE_SIZE_GBP
@@ -2661,7 +2766,7 @@ def process_shadow_cqe_trades(cur, symbol, price, momentum, trend, now):
                 continue
 
             safe_update_trade_telemetry(cur, tid, {
-                "exit_architecture": "SHADOW_CQE_V1",
+                "exit_architecture": CQE_CONTINUATION_ENTRY_QUALITY,
                 "drawdown_from_peak_at_exit": current_peak - pnl_percent,
                 "leadership_trend_at_exit": trend,
                 "leadership_momentum_at_exit": momentum,
@@ -2673,16 +2778,16 @@ def process_shadow_cqe_trades(cur, symbol, price, momentum, trend, now):
                 print(f"⚠️ shadow CQE trade_events exit log failed: {e}", flush=True)
 
             print(
-                f"🧪 CLOSED SHADOW CQE | {sym} | {round(pnl_percent,3)}% | "
+                f"🔴 CLOSED CQE CONTINUATION | {sym} | {round(pnl_percent,3)}% | "
                 f"peak={round(current_peak,3)} | {close_reason}",
                 flush=True
             )
 
             if ENABLE_SHADOW_CQE_TELEGRAM_ALERTS:
                 send_telegram_alert(
-                    f"🧪 <b>SHADOW CQE CLOSED</b> | {sym}\n"
-                    f"Paper PnL <b>{fmt_num(pnl_percent)}%</b> | {fmt_money(pnl_gbp)}\n"
-                    f"Peak {fmt_num(current_peak)}% | DD {fmt_num(current_peak - pnl_percent)}%\n"
+                    f"🔴 <b>LIVE EXIT</b>\n🧠 <b>CQE_CONTINUATION_V1</b> | {sym}\n"
+                    + format_trade_pnl_lines(pnl_percent, pnl_gbp, 0) + "\n"
+                    + f"Peak {fmt_num(current_peak)}% | DD {fmt_num(current_peak - pnl_percent)}%\n"
                     f"Age {fmt_num(mins,1)}m | Reason {close_reason}\n"
                     f"ID {tid}"
                 )
@@ -2903,7 +3008,7 @@ def open_bpt_cqe_probe_trade(cur, symbol, price, momentum, trend, signal_id, sig
     )
 
     send_telegram_alert(
-        f"🧬 <b>BPT CQE PROBE</b> | {symbol} LONG\n"
+        f"{live_shadow_label(not ENABLE_BPT_CQE_LIVE_PROBES)} ENTRY\n🧪 <b>BPT_CQE_LIFECYCLE_V1</b> | {symbol} LONG\n"
         f"Row: <b>{lifecycle_row}</b> | Q {fmt_num(q)}\n"
         f"Probe size: {fmt_money(BPT_CQE_PROBE_SIZE_GBP)} | Live probe: {ENABLE_BPT_CQE_LIVE_PROBES}\n"
         f"Entry {price} | T/M {fmt_num(trend)} / {fmt_num(momentum)}\n"
@@ -3149,6 +3254,10 @@ def process_bpt_cqe_lifecycle_trades(cur, symbol, price, momentum, trend, now):
         exit_architecture = None
         drawdown_from_peak = current_peak - pnl_percent
 
+        if should_trend_persistence_exit(BPT_CQE_ENTRY_QUALITY, mins, trend):
+            close_reason = trend_persistence_exit_reason(BPT_CQE_ENTRY_QUALITY)
+            exit_architecture = "TREND_PERSISTENCE_EXIT"
+
         runtime_archetype = classify_runtime_archetype(
             lifecycle_row=lifecycle_row,
             mins=mins,
@@ -3161,21 +3270,22 @@ def process_bpt_cqe_lifecycle_trades(cur, symbol, price, momentum, trend, now):
         )
         update_trade_archetype(cur, tid, runtime_archetype)
 
-        if ENABLE_ARCHETYPE_STATE_ENGINE and mins >= ARCH_NO_PROGRESS_MINUTES and current_peak < ARCH_NO_PROGRESS_PEAK:
+        if not close_reason and ENABLE_ARCHETYPE_STATE_ENGINE and mins >= ARCH_NO_PROGRESS_MINUTES and current_peak < ARCH_NO_PROGRESS_PEAK:
             close_reason = "arch_no_progress_120m"
             exit_architecture = "ARCHETYPE_STATE_NO_PROGRESS"
 
-        if cqe_upgraded and not close_reason:
-            if current_peak >= float(trail_activation or 999) and drawdown_from_peak >= float(trail_drawdown or 999):
-                close_reason = f"bpt_{(lifecycle_row or 'row').lower()}_wide_trail"
-                exit_architecture = "BPT_CQE_LIFECYCLE_ROW_TRAIL"
-        else:
-            if lifecycle_row == "EARLY_INCUBATION_ROW" and mins >= BPT_EARLY_FAILFAST_MINUTES and current_peak < BPT_EARLY_FAILFAST_PEAK:
-                close_reason = "bpt_early_failed_incubation"
-                exit_architecture = "BPT_CQE_EARLY_FAILFAST"
-            elif pnl_percent <= BPT_CQE_HARD_STOP:
-                close_reason = "bpt_probe_hard_stop"
-                exit_architecture = "BPT_CQE_PROBE_HARD_STOP"
+        if not close_reason:
+            if cqe_upgraded:
+                if current_peak >= float(trail_activation or 999) and drawdown_from_peak >= float(trail_drawdown or 999):
+                    close_reason = f"bpt_{(lifecycle_row or 'row').lower()}_wide_trail"
+                    exit_architecture = "BPT_CQE_LIFECYCLE_ROW_TRAIL"
+            else:
+                if lifecycle_row == "EARLY_INCUBATION_ROW" and mins >= BPT_EARLY_FAILFAST_MINUTES and current_peak < BPT_EARLY_FAILFAST_PEAK:
+                    close_reason = "bpt_early_failed_incubation"
+                    exit_architecture = "BPT_CQE_EARLY_FAILFAST"
+                elif pnl_percent <= BPT_CQE_HARD_STOP:
+                    close_reason = "bpt_probe_hard_stop"
+                    exit_architecture = "BPT_CQE_PROBE_HARD_STOP"
 
         if not close_reason and mins >= BPT_CQE_MAX_HOLD_MINUTES:
             extend_for_healthy_leader = (
@@ -3253,9 +3363,9 @@ def process_bpt_cqe_lifecycle_trades(cur, symbol, price, momentum, trend, now):
             )
 
             send_telegram_alert(
-                f"💰 <b>BPT CQE CLOSED</b> | {sym}\n"
-                f"Row: {lifecycle_row} | PnL <b>{fmt_num(pnl_percent)}%</b> | {fmt_money(pnl_gbp)}\n"
-                f"Peak {fmt_num(current_peak)}% | DD {fmt_num(drawdown_from_peak)}%\n"
+                f"{live_shadow_label(is_shadow)} EXIT\n🧪 <b>BPT_CQE_LIFECYCLE_V1</b> | {sym}\n"
+                f"Row: {lifecycle_row} | " + format_trade_pnl_lines(pnl_percent, pnl_gbp, 0) + "\n"
+                + f"Peak {fmt_num(current_peak)}% | DD {fmt_num(drawdown_from_peak)}%\n"
                 f"Size model {fmt_money(dynamic_size)} | Reason {close_reason}\n"
                 f"ID {tid}"
             )
@@ -5494,13 +5604,14 @@ def webhook():
                             f"🚫 BLOCKED LIVE ENTRY | {symbol} | existing/unknown OKX position | {okx_position_context}",
                             flush=True
                         )
-                        send_telegram_alert(
-                            f"🚫 <b>LIVE ENTRY BLOCKED</b> | {symbol}\n"
-                            f"OKX position guard triggered before buy.\n"
-                            f"Reason: {okx_position_context.get('reason')}\n"
-                            f"Available: {okx_position_context.get('available')} {okx_position_context.get('base_ccy')}\n"
-                            f"Estimated notional: {fmt_money(okx_position_context.get('estimated_notional_usd'))}"
-                        )
+                        if ENABLE_BLOCKED_TRADE_TELEGRAM:
+                            send_telegram_alert(
+                                f"🚫 <b>LIVE ENTRY BLOCKED</b> | {symbol}\n"
+                                f"OKX position guard triggered before buy.\n"
+                                f"Reason: {okx_position_context.get('reason')}\n"
+                                f"Available: {okx_position_context.get('available')} {okx_position_context.get('base_ccy')}\n"
+                                f"Estimated notional: {fmt_money(okx_position_context.get('estimated_notional_usd'))}"
+                            )
 
                 if not entry_allowed:
                     print(
@@ -5540,8 +5651,9 @@ def webhook():
                     top_leaders_text = get_top_leaders_text(cur, 4)
 
                     send_telegram_alert(
-                        f"🚀 <b>ENTRY</b> | {symbol} LONG\n"
-                        f"{entry_quality} | {fmt_money(entry_trade_size)} | OKX {fmt_money(entry_quote_size)}\n"
+                        f"🟢 <b>LIVE ENTRY</b>\n"
+                        f"{engine_emoji(entry_quality)} <b>{engine_display_name(entry_quality)}</b> | {symbol} LONG\n"
+                        f"Model size {fmt_money(entry_trade_size)} | OKX {fmt_money(entry_quote_size)}\n"
                         f"Entry {price} | T/M {fmt_num(trend)} / {fmt_num(momentum)}\n"
                         f"{'🦄 Unicorn override: ' + str(leadership_context.get('unicorn_override_reason')) + ' | P ' + str(leadership_context.get('unicorn_pressure_score')) + chr(10) if leadership_context.get('unicorn_override_triggered') else ''}"
                         f"Phase: {short_phase(leadership_context.get('lifecycle_phase') or leadership_context.get('leadership_phase'))} "
@@ -5712,12 +5824,19 @@ def webhook():
                 slot_recycle_candidate = False
                 drawdown_from_peak = current_peak - pnl_percent
 
+                if should_trend_persistence_exit(entry_quality, mins, trend):
+                    close_reason = trend_persistence_exit_reason(entry_quality)
+                    exit_architecture = "TREND_PERSISTENCE_EXIT"
+                    decay_triggered = True
+                    slot_recycle_candidate = True
+
                 # v6.6 partial profit bank: take 25% at +4%, leave runner open.
-                maybe_partial_profit_bank(
-                    cur, tid, sym, direction, entry_price, price, entry_quality,
-                    current_peak, pnl_percent, opened_at, mins,
-                    {"leadership_max_60m": get_recent_leadership_max(cur, sym, 60)}
-                )
+                if not close_reason:
+                    maybe_partial_profit_bank(
+                        cur, tid, sym, direction, entry_price, price, entry_quality,
+                        current_peak, pnl_percent, opened_at, mins,
+                        {"leadership_max_60m": get_recent_leadership_max(cur, sym, 60)}
+                    )
 
                 if (
                     not close_reason
@@ -5901,9 +6020,10 @@ def webhook():
                     latest_signal_state = get_latest_signal_state(cur, sym)
 
                     send_telegram_alert(
-                        f"💰 <b>CLOSED</b> | {sym} LONG\n"
-                        f"PnL <b>{fmt_num(pnl_percent)}%</b> | {fmt_money(pnl_gbp)} | Peak {fmt_num(current_peak)}%\n"
-                        f"DD {fmt_num(drawdown_from_peak)}% | {close_reason}\n"
+                        f"🔴 <b>LIVE EXIT</b>\n"
+                        f"{engine_emoji(entry_quality)} <b>{engine_display_name(entry_quality)}</b> | {sym} LONG\n"
+                        f"{format_trade_pnl_lines(pnl_percent, pnl_gbp, 0)} | Peak {fmt_num(current_peak)}%\n"
+                        f"DD {fmt_num(drawdown_from_peak)}% | Reason: {close_reason}\n"
                         f"Exit T/M {fmt_num(trend)} / {fmt_num(momentum)}\n"
                         f"Phase: {format_leadership_compact(exit_lifecycle_context)}\n"
                         f"Latest: mom {fmt_num((latest_signal_state or {}).get('momentum'))} "
@@ -5996,7 +6116,7 @@ def build_telegram_health_message(cur):
     return (
         f"🩺 <b>Bot Health</b>\n"
         f"Version: {DATA_VERSION}\n"
-        f"Engine: LEADERSHIP_LIVE + BPT_CQE_LIFECYCLE_V1 + SHADOW_CQE_V1 + SHADOW_EMERGENCE\n"
+        f"Engine: LEADERSHIP_LIVE + CQE_CONTINUATION_V1 + BPT_CQE_LIFECYCLE_V1 + ROT_MICRO_V1\n"
         f"Live orders: {ENABLE_LIVE_ORDERS} | New entries: {ENABLE_NEW_ENTRIES} | OKX exits: {ENABLE_OKX_EXITS} | Emergency close-only: {EMERGENCY_CLOSE_ONLY_MODE}\n"
         f"Last signal: {last_signal}\n"
         f"Signals 1h: {signals_1h}\n"
@@ -6007,7 +6127,7 @@ def build_telegram_health_message(cur):
         f"Leadership snapshots 24h: {snapshots_24h}\n"
         f"Stable: score>={STABLE_LEADER_MIN_SCORE}, Δ{STABLE_LEADER_DELTA_MIN}..{STABLE_LEADER_DELTA_MAX}\n"
         f"Shadow ignition: {ENABLE_SHADOW_EMERGENCE_TELEMETRY} | Δ{CONTROLLED_IGNITION_DELTA_MIN}..{CONTROLLED_IGNITION_DELTA_MAX}\n"
-        f"Shadow CQE: {ENABLE_SHADOW_CQE} | Q>={CQE_MIN_QUALITY_SCORE} | hold {CQE_SHADOW_HOLD_MINUTES}m\n"
+        f"CQE continuation: {ENABLE_SHADOW_CQE} | future name {CQE_CONTINUATION_ENTRY_QUALITY} | Q>={CQE_MIN_QUALITY_SCORE}\n"
         f"BPT lifecycle: {ENABLE_BPT_CQE_LIFECYCLE_SHADOW} | live probes {ENABLE_BPT_CQE_LIVE_PROBES} | live upgrades {ENABLE_BPT_CQE_LIVE_UPGRADES}\n"
         f"Density relaxed: {ENABLE_RELAXED_DENSITY_DEPENDENCY} | fixed real exits: {ENABLE_FIXED_TIME_EXITS_REAL}\n"
         f"Persistence Hunter: {ENABLE_PERSISTENCE_HUNTER_SHADOW} | live {ENABLE_PERSISTENCE_HUNTER_LIVE} | score>={PH_MIN_LEADERSHIP_SCORE} age {PH_MIN_CORE_AGE_MINUTES}-{PH_MAX_CORE_AGE_MINUTES}m\n"
@@ -6016,66 +6136,90 @@ def build_telegram_health_message(cur):
         f"Telemetry V1: {ENABLE_TELEMETRY_V1} | {TELEMETRY_VERSION}\n"
         f"Archetype engine: {ENABLE_ARCHETYPE_STATE_ENGINE} | adaptive BPT max hold {ENABLE_ADAPTIVE_BPT_MAX_HOLD} | tg dedupe {ENABLE_TELEGRAM_DEDUPE}\n"
         f"Market OS v6.6: {ENABLE_MARKET_OS_V66} | partial bank {ENABLE_PARTIAL_PROFIT_BANK_V66} @ {PARTIAL_BANK_TRIGGER_PCT}% x {int(PARTIAL_BANK_FRACTION*100)}% | rot micro {ENABLE_ROT_MICRO_LIVE}\n"
-        f"Leadership scaling: {ENABLE_LEADERSHIP_SIZE_SCALING_V66} | >= {LEADERSHIP_SCALE_THRESHOLD} → {fmt_money(LEADERSHIP_SCALED_TRADE_SIZE_GBP)}"
+        f"Leadership scaling: {ENABLE_LEADERSHIP_SIZE_SCALING_V66} | >= {LEADERSHIP_SCALE_THRESHOLD} → {fmt_money(LEADERSHIP_SCALED_TRADE_SIZE_GBP)}\n"
+        f"Trend persistence exit: {ENABLE_TREND_PERSISTENCE_EXIT} | {TREND_PERSISTENCE_CHECK_MINUTES}m trend < {TREND_PERSISTENCE_MIN_TREND}"
     )
 
 def build_telegram_summary_message(cur, hours=24):
+    """Clean Telegram /daily summary.
+    v6.7 separates LIVE and SHADOW engines and prioritises fee-adjusted Net PnL.
+    Net uses recorded fee_gbp only; if fees are not populated, net equals pnl_gbp.
+    """
     cur.execute("""
         WITH closed AS (
             SELECT
                 entry_quality AS engine,
+                COALESCE(is_shadow, FALSE) AS is_shadow,
                 pnl_percent,
-                pnl_gbp,
+                COALESCE(pnl_gbp, 0) AS pnl_gbp,
+                COALESCE(fee_gbp, 0) AS fee_gbp,
                 peak_pnl_percent,
                 close_reason
             FROM bot_trades_v4
             WHERE closed_at >= NOW() - (%s || ' hours')::INTERVAL
-              AND COALESCE(is_shadow, FALSE) = FALSE
               AND status = 'CLOSED'
         )
         SELECT
             engine,
+            is_shadow,
             COUNT(*) AS trades,
-            COALESCE(ROUND(SUM(pnl_gbp)::numeric, 3), 0) AS pnl_gbp,
+            COALESCE(ROUND(SUM(pnl_gbp - fee_gbp)::numeric, 3), 0) AS net_pnl_gbp,
+            COALESCE(ROUND(SUM(pnl_gbp)::numeric, 3), 0) AS gross_pnl_gbp,
+            COALESCE(ROUND(SUM(fee_gbp)::numeric, 3), 0) AS fee_gbp,
             COALESCE(ROUND(AVG(pnl_percent)::numeric, 3), 0) AS avg_pnl,
             COALESCE(ROUND(AVG(peak_pnl_percent)::numeric, 3), 0) AS avg_peak,
             COUNT(*) FILTER (WHERE pnl_percent > 0) AS winners,
             COUNT(*) FILTER (WHERE peak_pnl_percent >= 2.0) AS runners,
             COUNT(*) FILTER (WHERE peak_pnl_percent >= 5.0) AS monsters
         FROM closed
-        GROUP BY engine
-        ORDER BY engine
+        GROUP BY engine, is_shadow
+        ORDER BY is_shadow, engine
     """, (hours,))
     closed_rows = cur.fetchall()
 
     cur.execute("""
         SELECT
-            COUNT(*) FILTER (WHERE status = 'OPEN') AS open_total
+            COUNT(*) FILTER (WHERE status = 'OPEN' AND COALESCE(is_shadow, FALSE) = FALSE) AS open_real,
+            COUNT(*) FILTER (WHERE status = 'OPEN' AND COALESCE(is_shadow, FALSE) = TRUE) AS open_shadow
         FROM bot_trades_v4
-        WHERE COALESCE(is_shadow, FALSE) = FALSE
     """)
-    open_total = (cur.fetchone() or (0,))[0] or 0
+    open_real, open_shadow = cur.fetchone() or (0, 0)
 
-    total_pnl = sum(float(r[2] or 0) for r in closed_rows)
-    total_trades = sum(int(r[1] or 0) for r in closed_rows)
+    total_net = sum(float(r[3] or 0) for r in closed_rows)
+    total_gross = sum(float(r[4] or 0) for r in closed_rows)
+    total_fees = sum(float(r[5] or 0) for r in closed_rows)
+    total_trades = sum(int(r[2] or 0) for r in closed_rows)
 
     lines = []
     lines.append(f"📊 <b>Trading Bot {hours}h Summary</b>")
     lines.append(f"Version: <b>{DATA_VERSION}</b>")
     lines.append(f"Closed trades: <b>{total_trades}</b>")
-    lines.append(f"Realized PnL: <b>{fmt_money(total_pnl)}</b>")
-    lines.append(f"Open real: <b>{open_total}</b>")
-
-    if closed_rows:
-        lines.append("\n<b>Engine breakdown</b>")
-        for engine, trades, pnl_gbp, avg_pnl, avg_peak, winners, runners, monsters in closed_rows:
-            win_rate = (float(winners or 0) / float(trades or 1)) * 100
-            lines.append(
-                f"{engine}: {trades} trades | {fmt_money(pnl_gbp)} | avg {fmt_num(avg_pnl)}% | "
-                f"peak {fmt_num(avg_peak)}% | win {fmt_num(win_rate,1)}% | R {runners} M {monsters}"
-            )
+    if total_fees:
+        lines.append(f"Net PnL: <b>{fmt_money(total_net)}</b> | Gross {fmt_money(total_gross)} | Fees {fmt_money(total_fees)}")
     else:
-        lines.append("\nNo closed real trades in this window.")
+        lines.append(f"Net PnL: <b>{fmt_money(total_net)}</b>")
+    lines.append(f"Open: 🟢 live <b>{open_real}</b> | 🧪 shadow <b>{open_shadow}</b>")
+
+    live_rows = [r for r in closed_rows if not bool(r[1])]
+    shadow_rows = [r for r in closed_rows if bool(r[1])]
+
+    def add_engine_rows(title, rows):
+        lines.append(f"\n<b>{title}</b>")
+        if not rows:
+            lines.append("No closed trades in this window.")
+            return
+        for engine, is_shadow, trades, net_pnl_gbp, gross_pnl_gbp, fee_gbp, avg_pnl, avg_peak, winners, runners, monsters in rows:
+            win_rate = (float(winners or 0) / float(trades or 1)) * 100
+            label = engine_display_name(engine)
+            emoji = engine_emoji(engine, is_shadow)
+            fee_text = f" | fees {fmt_money(fee_gbp)}" if float(fee_gbp or 0) else ""
+            lines.append(
+                f"{emoji} <b>{label}</b>: {trades} trades | net {fmt_money(net_pnl_gbp)}{fee_text} | "
+                f"avg {fmt_num(avg_pnl)}% | peak {fmt_num(avg_peak)}% | win {fmt_num(win_rate,1)}% | R {runners} M {monsters}"
+            )
+
+    add_engine_rows("🟢 LIVE ENGINES", live_rows)
+    add_engine_rows("🧪 SHADOW ENGINES", shadow_rows)
 
     lines.append("\n<b>Top leaders</b>")
     lines.append(get_top_leaders_text(cur, 5))
@@ -6109,10 +6253,10 @@ def build_telegram_shadow_watch_message(cur, hours=12):
                 COALESCE(ROUND(SUM(pnl_gbp) FILTER (WHERE status = 'CLOSED')::numeric, 3), 0) AS closed_pnl_gbp,
                 COALESCE(ROUND(AVG(peak_pnl_percent)::numeric, 3), 0) AS avg_peak
             FROM bot_trades_v4
-            WHERE COALESCE(is_shadow, FALSE) = TRUE
-              AND entry_quality = 'SHADOW_CQE_V1'
+            WHERE COALESCE(is_shadow, FALSE) = FALSE
+              AND entry_quality IN (%s, %s)
               AND opened_at >= NOW() - (%s || ' hours')::INTERVAL
-        """, (hours,))
+        """, (LEGACY_CQE_ENTRY_QUALITY, CQE_CONTINUATION_ENTRY_QUALITY, hours))
         open_cqe, closed_cqe, avg_closed_pnl, closed_pnl_gbp, avg_peak = cur.fetchone() or (0, 0, 0, 0, 0)
 
         cur.execute("""
@@ -6124,12 +6268,12 @@ def build_telegram_shadow_watch_message(cur, hours=12):
                 peak_pnl_percent,
                 COALESCE(cqe_quality_score_at_entry, 0) AS q
             FROM bot_trades_v4
-            WHERE COALESCE(is_shadow, FALSE) = TRUE
-              AND entry_quality = 'SHADOW_CQE_V1'
+            WHERE COALESCE(is_shadow, FALSE) = FALSE
+              AND entry_quality IN (%s, %s)
               AND status = 'OPEN'
             ORDER BY opened_at DESC
             LIMIT 10
-        """)
+        """, (LEGACY_CQE_ENTRY_QUALITY, CQE_CONTINUATION_ENTRY_QUALITY))
         open_rows = cur.fetchall()
 
         cur.execute("""
@@ -6151,15 +6295,15 @@ def build_telegram_shadow_watch_message(cur, hours=12):
         cqe_signal_rows = cur.fetchall()
 
         lines = [
-            f"🕵️ <b>Shadow Watch {hours}h</b>",
+            f"🕵️ <b>CQE / Shadow Watch {hours}h</b>",
             f"LONG signals: <b>{long_count}</b>",
-            f"CQE signals: <b>{cqe_count}</b> | Open shadow CQE: <b>{open_cqe}</b> | Closed: <b>{closed_cqe}</b>",
+            f"CQE signals: <b>{cqe_count}</b> | Open CQE: <b>{open_cqe}</b> | Closed: <b>{closed_cqe}</b>",
             f"CQE closed avg: <b>{fmt_num(avg_closed_pnl)}%</b> | {fmt_money(closed_pnl_gbp)} | Avg peak {fmt_num(avg_peak)}%",
             f"Quiet old shadows: {quiet_count} | Ignition shadows: {ignition_count}",
         ]
 
         if open_rows:
-            lines.append("\n<b>Open CQE shadow trades</b>")
+            lines.append("\n<b>Open CQE continuation trades</b>")
             for tid, sym, opened_at, entry_price, peak, q in open_rows:
                 lines.append(f"{sym} | Q{q} | peak {fmt_num(peak)}% | ID {tid}")
 
