@@ -1678,7 +1678,6 @@ def okx_sign(timestamp, method, request_path, body=""):
         bytes(message, encoding="utf-8"),
         digestmod=hashlib.sha256
     )
-    return msg.replace("<", "&lt;").replace(">", "&gt;")
     return base64.b64encode(mac.digest()).decode()
 
 def okx_headers(method, request_path, body=""):
