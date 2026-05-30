@@ -414,7 +414,7 @@ ENABLE_MARKET_OS_V66 = os.environ.get("ENABLE_MARKET_OS_V66", "true").lower() ==
 # Leadership scaling / capital allocation
 ENABLE_LEADERSHIP_SIZE_SCALING_V66 = os.environ.get("ENABLE_LEADERSHIP_SIZE_SCALING_V66", "true").lower() == "true"
 LEADERSHIP_SCALE_THRESHOLD = float(os.environ.get("LEADERSHIP_SCALE_THRESHOLD", "2.0") or 2.0)
-LEADERSHIP_SCALED_TRADE_SIZE_GBP = float(os.environ.get("LEADERSHIP_SCALED_TRADE_SIZE_GBP", "30") or 30)
+LEADERSHIP_SCALED_TRADE_SIZE_GBP = float(os.environ.get("LEADERSHIP_SCALED_TRADE_SIZE_GBP", "20") or 20)
 
 # Partial profit bank: bank a small piece of position only after meaningful expansion.
 ENABLE_PARTIAL_PROFIT_BANK_V66 = os.environ.get("ENABLE_PARTIAL_PROFIT_BANK_V66", "true").lower() == "true"
@@ -624,7 +624,7 @@ CQE_RUNNER_ALERT_TRIGGER = float(os.environ.get("CQE_RUNNER_ALERT_TRIGGER", "2.0
 # =========================
 ENABLE_LIVE_CQE = os.environ.get("ENABLE_LIVE_CQE", "false").lower() == "true"
 
-LIVE_CQE_TRADE_SIZE_GBP = float(os.environ.get("LIVE_CQE_TRADE_SIZE_GBP", "5") or 5)
+LIVE_CQE_TRADE_SIZE_GBP = float(os.environ.get("LIVE_CQE_TRADE_SIZE_GBP", "20") or 20)
 LIVE_CQE_MAX_OPEN_TRADES = int(os.environ.get("LIVE_CQE_MAX_OPEN_TRADES", "1") or 1)
 LIVE_CQE_MAX_SAME_SYMBOL_OPEN = int(os.environ.get("LIVE_CQE_MAX_SAME_SYMBOL_OPEN", "1") or 1)
 
@@ -675,7 +675,7 @@ MIN_OKX_ORDER_NOTIONAL_GBP = float(os.environ.get("MIN_OKX_ORDER_NOTIONAL_GBP", 
 
 
 BPT_CQE_ENTRY_QUALITY = "BPT_CQE_LIFECYCLE_V1"
-BPT_CQE_PROBE_SIZE_GBP = float(os.environ.get("BPT_CQE_PROBE_SIZE_GBP", "5") or 5)
+BPT_CQE_PROBE_SIZE_GBP = float(os.environ.get("BPT_CQE_PROBE_SIZE_GBP", "15") or 15)
 BPT_CQE_MAX_OPEN_TRADES = int(os.environ.get("BPT_CQE_MAX_OPEN_TRADES", "5") or 5)
 BPT_CQE_MAX_SAME_SYMBOL_OPEN = int(os.environ.get("BPT_CQE_MAX_SAME_SYMBOL_OPEN", "1") or 1)
 
@@ -1678,6 +1678,7 @@ def okx_sign(timestamp, method, request_path, body=""):
         bytes(message, encoding="utf-8"),
         digestmod=hashlib.sha256
     )
+    return msg.replace("<", "&lt;").replace(">", "&gt;")
     return base64.b64encode(mac.digest()).decode()
 
 def okx_headers(method, request_path, body=""):
