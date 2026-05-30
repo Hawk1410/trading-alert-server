@@ -650,10 +650,10 @@ ENABLE_BPT_CQE_LIFECYCLE_SHADOW = os.environ.get(
 
 # Future live toggles. Keep both false until shadow confirms live behaviour.
 ENABLE_BPT_CQE_LIVE_PROBES = os.environ.get(
-    "ENABLE_BPT_CQE_LIVE_PROBES", "false"
+    "ENABLE_BPT_CQE_LIVE_PROBES", "true"
 ).lower() == "true"
 ENABLE_BPT_CQE_LIVE_UPGRADES = os.environ.get(
-    "ENABLE_BPT_CQE_LIVE_UPGRADES", "false"
+    "ENABLE_BPT_CQE_LIVE_UPGRADES", "true"
 ).lower() == "true"
 
 # v6.6.19/v6.6.20: real capital only added AFTER CQE confirmation.
