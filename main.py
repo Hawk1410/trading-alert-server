@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v6.7
-# TITLE: TREND PERSISTENCE EXIT + TELEGRAM CLEANUP
+# VERSION: v6.8.3
+# TITLE: OKX EXIT SIZE HOTFIX
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v6.7 TREND PERSISTENCE EXIT + TELEGRAM CLEANUP RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v6.8.3 OKX EXIT SIZE HOTFIX RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -363,7 +363,7 @@ MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 3
 
 
 
-DATA_VERSION = "v6.7_TREND_PERSISTENCE_TELEGRAM_CLEANUP"
+DATA_VERSION = "v6.8.3_OKX_EXIT_SIZE_HOTFIX"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -1897,6 +1897,56 @@ def okx_get_available_balance(ccy):
     except Exception as e:
         return {"success": False, "available": 0.0, "error": str(e), "response": response_payload}
 
+
+def okx_get_instrument_last_price(okx_inst_id):
+    """
+    Fetch current OKX instrument price for exit sizing.
+
+    Important:
+    TradingView/Binance signal prices can differ from OKX spot prices for some
+    instruments/tokens. Exit orders must convert quote size to base quantity
+    using the OKX instrument price, not the signal entry price. This prevents
+    upgraded live BPT positions from only being partially sold on exit.
+    """
+    try:
+        response = requests.get(
+            f"{OKX_BASE_URL}/api/v5/market/ticker",
+            params={"instId": okx_inst_id},
+            timeout=10,
+        )
+        payload = response.json()
+        if response.status_code != 200 or str(payload.get("code")) != "0":
+            return {
+                "success": False,
+                "price": None,
+                "error": f"ticker_failed: {payload}",
+                "response": payload,
+            }
+
+        data = payload.get("data") or []
+        if not data:
+            return {
+                "success": False,
+                "price": None,
+                "error": "ticker_no_data",
+                "response": payload,
+            }
+
+        price_raw = data[0].get("last") or data[0].get("askPx") or data[0].get("bidPx")
+        price = float(price_raw or 0)
+        if price <= 0:
+            return {
+                "success": False,
+                "price": None,
+                "error": f"ticker_invalid_price: {price_raw}",
+                "response": payload,
+            }
+
+        return {"success": True, "price": price, "error": None, "response": payload}
+
+    except Exception as e:
+        return {"success": False, "price": None, "error": str(e), "response": None}
+
 def okx_has_live_position(symbol, reference_price=None):
     """
     v6.6.12 exchange-truth guard.
@@ -2069,11 +2119,26 @@ def okx_place_market_order(cur, trade_id, symbol, direction, action, price=None,
                 }
 
             available_balance = float(balance_result.get("available") or 0)
-            reference_price = entry_price or price or 0
+
+            # v6.8.3 HOTFIX:
+            # Use OKX's own live ticker price for quote->base exit sizing.
+            # Some TradingView/Binance signal prices differ from OKX spot prices,
+            # which caused upgraded BPT exits to sell only part of the real OKX holding.
+            ticker_result = okx_get_instrument_last_price(okx_inst_id)
+            okx_reference_price = float(ticker_result.get("price") or 0) if ticker_result.get("success") else 0.0
+
+            reference_price = okx_reference_price or price or entry_price or 0
             theoretical_trade_size = calculate_exit_base_size(reference_price, quote_size)
             desired_trade_sell_size = theoretical_trade_size * OKX_EXIT_SIZE_BUFFER
             max_safe_available_size = available_balance * OKX_EXIT_SIZE_BUFFER
             sell_size = round(min(desired_trade_sell_size, max_safe_available_size), 8)
+
+            if not ticker_result.get("success"):
+                print(
+                    f"⚠️ OKX TICKER PRICE FALLBACK | {symbol}->{okx_inst_id} | "
+                    f"error={ticker_result.get('error')} | fallback_price={reference_price}",
+                    flush=True
+                )
 
             if sell_size <= 0:
                 request_payload = {
