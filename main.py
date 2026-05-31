@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v6.8.3
-# TITLE: OKX EXIT SIZE HOTFIX
+# VERSION: v6.9.0
+# TITLE: MARKET LIFECYCLE ENGINE LOGGING + TELEGRAM ALERTS
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v6.8.3 OKX EXIT SIZE HOTFIX RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v6.9.0 MARKET LIFECYCLE ENGINE LOGGING RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -363,7 +363,7 @@ MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 3
 
 
 
-DATA_VERSION = "v6.8.3_OKX_EXIT_SIZE_HOTFIX"
+DATA_VERSION = "v6.9.0_MARKET_LIFECYCLE_LOGGING"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -818,6 +818,22 @@ TELEGRAM_WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET")
 ENABLE_TELEGRAM_COMMANDS = os.environ.get("ENABLE_TELEGRAM_COMMANDS", "true").lower() == "true"
 
 # =========================
+# 🌎 MARKET LIFECYCLE ENGINE v6.9
+# =========================
+# Data/logging only. No entry, exit, size, or stacking behaviour changes.
+ENABLE_MARKET_LIFECYCLE_ENGINE_V69 = os.environ.get("ENABLE_MARKET_LIFECYCLE_ENGINE_V69", "true").lower() == "true"
+ENABLE_MARKET_LIFECYCLE_TELEGRAM_V69 = os.environ.get("ENABLE_MARKET_LIFECYCLE_TELEGRAM_V69", "true").lower() == "true"
+
+# V1 core zones discovered 2026-05-31. Treat as observed-state labels, not trade gates.
+LIFECYCLE_DEAD_BREADTH_MAX = float(os.environ.get("LIFECYCLE_DEAD_BREADTH_MAX", "3") or 3)
+LIFECYCLE_DEAD_MEDIAN_MAX = float(os.environ.get("LIFECYCLE_DEAD_MEDIAN_MAX", "1") or 1)
+LIFECYCLE_DEVELOPING_MEDIAN_MIN = float(os.environ.get("LIFECYCLE_DEVELOPING_MEDIAN_MIN", "4") or 4)
+LIFECYCLE_PRODUCTIVE_BREADTH_MIN = float(os.environ.get("LIFECYCLE_PRODUCTIVE_BREADTH_MIN", "3") or 3)
+LIFECYCLE_PRODUCTIVE_BREADTH_MAX = float(os.environ.get("LIFECYCLE_PRODUCTIVE_BREADTH_MAX", "12") or 12)
+LIFECYCLE_CROWDED_BREADTH_MIN = float(os.environ.get("LIFECYCLE_CROWDED_BREADTH_MIN", "10") or 10)
+
+
+# =========================
 # ♻️ ADAPTIVE LIFECYCLE
 # =========================
 
@@ -913,6 +929,212 @@ def safe_update_signal_telemetry(cur, signal_id, telemetry):
         SET {set_sql}
         WHERE id = %s
     """, values)
+
+
+# =========================
+# 🌎 MARKET LIFECYCLE ENGINE v6.9 — DATA ONLY
+# =========================
+
+def safe_float_value(value, default=None):
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def classify_market_lifecycle_state(market_breadth, market_breadth_accel, market_median_peak_context):
+    """
+    Market Lifecycle Engine V1 labels discovered 2026-05-31.
+    IMPORTANT: This is logging/telemetry only in v6.9. It must not gate entries/exits.
+    """
+    breadth = safe_float_value(market_breadth, 0.0)
+    ba = safe_float_value(market_breadth_accel, 0.0)
+    median_ctx = safe_float_value(market_median_peak_context, 0.0)
+
+    if breadth < LIFECYCLE_DEAD_BREADTH_MAX and median_ctx < LIFECYCLE_DEAD_MEDIAN_MAX:
+        state = "DEAD_CORE"
+    elif breadth < LIFECYCLE_DEAD_BREADTH_MAX and median_ctx >= LIFECYCLE_DEVELOPING_MEDIAN_MIN:
+        state = "DEVELOPING_CORE"
+    elif (
+        LIFECYCLE_PRODUCTIVE_BREADTH_MIN <= breadth <= LIFECYCLE_PRODUCTIVE_BREADTH_MAX
+        and ba > 0
+    ):
+        state = "PRODUCTIVE_CORE"
+    elif breadth > LIFECYCLE_CROWDED_BREADTH_MIN and ba < 0:
+        state = "CROWDED_CORE"
+    else:
+        state = "TRANSITION"
+
+    if ba > 0:
+        movement = "RISING"
+    elif ba < 0:
+        movement = "FALLING"
+    else:
+        movement = "STABLE"
+
+    return state, movement, f"{state}_{movement}"
+
+
+def get_market_lifecycle_context(cur, leadership_context=None, signal_time=None):
+    """
+    Builds a no-leakage live lifecycle snapshot.
+
+    Notes:
+    - market_breadth uses the same current breadth components already stored on signals.
+    - market_breadth_accel compares current breadth against the latest previously stored lifecycle breadth.
+    - market_median_peak_context is a live proxy from recent leadership_score_at_signal values where available.
+      Historical backfills can use future_trade_paths_v1, but live code cannot use future data.
+    """
+    ctx = leadership_context or {}
+
+    core = safe_float_value(ctx.get("market_core_count"), 0.0)
+    aggressive = safe_float_value(ctx.get("market_aggressive_count"), 0.0)
+    monster = safe_float_value(ctx.get("market_monster_count"), 0.0)
+    market_breadth = core + aggressive + monster
+
+    previous_breadth = None
+    try:
+        cur.execute("""
+            SELECT market_breadth
+            FROM signals_raw
+            WHERE market_breadth IS NOT NULL
+            ORDER BY timestamp DESC
+            LIMIT 1
+        """)
+        row = cur.fetchone()
+        if row and row[0] is not None:
+            previous_breadth = float(row[0])
+    except Exception as e:
+        print(f"⚠️ lifecycle previous breadth lookup failed: {e}", flush=True)
+
+    market_breadth_accel = (market_breadth - previous_breadth) if previous_breadth is not None else 0.0
+
+    market_median_peak_context = None
+    try:
+        # Live no-leakage proxy. This uses recent already-known signal context, not future paths.
+        cur.execute("""
+            SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY leadership_score_at_signal)
+            FROM signals_raw
+            WHERE leadership_score_at_signal IS NOT NULL
+              AND timestamp >= NOW() - INTERVAL '60 minutes'
+        """)
+        row = cur.fetchone()
+        if row and row[0] is not None:
+            market_median_peak_context = float(row[0])
+    except Exception as e:
+        print(f"⚠️ lifecycle median context lookup failed: {e}", flush=True)
+
+    if market_median_peak_context is None:
+        # Last-resort no-leakage fallback. Keeps logging populated without blocking the bot.
+        market_median_peak_context = safe_float_value(ctx.get("prior_avg_peak") or ctx.get("leadership_score"), 0.0)
+
+    state, movement, window = classify_market_lifecycle_state(
+        market_breadth,
+        market_breadth_accel,
+        market_median_peak_context
+    )
+
+    return {
+        "market_lifecycle_state": state,
+        "market_lifecycle_movement": movement,
+        "market_lifecycle_window": window,
+        "market_breadth": market_breadth,
+        "market_breadth_accel": market_breadth_accel,
+        "market_median_peak_context": market_median_peak_context,
+    }
+
+
+def ensure_market_lifecycle_alert_state_table(cur):
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS market_lifecycle_alert_state (
+            id INTEGER PRIMARY KEY DEFAULT 1,
+            last_window TEXT,
+            last_state TEXT,
+            last_movement TEXT,
+            last_breadth NUMERIC,
+            last_breadth_accel NUMERIC,
+            last_median_peak_context NUMERIC,
+            updated_at TIMESTAMPTZ DEFAULT NOW(),
+            CHECK (id = 1)
+        )
+    """)
+
+
+def maybe_send_market_lifecycle_change_alert(cur, lifecycle_context):
+    if not ENABLE_MARKET_LIFECYCLE_ENGINE_V69 or not ENABLE_MARKET_LIFECYCLE_TELEGRAM_V69:
+        return False
+    if not lifecycle_context:
+        return False
+
+    current_window = lifecycle_context.get("market_lifecycle_window")
+    if not current_window:
+        return False
+
+    try:
+        ensure_market_lifecycle_alert_state_table(cur)
+        cur.execute("SELECT last_window FROM market_lifecycle_alert_state WHERE id = 1")
+        row = cur.fetchone()
+        previous_window = row[0] if row else None
+
+        if previous_window == current_window:
+            return False
+
+        msg = (
+            "🌎 <b>MARKET LIFECYCLE CHANGE</b>\n"
+            f"Previous: <b>{previous_window or 'n/a'}</b>\n"
+            f"Current: <b>{current_window}</b>\n"
+            f"State: {lifecycle_context.get('market_lifecycle_state')} | "
+            f"Move: {lifecycle_context.get('market_lifecycle_movement')}\n"
+            f"Breadth: {fmt_num(lifecycle_context.get('market_breadth'), 2)} | "
+            f"BA: {fmt_num(lifecycle_context.get('market_breadth_accel'), 2)}\n"
+            f"Median ctx: {fmt_num(lifecycle_context.get('market_median_peak_context'), 3)}\n"
+            "Mode: data/logging only — no trade behaviour changed."
+        )
+
+        sent = send_telegram_alert(msg)
+
+        cur.execute("""
+            INSERT INTO market_lifecycle_alert_state (
+                id, last_window, last_state, last_movement,
+                last_breadth, last_breadth_accel, last_median_peak_context, updated_at
+            )
+            VALUES (1,%s,%s,%s,%s,%s,%s,NOW())
+            ON CONFLICT (id) DO UPDATE SET
+                last_window = EXCLUDED.last_window,
+                last_state = EXCLUDED.last_state,
+                last_movement = EXCLUDED.last_movement,
+                last_breadth = EXCLUDED.last_breadth,
+                last_breadth_accel = EXCLUDED.last_breadth_accel,
+                last_median_peak_context = EXCLUDED.last_median_peak_context,
+                updated_at = NOW()
+        """, (
+            lifecycle_context.get("market_lifecycle_window"),
+            lifecycle_context.get("market_lifecycle_state"),
+            lifecycle_context.get("market_lifecycle_movement"),
+            lifecycle_context.get("market_breadth"),
+            lifecycle_context.get("market_breadth_accel"),
+            lifecycle_context.get("market_median_peak_context"),
+        ))
+
+        return sent
+    except Exception as e:
+        print(f"⚠️ lifecycle Telegram alert skipped: {e}", flush=True)
+        safe_telemetry_rollback(cur)
+        return False
+
+
+def lifecycle_trade_telemetry_from_context(ctx):
+    ctx = ctx or {}
+    return {
+        "market_lifecycle_state_at_entry": ctx.get("market_lifecycle_state"),
+        "market_lifecycle_movement_at_entry": ctx.get("market_lifecycle_movement"),
+        "market_lifecycle_window_at_entry": ctx.get("market_lifecycle_window"),
+        "market_breadth_at_entry": ctx.get("market_breadth"),
+        "market_breadth_accel_at_entry": ctx.get("market_breadth_accel"),
+        "market_median_peak_context_at_entry": ctx.get("market_median_peak_context"),
+    }
 
 def live_entry_allowed_by_control_panel():
     return ENABLE_LIVE_ORDERS and ENABLE_LIVE_TRADING and ENABLE_NEW_ENTRIES and not EMERGENCY_CLOSE_ONLY_MODE and ENABLE_LONGS
@@ -2674,6 +2896,7 @@ def open_shadow_cqe_trade(cur, symbol, price, momentum, trend, signal_id, signal
         "lifecycle_phase_at_entry": (leadership_context or {}).get("lifecycle_phase") or (leadership_context or {}).get("leadership_phase"),
         "leadership_score": (leadership_context or {}).get("prior_avg_peak"),
         "leadership_delta_30m_at_entry": (leadership_context or {}).get("leadership_delta_30m") or (leadership_context or {}).get("delta_30m"),
+        **lifecycle_trade_telemetry_from_context(leadership_context),
     })
 
     try:
@@ -3047,6 +3270,7 @@ def open_bpt_cqe_probe_trade(cur, symbol, price, momentum, trend, signal_id, sig
         "lifecycle_phase_at_entry": (leadership_context or {}).get("lifecycle_phase") or (leadership_context or {}).get("leadership_phase"),
         "leadership_score": (leadership_context or {}).get("prior_avg_peak"),
         "leadership_delta_30m_at_entry": (leadership_context or {}).get("leadership_delta_30m") or (leadership_context or {}).get("delta_30m"),
+        **lifecycle_trade_telemetry_from_context(leadership_context),
     })
 
     try:
@@ -5020,7 +5244,12 @@ def open_trade(cur, symbol, direction, price, momentum, trend, quality,
         raise
 
     try:
-        safe_update_trade_telemetry(cur, trade_id, {"market_os_engine": entry_snapshot.get("market_os_engine"), "size_scaling_reason": entry_snapshot.get("size_scaling_reason")})
+        entry_optional_telemetry = {
+            "market_os_engine": entry_snapshot.get("market_os_engine"),
+            "size_scaling_reason": entry_snapshot.get("size_scaling_reason"),
+        }
+        entry_optional_telemetry.update(lifecycle_trade_telemetry_from_context(leadership_context))
+        safe_update_trade_telemetry(cur, trade_id, entry_optional_telemetry)
         cur.connection.commit()
     except Exception as e:
         print(f"⚠️ optional entry telemetry update failed after snapshot persisted: {e}", flush=True)
@@ -5600,6 +5829,21 @@ def webhook():
         except Exception as e:
             print(f"⚠️ signals_raw intelligence update skipped: {e}", flush=True)
 
+        # ================= MARKET LIFECYCLE ENGINE v6.9 — DATA ONLY =================
+        # Calculates/stores lifecycle labels for research. Does not alter entries/exits/sizing.
+        try:
+            if ENABLE_MARKET_LIFECYCLE_ENGINE_V69:
+                lifecycle_context_v69 = get_market_lifecycle_context(cur, leadership_context, signal_time)
+                safe_update_signal_telemetry(cur, signal_id, lifecycle_context_v69)
+
+                leadership_context = leadership_context or {}
+                leadership_context.update(lifecycle_context_v69)
+
+                maybe_send_market_lifecycle_change_alert(cur, lifecycle_context_v69)
+        except Exception as e:
+            print(f"⚠️ market lifecycle v6.9 logging skipped: {e}", flush=True)
+            safe_telemetry_rollback(cur)
+
         # ================= SHADOW CQE ENTRY ENGINE =================
         try:
             if decision == "LONG" and leadership_context:
@@ -5732,6 +5976,10 @@ def webhook():
                         f"{leadership_context.get('market_core_count') or 0}/"
                         f"{leadership_context.get('market_aggressive_count') or 0}/"
                         f"{leadership_context.get('market_monster_count') or 0}\n"
+                        f"Lifecycle: {leadership_context.get('market_lifecycle_window') or 'n/a'} | "
+                        f"B {fmt_num(leadership_context.get('market_breadth'), 2)} | "
+                        f"BA {fmt_num(leadership_context.get('market_breadth_accel'), 2)} | "
+                        f"Med {fmt_num(leadership_context.get('market_median_peak_context'), 3)}\n"
                         f"Slots {live_open_after_entry}/{MAX_OPEN_TRADES} | Same {same_symbol_after_entry}/{MAX_SAME_SYMBOL_OPEN}\n"
                         f"ID {trade_id}\n\n"
                         f"<b>Leaders</b>\n{top_leaders_text}"
@@ -7274,3 +7522,5 @@ except Exception as e:
 #     control panel
 #     exits
 #     sizing
+
+        
