@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v6.9.1
-# TITLE: MARKET LIFECYCLE ENGINE LOGGING + TELEGRAM ALERTS
+# VERSION: v6.9.2
+# TITLE: CAPITAL ALLOCATION + ENGINE SHADOWING UPDATE
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v6.9.0 v6.9.1 EXECUTION INTEGRITY HOTFIX RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v6.9.2 CAPITAL ALLOCATION + ENGINE SHADOWING UPDATE RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -363,7 +363,7 @@ MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 3
 
 
 
-DATA_VERSION = "v6.9.0_MARKET_LIFECYCLE_LOGGING"
+DATA_VERSION = "v6.9.2_CAPITAL_ALLOCATION_SHADOW_UPDATE"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -414,7 +414,11 @@ ENABLE_MARKET_OS_V66 = os.environ.get("ENABLE_MARKET_OS_V66", "true").lower() ==
 # Leadership scaling / capital allocation
 ENABLE_LEADERSHIP_SIZE_SCALING_V66 = os.environ.get("ENABLE_LEADERSHIP_SIZE_SCALING_V66", "true").lower() == "true"
 LEADERSHIP_SCALE_THRESHOLD = float(os.environ.get("LEADERSHIP_SCALE_THRESHOLD", "2.0") or 2.0)
-LEADERSHIP_SCALED_TRADE_SIZE_GBP = float(os.environ.get("LEADERSHIP_SCALED_TRADE_SIZE_GBP", "20") or 20)
+LEADERSHIP_SCALED_TRADE_SIZE_GBP = float(os.environ.get("LEADERSHIP_SCALED_TRADE_SIZE_GBP", "30") or 30)
+ENABLE_LEADERSHIP_CORE_LIVE = os.environ.get("ENABLE_LEADERSHIP_CORE_LIVE", "false").lower() == "true"
+ENABLE_LEADERSHIP_CORE_SHADOW = os.environ.get("ENABLE_LEADERSHIP_CORE_SHADOW", "true").lower() == "true"
+LEADERSHIP_CORE_SHADOW_HOLD_MINUTES = float(os.environ.get("LEADERSHIP_CORE_SHADOW_HOLD_MINUTES", "120") or 120)
+LEADERSHIP_CORE_SHADOW_HARD_STOP = float(os.environ.get("LEADERSHIP_CORE_SHADOW_HARD_STOP", "-0.60") or -0.60)
 
 # Partial profit bank: bank a small piece of position only after meaningful expansion.
 ENABLE_PARTIAL_PROFIT_BANK_V66 = os.environ.get("ENABLE_PARTIAL_PROFIT_BANK_V66", "true").lower() == "true"
@@ -422,7 +426,11 @@ PARTIAL_BANK_TRIGGER_PCT = float(os.environ.get("PARTIAL_BANK_TRIGGER_PCT", "4.0
 PARTIAL_BANK_FRACTION = float(os.environ.get("PARTIAL_BANK_FRACTION", "0.25") or 0.25)
 
 # Rotational micro continuation layer. Independent from elite core, tiny size only.
-ENABLE_ROT_MICRO_LIVE = os.environ.get("ENABLE_ROT_MICRO_LIVE", "true").lower() == "true"
+ENABLE_ROT_MICRO_LIVE = os.environ.get("ENABLE_ROT_MICRO_LIVE", "false").lower() == "true"
+ENABLE_ROT_MICRO_SHADOW = os.environ.get("ENABLE_ROT_MICRO_SHADOW", "true").lower() == "true"
+ROT_MICRO_MIN_CONTEXT = float(os.environ.get("ROT_MICRO_MIN_CONTEXT", "4.0") or 4.0)
+ROT_MICRO_SHADOW_HOLD_MINUTES = float(os.environ.get("ROT_MICRO_SHADOW_HOLD_MINUTES", "120") or 120)
+ROT_MICRO_SHADOW_HARD_STOP = float(os.environ.get("ROT_MICRO_SHADOW_HARD_STOP", "-0.60") or -0.60)
 ROT_MICRO_TRADE_SIZE_GBP = float(os.environ.get("ROT_MICRO_TRADE_SIZE_GBP", "5") or 5)
 ROT_MICRO_MIN_MOMENTUM = float(os.environ.get("ROT_MICRO_MIN_MOMENTUM", "0.30") or 0.30)
 ROT_MICRO_MIN_TREND = float(os.environ.get("ROT_MICRO_MIN_TREND", "0.10") or 0.10)
@@ -665,6 +673,8 @@ ENABLE_CQE_REAL_SCALEINS = os.environ.get(
 CQE_REAL_SCALEIN_ALLOWED_ROWS = [
     "HIGH_MONSTER_ROW",
     "EXTREME_RUNNER_ROW",
+    "MEDIUM_BALANCED_ROW",
+    "EARLY_INCUBATION_ROW",
 ]
 
 CQE_SCALEIN_MIN_LIVE_PRESSURE = float(os.environ.get("CQE_SCALEIN_MIN_LIVE_PRESSURE", "0.35") or 0.35)
@@ -673,9 +683,13 @@ CQE_SCALEIN_MIN_DELTA_30M = float(os.environ.get("CQE_SCALEIN_MIN_DELTA_30M", "0
 # Minimum order protection for tiny OKX scale-ins.
 MIN_OKX_ORDER_NOTIONAL_GBP = float(os.environ.get("MIN_OKX_ORDER_NOTIONAL_GBP", "15.0") or 15.0)
 
+# v6.9.2 capital utilisation: use available quote balance instead of skipping near-full-size entries.
+ALLOW_PARTIAL_POSITION_FILL = os.environ.get("ALLOW_PARTIAL_POSITION_FILL", "true").lower() == "true"
+MIN_POSITION_SIZE_GBP = float(os.environ.get("MIN_POSITION_SIZE_GBP", "10") or 10)
+
 
 BPT_CQE_ENTRY_QUALITY = "BPT_CQE_LIFECYCLE_V1"
-BPT_CQE_PROBE_SIZE_GBP = float(os.environ.get("BPT_CQE_PROBE_SIZE_GBP", "15") or 15)
+BPT_CQE_PROBE_SIZE_GBP = float(os.environ.get("BPT_CQE_PROBE_SIZE_GBP", "10") or 10)
 BPT_CQE_MAX_OPEN_TRADES = int(os.environ.get("BPT_CQE_MAX_OPEN_TRADES", "5") or 5)
 BPT_CQE_MAX_SAME_SYMBOL_OPEN = int(os.environ.get("BPT_CQE_MAX_SAME_SYMBOL_OPEN", "1") or 1)
 
@@ -699,19 +713,19 @@ BPT_HIGH_QUALITY_SCORE = float(os.environ.get("BPT_HIGH_QUALITY_SCORE", "1.2") o
 BPT_MEDIUM_QUALITY_SCORE = float(os.environ.get("BPT_MEDIUM_QUALITY_SCORE", "0.6") or 0.6)
 
 # Row-specific upgrade sizes and exits.
-BPT_EXTREME_UPGRADE_GBP = float(os.environ.get("BPT_EXTREME_UPGRADE_GBP", "20") or 20)
+BPT_EXTREME_UPGRADE_GBP = float(os.environ.get("BPT_EXTREME_UPGRADE_GBP", "25") or 25)
 BPT_EXTREME_TRAIL_ACTIVATION = float(os.environ.get("BPT_EXTREME_TRAIL_ACTIVATION", "2.0") or 2.0)
 BPT_EXTREME_TRAIL_DRAWDOWN = float(os.environ.get("BPT_EXTREME_TRAIL_DRAWDOWN", "0.75") or 0.75)
 
-BPT_HIGH_UPGRADE_GBP = float(os.environ.get("BPT_HIGH_UPGRADE_GBP", "25") or 25)
+BPT_HIGH_UPGRADE_GBP = float(os.environ.get("BPT_HIGH_UPGRADE_GBP", "35") or 35)
 BPT_HIGH_TRAIL_ACTIVATION = float(os.environ.get("BPT_HIGH_TRAIL_ACTIVATION", "3.0") or 3.0)
 BPT_HIGH_TRAIL_DRAWDOWN = float(os.environ.get("BPT_HIGH_TRAIL_DRAWDOWN", "1.0") or 1.0)
 
-BPT_MEDIUM_UPGRADE_GBP = float(os.environ.get("BPT_MEDIUM_UPGRADE_GBP", "35") or 35)
+BPT_MEDIUM_UPGRADE_GBP = float(os.environ.get("BPT_MEDIUM_UPGRADE_GBP", "45") or 45)
 BPT_MEDIUM_TRAIL_ACTIVATION = float(os.environ.get("BPT_MEDIUM_TRAIL_ACTIVATION", "5.0") or 5.0)
 BPT_MEDIUM_TRAIL_DRAWDOWN = float(os.environ.get("BPT_MEDIUM_TRAIL_DRAWDOWN", "1.5") or 1.5)
 
-BPT_EARLY_UPGRADE_GBP = float(os.environ.get("BPT_EARLY_UPGRADE_GBP", "10") or 10)
+BPT_EARLY_UPGRADE_GBP = float(os.environ.get("BPT_EARLY_UPGRADE_GBP", "15") or 15)
 BPT_EARLY_TRAIL_ACTIVATION = float(os.environ.get("BPT_EARLY_TRAIL_ACTIVATION", "2.0") or 2.0)
 BPT_EARLY_TRAIL_DRAWDOWN = float(os.environ.get("BPT_EARLY_TRAIL_DRAWDOWN", "0.75") or 0.75)
 BPT_EARLY_FAILFAST_MINUTES = float(os.environ.get("BPT_EARLY_FAILFAST_MINUTES", "120") or 120)
@@ -1666,10 +1680,15 @@ def get_trade_size_quote_for_context(entry_quality, leadership_context=None):
     return get_trade_size_for_context(entry_quality, leadership_context)
 
 
-def is_rot_micro_candidate(cur, symbol, momentum, trend):
+def is_rot_micro_candidate(cur, symbol, momentum, trend, leadership_context=None, shadow_mode=False):
     """Independent rotational micro layer. Small size only. Does not replace core."""
-    if not (ENABLE_MARKET_OS_V66 and ENABLE_ROT_MICRO_LIVE):
-        return False, "rot_micro_disabled", {}
+    if not ENABLE_MARKET_OS_V66:
+        return False, "rot_micro_market_os_disabled", {}
+    if shadow_mode:
+        if not ENABLE_ROT_MICRO_SHADOW:
+            return False, "rot_micro_shadow_disabled", {}
+    elif not ENABLE_ROT_MICRO_LIVE:
+        return False, "rot_micro_live_disabled", {}
     lead60 = get_recent_leadership_max(cur, symbol, 60)
     ctx = {
         "leadership_max_60m": lead60,
@@ -1684,6 +1703,15 @@ def is_rot_micro_candidate(cur, symbol, momentum, trend):
         return False, "rot_micro_low_lead60", ctx
     if lead60 >= ROT_MICRO_MAX_LEAD60:
         return False, "rot_micro_lead_too_high_core_zone", ctx
+
+    market_context = safe_float_value((leadership_context or {}).get("market_median_peak_context"), None)
+    if market_context is not None:
+        ctx["market_median_peak_context"] = market_context
+    if shadow_mode and market_context is not None and market_context < ROT_MICRO_MIN_CONTEXT:
+        return False, "rot_micro_context_too_low", ctx
+    if shadow_mode and market_context is None:
+        return False, "rot_micro_context_missing", ctx
+
     return True, "rot_micro_ok", ctx
 
 
@@ -1898,6 +1926,75 @@ def okx_inst_id_to_base_ccy(okx_inst_id):
     if not okx_inst_id or "-" not in okx_inst_id:
         return None
     return okx_inst_id.split("-")[0].upper()
+
+def okx_inst_id_to_quote_ccy(okx_inst_id):
+    if not okx_inst_id or "-" not in okx_inst_id:
+        return None
+    return okx_inst_id.split("-")[-1].upper()
+
+def resolve_live_entry_quote_size(cur, symbol, okx_inst_id, requested_quote_size):
+    """
+    v6.9.2: If available quote balance is slightly below requested size,
+    use what is available instead of skipping a valid signal.
+    Below MIN_POSITION_SIZE_GBP, fail closed and do not place the live entry.
+    """
+    requested = float(requested_quote_size or 0)
+    if requested <= 0:
+        return 0.0, {"adjusted": False, "reason": "invalid_requested_size"}
+
+    if not ALLOW_PARTIAL_POSITION_FILL:
+        return requested, {"adjusted": False, "reason": "partial_fill_disabled"}
+
+    quote_ccy = okx_inst_id_to_quote_ccy(okx_inst_id) or "USDT"
+
+    try:
+        balance_result = okx_get_available_balance(quote_ccy)
+        if not balance_result.get("success"):
+            return requested, {
+                "adjusted": False,
+                "reason": "quote_balance_lookup_failed_use_requested",
+                "quote_ccy": quote_ccy,
+                "error": balance_result.get("error"),
+            }
+
+        available = float(balance_result.get("available") or 0)
+        actual = min(requested, available)
+
+        if actual < float(MIN_POSITION_SIZE_GBP):
+            return 0.0, {
+                "adjusted": True,
+                "reason": "available_below_min_position_size",
+                "quote_ccy": quote_ccy,
+                "requested_quote_size": requested,
+                "available_quote_size": available,
+                "min_position_size": float(MIN_POSITION_SIZE_GBP),
+            }
+
+        if actual < requested:
+            return actual, {
+                "adjusted": True,
+                "reason": "partial_position_fill",
+                "quote_ccy": quote_ccy,
+                "requested_quote_size": requested,
+                "available_quote_size": available,
+                "actual_quote_size": actual,
+            }
+
+        return requested, {
+            "adjusted": False,
+            "reason": "sufficient_quote_balance",
+            "quote_ccy": quote_ccy,
+            "requested_quote_size": requested,
+            "available_quote_size": available,
+        }
+
+    except Exception as e:
+        return requested, {
+            "adjusted": False,
+            "reason": "partial_fill_exception_use_requested",
+            "quote_ccy": quote_ccy,
+            "error": str(e),
+        }
 
 def get_okx_timestamp():
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
@@ -2311,6 +2408,43 @@ def okx_place_market_order(cur, trade_id, symbol, direction, action, price=None,
 
     if action == "entry":
         side = "buy"
+
+        partial_fill_context = {"adjusted": False, "reason": "not_checked"}
+        if live_entry_allowed_by_control_panel():
+            adjusted_quote_size, partial_fill_context = resolve_live_entry_quote_size(
+                cur, symbol, okx_inst_id, quote_size
+            )
+            if adjusted_quote_size <= 0:
+                request_payload = {
+                    "blocked": True,
+                    "reason": partial_fill_context.get("reason"),
+                    "symbol": symbol,
+                    "okx_inst_id": okx_inst_id,
+                    "action": action,
+                    "requested_quote_size": quote_size,
+                    "partial_fill_context": partial_fill_context,
+                }
+                log_okx_order(
+                    cur, trade_id, symbol, okx_inst_id, action, side, direction,
+                    False, request_payload, partial_fill_context, False,
+                    f"entry_size_below_min_position: {partial_fill_context.get('reason')}"
+                )
+                print(
+                    f"⛔ OKX ENTRY SIZE SKIPPED | {symbol}->{okx_inst_id} | "
+                    f"requested={quote_size} | context={partial_fill_context}",
+                    flush=True
+                )
+                return {
+                    "success": False,
+                    "dry_run": False,
+                    "blocked": True,
+                    "reason": partial_fill_context.get("reason"),
+                    "requested_quote_size": quote_size,
+                    "actual_quote_size": 0.0,
+                    "partial_fill_context": partial_fill_context,
+                }
+            quote_size = adjusted_quote_size
+
         payload = {
             "instId": okx_inst_id,
             "tdMode": OKX_TD_MODE,
@@ -2440,7 +2574,8 @@ def okx_place_market_order(cur, trade_id, symbol, direction, action, price=None,
             "dry_run": True,
             "message": "OKX live orders disabled. No order sent.",
             "payload": payload,
-            "requested_quote_size": quote_size
+            "requested_quote_size": quote_size,
+            "actual_quote_size": quote_size
         }
         log_okx_order(
             cur, trade_id, symbol, okx_inst_id, action, side, direction,
@@ -2544,7 +2679,9 @@ def okx_place_market_order(cur, trade_id, symbol, direction, action, price=None,
             "success": success,
             "dry_run": False,
             "status_code": response.status_code,
-            "response": response_payload
+            "response": response_payload,
+            "actual_quote_size": quote_size,
+            "partial_fill_context": partial_fill_context if action == "entry" else None,
         }
 
     except Exception as e:
@@ -3293,7 +3430,7 @@ def open_bpt_cqe_probe_trade(cur, symbol, price, momentum, trend, signal_id, sig
         print(f"⚠️ BPT CQE trade_events probe entry log failed: {e}", flush=True)
 
     if ENABLE_BPT_CQE_LIVE_PROBES:
-        okx_place_market_order(
+        okx_probe_result = okx_place_market_order(
             cur=cur,
             trade_id=trade_id,
             symbol=symbol,
@@ -3303,6 +3440,23 @@ def open_bpt_cqe_probe_trade(cur, symbol, price, momentum, trend, signal_id, sig
             entry_price=price,
             trade_size_quote=BPT_CQE_PROBE_SIZE_GBP,
         )
+        if okx_probe_result.get("success"):
+            actual_probe_size = float(okx_probe_result.get("actual_quote_size") or BPT_CQE_PROBE_SIZE_GBP)
+            if abs(actual_probe_size - float(BPT_CQE_PROBE_SIZE_GBP)) > 0.0001:
+                safe_update_trade_telemetry(cur, trade_id, {
+                    "trade_size_gbp": actual_probe_size,
+                    "dynamic_trade_size_gbp": actual_probe_size,
+                    "probe_size_gbp": actual_probe_size,
+                    "size_scaling_reason": "bpt_probe_partial_position_fill",
+                })
+        else:
+            cur.execute("""
+                UPDATE bot_trades_v4
+                SET status = 'CLOSED',
+                    closed_at = NOW(),
+                    close_reason = %s
+                WHERE id = %s
+            """, (f"okx_bpt_probe_failed: {okx_probe_result.get('reason') or okx_probe_result.get('error')}", trade_id))
 
     print(
         f"🧬 OPEN BPT CQE PROBE | {symbol} | id={trade_id} | row={lifecycle_row} | "
@@ -3433,7 +3587,7 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
         print(f"⚠️ BPT CQE upgrade trade_events log failed: {e}", flush=True)
 
     if ENABLE_BPT_CQE_LIVE_UPGRADES and scalein_allowed:
-        okx_place_market_order(
+        okx_upgrade_result = okx_place_market_order(
             cur=cur,
             trade_id=tid,
             symbol=sym,
@@ -3443,6 +3597,19 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
             entry_price=entry_price,
             trade_size_quote=upgrade_size,
         )
+        if okx_upgrade_result.get("success"):
+            actual_upgrade_size = float(okx_upgrade_result.get("actual_quote_size") or upgrade_size)
+            if abs(actual_upgrade_size - float(upgrade_size or 0)) > 0.0001:
+                upgrade_size = actual_upgrade_size
+                new_dynamic_size = current_dynamic_size + actual_upgrade_size
+                safe_update_trade_telemetry(cur, tid, {
+                    "dynamic_trade_size_gbp": new_dynamic_size,
+                    "trade_size_gbp": new_dynamic_size,
+                    "upgrade_size_gbp": actual_upgrade_size,
+                    "size_scaling_reason": "bpt_upgrade_partial_position_fill",
+                })
+        else:
+            print(f"⚠️ BPT CQE LIVE UPGRADE ORDER FAILED/SKIPPED | {sym} | id={tid} | {okx_upgrade_result}", flush=True)
 
     print(
         f"🚀 BPT CQE UPGRADED | {sym} | id={tid} | row={lifecycle_row} | "
@@ -5303,6 +5470,136 @@ def open_trade(cur, symbol, direction, price, momentum, trend, quality,
     return trade_id
 
 
+def open_shadow_market_os_trade(cur, symbol, direction, price, momentum, trend, quality,
+                                signal_id, signal_time, leadership_context, shadow_reason,
+                                model_size_gbp=10.0):
+    """v6.9.2: paper/shadow version of live leadership/ROT entries."""
+    entry_snapshot = build_entry_leadership_snapshot(quality, leadership_context or {})
+
+    cur.execute("""
+        INSERT INTO bot_trades_v4 (
+            symbol, direction, entry_price, status, opened_at, data_version,
+            momentum_strength, trend_strength, entry_quality, peak_pnl_percent,
+            signal_id, signal_timestamp,
+            trade_size_gbp, dynamic_trade_size_gbp,
+            leadership_prior_successes, leadership_prior_runners, leadership_prior_avg_peak,
+            leadership_tier, leadership_mode, leadership_score,
+            lifecycle_phase_at_entry, prior_lifecycle_phase_at_entry, leadership_transition_at_entry,
+            leadership_delta_5m_at_entry, leadership_delta_15m_at_entry, leadership_delta_30m_at_entry,
+            leadership_delta_60m_at_entry, leadership_score_30m_ago_at_entry,
+            leadership_age_minutes_at_entry, leadership_peak_score_last_4h_at_entry, leadership_rank_at_entry,
+            market_near_count_at_entry, market_core_count_at_entry, market_aggressive_count_at_entry,
+            market_monster_count_at_entry, shadow_emergence_detected_at_entry, shadow_emergence_reason_at_entry,
+            is_shadow
+        )
+        VALUES (
+            %s,%s,%s,'OPEN',NOW(),%s,%s,%s,%s,0,%s,%s,
+            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+            TRUE
+        )
+        RETURNING id
+    """, (
+        symbol, direction, price, DATA_VERSION, momentum, trend, quality, signal_id, signal_time,
+        model_size_gbp, model_size_gbp,
+        entry_snapshot.get("leadership_prior_successes"), entry_snapshot.get("leadership_prior_runners"),
+        entry_snapshot.get("leadership_prior_avg_peak"), entry_snapshot.get("leadership_tier"),
+        entry_snapshot.get("leadership_mode"), entry_snapshot.get("leadership_score"),
+        entry_snapshot.get("lifecycle_phase_at_entry"), entry_snapshot.get("prior_lifecycle_phase_at_entry"),
+        entry_snapshot.get("leadership_transition_at_entry"), entry_snapshot.get("leadership_delta_5m_at_entry"),
+        entry_snapshot.get("leadership_delta_15m_at_entry"), entry_snapshot.get("leadership_delta_30m_at_entry"),
+        entry_snapshot.get("leadership_delta_60m_at_entry"), entry_snapshot.get("leadership_score_30m_ago_at_entry"),
+        entry_snapshot.get("leadership_age_minutes_at_entry"), entry_snapshot.get("leadership_peak_score_last_4h_at_entry"),
+        entry_snapshot.get("leadership_rank_at_entry"), entry_snapshot.get("market_near_count_at_entry"),
+        entry_snapshot.get("market_core_count_at_entry"), entry_snapshot.get("market_aggressive_count_at_entry"),
+        entry_snapshot.get("market_monster_count_at_entry"), entry_snapshot.get("shadow_emergence_detected_at_entry"),
+        entry_snapshot.get("shadow_emergence_reason_at_entry"),
+    ))
+    trade_id = cur.fetchone()[0]
+
+    safe_update_trade_telemetry(cur, trade_id, {
+        "is_shadow": True,
+        "entry_architecture": quality,
+        "trade_size_gbp": model_size_gbp,
+        "dynamic_trade_size_gbp": model_size_gbp,
+        "market_os_engine": (leadership_context or {}).get("market_os_engine"),
+        "size_scaling_reason": shadow_reason,
+        **lifecycle_trade_telemetry_from_context(leadership_context),
+    })
+
+    try:
+        log_trade_event(cur, trade_id, symbol, f"{quality.lower()}_shadow_entry", price, 0, 0, 0, momentum, trend, True)
+    except Exception as e:
+        print(f"⚠️ {quality} shadow trade_events entry log failed: {e}", flush=True)
+
+    print(f"🧪 OPEN SHADOW | {quality} | {symbol} | id={trade_id} | size={fmt_money(model_size_gbp)} | reason={shadow_reason}", flush=True)
+    send_telegram_alert(
+        f"🧪 <b>SHADOW ENTRY</b>\n"
+        f"{engine_emoji(quality)} <b>{engine_display_name(quality)}</b> | {symbol} LONG\n"
+        f"Model size {fmt_money(model_size_gbp)} | Reason: {shadow_reason}\n"
+        f"Entry {price} | T/M {fmt_num(trend)} / {fmt_num(momentum)}\n"
+        f"Context {fmt_num((leadership_context or {}).get('market_median_peak_context'), 3)} | "
+        f"Score {fmt_num((leadership_context or {}).get('prior_avg_peak'))}\n"
+        f"ID {trade_id}"
+    )
+    return trade_id
+
+
+def process_market_os_shadow_trades(cur, symbol, price, momentum, trend, now):
+    """Simple shadow lifecycle for ROT/Core research rows."""
+    cur.execute("""
+        SELECT id, symbol, direction, entry_price, opened_at, peak_pnl_percent,
+               entry_quality, COALESCE(dynamic_trade_size_gbp, trade_size_gbp, 10)
+        FROM bot_trades_v4
+        WHERE status = 'OPEN'
+          AND COALESCE(is_shadow, FALSE) = TRUE
+          AND entry_quality IN ('ROT_MICRO_V1', 'LEADERSHIP_CORE')
+          AND symbol = %s
+    """, (symbol,))
+    rows = cur.fetchall() or []
+
+    for tid, sym, direction, entry_price, opened_at, peak_pnl, entry_quality, dyn_size in rows:
+        try:
+            pnl_percent = calculate_pnl_percent(direction, entry_price, price)
+            current_peak = max(float(peak_pnl or 0), float(pnl_percent or 0))
+            mins = safe_age_minutes(opened_at, now) or 0
+            model_size = float(dyn_size or 10)
+
+            hold_minutes = ROT_MICRO_SHADOW_HOLD_MINUTES if entry_quality == "ROT_MICRO_V1" else LEADERSHIP_CORE_SHADOW_HOLD_MINUTES
+            hard_stop = ROT_MICRO_SHADOW_HARD_STOP if entry_quality == "ROT_MICRO_V1" else LEADERSHIP_CORE_SHADOW_HARD_STOP
+
+            close_reason = None
+            if pnl_percent <= hard_stop:
+                close_reason = "shadow_hard_stop"
+            elif mins >= hold_minutes:
+                close_reason = "shadow_time_exit"
+
+            if close_reason:
+                pnl_gbp = (pnl_percent / 100.0) * model_size
+                cur.execute("""
+                    UPDATE bot_trades_v4
+                    SET status = 'CLOSED',
+                        closed_at = NOW(),
+                        close_price = %s,
+                        close_reason = %s,
+                        pnl_percent = %s,
+                        pnl_gbp = %s,
+                        peak_pnl_percent = %s,
+                        exit_momentum = %s,
+                        exit_trend = %s
+                    WHERE id = %s
+                """, (price, close_reason, pnl_percent, pnl_gbp, current_peak, momentum, trend, tid))
+                log_trade_event(cur, tid, sym, close_reason, price, pnl_percent, current_peak, mins, momentum, trend, False)
+                print(f"🧪 CLOSE SHADOW | {entry_quality} | {sym} | {round(pnl_percent,3)}% | peak={round(current_peak,3)}% | {close_reason}", flush=True)
+            else:
+                cur.execute("""
+                    UPDATE bot_trades_v4
+                    SET peak_pnl_percent = GREATEST(COALESCE(peak_pnl_percent,0), %s),
+                        last_price = %s
+                    WHERE id = %s
+                """, (current_peak, price, tid))
+        except Exception as e:
+            print(f"⚠️ market OS shadow processing failed for {symbol}/{tid}: {e}", flush=True)
+
 
 def write_leadership_state_snapshots(cur):
     """
@@ -5718,11 +6015,26 @@ def webhook():
                 else:
                     leadership_context["size_scaling_reason"] = "base_core_size"
 
-                # v6.1.4: check OKX tradability BEFORE creating DB trade / consuming slot.
-                okx_tradable, okx_tradability_reason = is_okx_symbol_live_tradable(symbol)
-                if not okx_tradable:
+                # v6.9.2: Core leadership is research/shadow only unless explicitly re-enabled.
+                if entry_quality == "LEADERSHIP_CORE" and not ENABLE_LEADERSHIP_CORE_LIVE:
+                    if ENABLE_LEADERSHIP_CORE_SHADOW:
+                        shadow_ctx = dict(leadership_context or {})
+                        shadow_ctx["market_os_engine"] = "LEADERSHIP_CORE_SHADOW"
+                        open_shadow_market_os_trade(
+                            cur, symbol, "LONG", price, momentum, trend,
+                            "LEADERSHIP_CORE", signal_id, signal_time, shadow_ctx,
+                            "leadership_core_shadow_only",
+                            model_size_gbp=float(get_trade_size_for_quality("LEADERSHIP_CORE"))
+                        )
                     entry_allowed = False
-                    block_reason = f"okx_not_tradable_{okx_tradability_reason}"
+                    block_reason = "leadership_core_shadow_only"
+
+                # v6.1.4: check OKX tradability BEFORE creating DB trade / consuming slot.
+                if entry_allowed:
+                    okx_tradable, okx_tradability_reason = is_okx_symbol_live_tradable(symbol)
+                    if not okx_tradable:
+                        entry_allowed = False
+                        block_reason = f"okx_not_tradable_{okx_tradability_reason}"
 
                 if entry_allowed:
                     open_count = get_live_real_open_count(cur)
@@ -5761,7 +6073,7 @@ def webhook():
             # v6.6 ROT_MICRO: independent tiny continuation harvester.
             # Only considered if core leadership entry did not already allow a trade.
             if not entry_allowed and ENABLE_ROT_MICRO_LIVE:
-                rot_ok, rot_reason, rot_ctx = is_rot_micro_candidate(cur, symbol, momentum, trend)
+                rot_ok, rot_reason, rot_ctx = is_rot_micro_candidate(cur, symbol, momentum, trend, leadership_context, shadow_mode=False)
                 if rot_ok:
                     okx_tradable, okx_tradability_reason = is_okx_symbol_live_tradable(symbol)
                     if not okx_tradable:
@@ -5782,6 +6094,28 @@ def webhook():
                         block_reason = None
                 elif block_reason is None:
                     block_reason = rot_reason
+
+            # v6.9.2 ROT_MICRO_V2_SHADOW: live ROT is disabled, but filtered shadow entries are still logged.
+            try:
+                if not entry_allowed and ENABLE_ROT_MICRO_SHADOW:
+                    rot_shadow_ok, rot_shadow_reason, rot_shadow_ctx = is_rot_micro_candidate(
+                        cur, symbol, momentum, trend, leadership_context, shadow_mode=True
+                    )
+                    if rot_shadow_ok:
+                        shadow_ctx = dict(leadership_context or {})
+                        shadow_ctx.update(rot_shadow_ctx or {})
+                        shadow_ctx["prior_avg_peak"] = rot_shadow_ctx.get("leadership_max_60m", shadow_ctx.get("prior_avg_peak", 0))
+                        shadow_ctx["leadership_mode"] = "ROT_MICRO"
+                        shadow_ctx["market_os_engine"] = "ROT_MICRO_SHADOW"
+                        shadow_ctx["size_scaling_reason"] = "rot_micro_shadow_context_filtered"
+                        open_shadow_market_os_trade(
+                            cur, symbol, "LONG", price, momentum, trend,
+                            "ROT_MICRO_V1", signal_id, signal_time, shadow_ctx,
+                            f"rot_micro_shadow_ctx_ge_{ROT_MICRO_MIN_CONTEXT}",
+                            model_size_gbp=ROT_MICRO_TRADE_SIZE_GBP
+                        )
+            except Exception as e:
+                print(f"⚠️ ROT micro shadow entry skipped: {e}", flush=True)
 
         elif decision == "SHORT":
             block_reason = "shorts_disabled_v6_1_long_only"
@@ -6029,6 +6363,13 @@ def webhook():
                             f"ID {trade_id}"
                         )
                     else:
+                        actual_entry_quote_size = float(okx_entry_result.get("actual_quote_size") or entry_quote_size)
+                        if abs(actual_entry_quote_size - float(entry_quote_size or 0)) > 0.0001:
+                            safe_update_trade_telemetry(cur, trade_id, {
+                                "trade_size_gbp": actual_entry_quote_size,
+                                "dynamic_trade_size_gbp": actual_entry_quote_size,
+                                "size_scaling_reason": (leadership_context.get("size_scaling_reason") or "") + "_partial_position_fill",
+                            })
                         conn.commit()
                         print(f"✅ REAL ENTRY PERSISTED | {symbol} | id={trade_id}", flush=True)
 
@@ -6063,6 +6404,12 @@ def webhook():
             process_persistence_hunter_trades(cur, symbol, price, momentum, trend, now)
         except Exception as e:
             print(f"⚠️ Persistence Hunter processing skipped: {e}", flush=True)
+
+        # ================= MARKET OS SHADOW PROCESSING =================
+        try:
+            process_market_os_shadow_trades(cur, symbol, price, momentum, trend, now)
+        except Exception as e:
+            print(f"⚠️ Market OS shadow processing skipped: {e}", flush=True)
 
         # ================= EXIT ENGINE =================
         cur.execute("""
@@ -6462,8 +6809,8 @@ def build_telegram_health_message(cur):
         f"OKX tradable cache: {len(OKX_TRADABLE_SPOT_INST_IDS)} pairs\n"
         f"Telemetry V1: {ENABLE_TELEMETRY_V1} | {TELEMETRY_VERSION}\n"
         f"Archetype engine: {ENABLE_ARCHETYPE_STATE_ENGINE} | adaptive BPT max hold {ENABLE_ADAPTIVE_BPT_MAX_HOLD} | tg dedupe {ENABLE_TELEGRAM_DEDUPE}\n"
-        f"Market OS v6.6: {ENABLE_MARKET_OS_V66} | partial bank {ENABLE_PARTIAL_PROFIT_BANK_V66} @ {PARTIAL_BANK_TRIGGER_PCT}% x {int(PARTIAL_BANK_FRACTION*100)}% | rot micro {ENABLE_ROT_MICRO_LIVE}\n"
-        f"Leadership scaling: {ENABLE_LEADERSHIP_SIZE_SCALING_V66} | >= {LEADERSHIP_SCALE_THRESHOLD} → {fmt_money(LEADERSHIP_SCALED_TRADE_SIZE_GBP)}\n"
+        f"Market OS v6.6: {ENABLE_MARKET_OS_V66} | partial bank {ENABLE_PARTIAL_PROFIT_BANK_V66} @ {PARTIAL_BANK_TRIGGER_PCT}% x {int(PARTIAL_BANK_FRACTION*100)}% | rot live {ENABLE_ROT_MICRO_LIVE} shadow {ENABLE_ROT_MICRO_SHADOW} ctx>={ROT_MICRO_MIN_CONTEXT}\n"
+        f"Leadership scaling: {ENABLE_LEADERSHIP_SIZE_SCALING_V66} | >= {LEADERSHIP_SCALE_THRESHOLD} → {fmt_money(LEADERSHIP_SCALED_TRADE_SIZE_GBP)} | core live {ENABLE_LEADERSHIP_CORE_LIVE} shadow {ENABLE_LEADERSHIP_CORE_SHADOW}\n"
         f"Trend persistence exit: {ENABLE_TREND_PERSISTENCE_EXIT} | {TREND_PERSISTENCE_CHECK_MINUTES}m trend < {TREND_PERSISTENCE_MIN_TREND}"
     )
 
@@ -7041,7 +7388,11 @@ def bool_status():
         "DENSITY_NULL_IS_VALID": DENSITY_NULL_IS_VALID,
         "ENABLE_BPT_CQE_LIVE_UPGRADES": ENABLE_BPT_CQE_LIVE_UPGRADES,
         "BPT_CQE_PROBE_SIZE_GBP": BPT_CQE_PROBE_SIZE_GBP,
+        "BPT_EARLY_UPGRADE_GBP": BPT_EARLY_UPGRADE_GBP,
+        "BPT_EXTREME_UPGRADE_GBP": BPT_EXTREME_UPGRADE_GBP,
+        "BPT_HIGH_UPGRADE_GBP": BPT_HIGH_UPGRADE_GBP,
         "BPT_MEDIUM_UPGRADE_GBP": BPT_MEDIUM_UPGRADE_GBP,
+        "CQE_REAL_SCALEIN_ALLOWED_ROWS": CQE_REAL_SCALEIN_ALLOWED_ROWS,
         "ENABLE_PERSISTENCE_HUNTER_SHADOW": ENABLE_PERSISTENCE_HUNTER_SHADOW,
         "ENABLE_PERSISTENCE_HUNTER_LIVE": ENABLE_PERSISTENCE_HUNTER_LIVE,
         "PH_MIN_LEADERSHIP_SCORE": PH_MIN_LEADERSHIP_SCORE,
@@ -7092,7 +7443,13 @@ def bool_status():
         "ENABLE_PARTIAL_PROFIT_BANK_V66": ENABLE_PARTIAL_PROFIT_BANK_V66,
         "PARTIAL_BANK_TRIGGER_PCT": PARTIAL_BANK_TRIGGER_PCT,
         "PARTIAL_BANK_FRACTION": PARTIAL_BANK_FRACTION,
+        "ALLOW_PARTIAL_POSITION_FILL": ALLOW_PARTIAL_POSITION_FILL,
+        "MIN_POSITION_SIZE_GBP": MIN_POSITION_SIZE_GBP,
+        "ENABLE_LEADERSHIP_CORE_LIVE": ENABLE_LEADERSHIP_CORE_LIVE,
+        "ENABLE_LEADERSHIP_CORE_SHADOW": ENABLE_LEADERSHIP_CORE_SHADOW,
         "ENABLE_ROT_MICRO_LIVE": ENABLE_ROT_MICRO_LIVE,
+        "ENABLE_ROT_MICRO_SHADOW": ENABLE_ROT_MICRO_SHADOW,
+        "ROT_MICRO_MIN_CONTEXT": ROT_MICRO_MIN_CONTEXT,
         "ROT_MICRO_TRADE_SIZE_GBP": ROT_MICRO_TRADE_SIZE_GBP,
         "ENABLE_OKX_TRADABILITY_SELF_HEAL_V66": ENABLE_OKX_TRADABILITY_SELF_HEAL_V66,
         "TELEGRAM_CONFIGURED": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
