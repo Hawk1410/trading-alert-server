@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v6.9.0
+# VERSION: v6.9.1
 # TITLE: MARKET LIFECYCLE ENGINE LOGGING + TELEGRAM ALERTS
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v6.9.0 MARKET LIFECYCLE ENGINE LOGGING RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v6.9.0 v6.9.1 EXECUTION INTEGRITY HOTFIX RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -798,6 +798,7 @@ MAX_LIVE_OPEN_TRADES = int(os.environ.get("MAX_LIVE_OPEN_TRADES", "5") or 5)
 OKX_TD_MODE = os.environ.get("OKX_TD_MODE", "cash")
 OKX_ORDER_TYPE = os.environ.get("OKX_ORDER_TYPE", "market")
 OKX_EXIT_SIZE_BUFFER = float(os.environ.get("OKX_EXIT_SIZE_BUFFER", "0.995") or 0.995)
+REGIME_ALERT_COOLDOWN_MINUTES = 30
 
 ENABLE_OKX_TRADABILITY_FILTER = os.environ.get("ENABLE_OKX_TRADABILITY_FILTER", "true").lower() == "true"
 OKX_TRADABILITY_CACHE_SECONDS = int(os.environ.get("OKX_TRADABILITY_CACHE_SECONDS", "900") or 900)
@@ -1074,12 +1075,20 @@ def maybe_send_market_lifecycle_change_alert(cur, lifecycle_context):
 
     try:
         ensure_market_lifecycle_alert_state_table(cur)
-        cur.execute("SELECT last_window FROM market_lifecycle_alert_state WHERE id = 1")
+        cur.execute("SELECT last_window, updated_at FROM market_lifecycle_alert_state WHERE id = 1")
         row = cur.fetchone()
         previous_window = row[0] if row else None
+        last_alert_time = row[1] if row and len(row) > 1 else None
 
         if previous_window == current_window:
             return False
+
+        try:
+            from datetime import datetime, timedelta
+            if last_alert_time and (datetime.utcnow() - last_alert_time.replace(tzinfo=None)).total_seconds() < (REGIME_ALERT_COOLDOWN_MINUTES * 60):
+                return False
+        except Exception:
+            pass
 
         msg = (
             "🌎 <b>MARKET LIFECYCLE CHANGE</b>\n"
@@ -2353,7 +2362,12 @@ def okx_place_market_order(cur, trade_id, symbol, direction, action, price=None,
             theoretical_trade_size = calculate_exit_base_size(reference_price, quote_size)
             desired_trade_sell_size = theoretical_trade_size * OKX_EXIT_SIZE_BUFFER
             max_safe_available_size = available_balance * OKX_EXIT_SIZE_BUFFER
-            sell_size = round(min(desired_trade_sell_size, max_safe_available_size), 8)
+
+            # v6.9.1 HOTFIX:
+            # Current architecture is effectively non-stacking.
+            # Use actual OKX available balance as source of truth for exits
+            # to prevent residual positions accumulating from sizing drift.
+            sell_size = round(max_safe_available_size, 8)
 
             if not ticker_result.get("success"):
                 print(
@@ -7522,5 +7536,3 @@ except Exception as e:
 #     control panel
 #     exits
 #     sizing
-
-        
