@@ -3994,19 +3994,20 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
         )
     )
 
+    # v7.2.1 ACCOUNTING HOTFIX:
+    # Do NOT increase DB trade size/accounting until the OKX live scale-in order
+    # has actually succeeded. Previous logic marked the trade as upgraded and
+    # increased dynamic_trade_size_gbp before OKX confirmation, which could make
+    # pnl_gbp calculate on a phantom upgraded size while OKX only held the probe.
     cur.execute("""
         UPDATE bot_trades_v4
         SET cqe_confirmed = TRUE,
-            cqe_upgraded = TRUE,
             upgraded_at = NOW()
         WHERE id = %s
     """, (tid,))
 
     safe_update_trade_telemetry(cur, tid, {
-        "dynamic_trade_size_gbp": new_dynamic_size,
-        "trade_size_gbp": new_dynamic_size,
-        **accounting_entry_telemetry(new_dynamic_size),
-        "probe_lifecycle_state": "FAST_TRACK_UPGRADED" if fast_track_active else "STANDARD_UPGRADED",
+        "probe_lifecycle_state": "FAST_TRACK_CONFIRMED_PENDING_SCALEIN" if fast_track_active else "STANDARD_CONFIRMED_PENDING_SCALEIN",
         "probe_lifecycle_trigger": fast_track_reason or "standard_30m_confirmation",
         "probe_lifecycle_trigger_age_minutes": age_mins,
         "probe_lifecycle_trigger_momentum": momentum,
@@ -4014,9 +4015,13 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
     })
 
     try:
-        log_trade_event(cur, tid, sym, "bpt_cqe_confirmed_upgrade", entry_price, 0, current_peak, age_mins, momentum, trend, False)
+        log_trade_event(cur, tid, sym, "bpt_cqe_confirmed_pending_scalein", entry_price, 0, current_peak, age_mins, momentum, trend, False)
     except Exception as e:
-        print(f"⚠️ BPT CQE upgrade trade_events log failed: {e}", flush=True)
+        print(f"⚠️ BPT CQE confirmation trade_events log failed: {e}", flush=True)
+
+    live_scalein_executed = False
+    actual_upgrade_size = 0.0
+    displayed_dynamic_size = current_dynamic_size
 
     if ENABLE_BPT_CQE_LIVE_UPGRADES and scalein_allowed:
         okx_upgrade_result = okx_place_market_order(
@@ -4029,31 +4034,56 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
             entry_price=entry_price,
             trade_size_quote=upgrade_size,
         )
-        if okx_upgrade_result.get("success"):
-            actual_upgrade_size = float(okx_upgrade_result.get("actual_quote_size") or upgrade_size)
-            if abs(actual_upgrade_size - float(upgrade_size or 0)) > 0.0001:
-                upgrade_size = actual_upgrade_size
-                new_dynamic_size = current_dynamic_size + actual_upgrade_size
-                safe_update_trade_telemetry(cur, tid, {
-                    "dynamic_trade_size_gbp": new_dynamic_size,
-                    "trade_size_gbp": new_dynamic_size,
-                    **accounting_entry_telemetry(new_dynamic_size),
-                    "upgrade_size_gbp": actual_upgrade_size,
-                    "size_scaling_reason": "bpt_upgrade_partial_position_fill",
-                })
+
+        live_scalein_executed = bool(
+            okx_upgrade_result.get("success")
+            and not okx_upgrade_result.get("skipped")
+            and not okx_upgrade_result.get("blocked")
+            and not okx_upgrade_result.get("dry_run")
+        )
+
+        if live_scalein_executed:
+            actual_upgrade_size = float(okx_upgrade_result.get("actual_quote_size") or upgrade_size or 0)
+            new_dynamic_size = current_dynamic_size + actual_upgrade_size
+            displayed_dynamic_size = new_dynamic_size
+
+            cur.execute("""
+                UPDATE bot_trades_v4
+                SET cqe_upgraded = TRUE
+                WHERE id = %s
+            """, (tid,))
+
+            safe_update_trade_telemetry(cur, tid, {
+                "dynamic_trade_size_gbp": new_dynamic_size,
+                "trade_size_gbp": new_dynamic_size,
+                **accounting_entry_telemetry(new_dynamic_size),
+                "upgrade_size_gbp": actual_upgrade_size,
+                "probe_lifecycle_state": "FAST_TRACK_UPGRADED" if fast_track_active else "STANDARD_UPGRADED",
+                "size_scaling_reason": "bpt_live_scalein_executed",
+            })
         else:
+            safe_update_trade_telemetry(cur, tid, {
+                "probe_lifecycle_state": "FAST_TRACK_CONFIRMED_NO_LIVE_SCALEIN" if fast_track_active else "STANDARD_CONFIRMED_NO_LIVE_SCALEIN",
+                "size_scaling_reason": f"bpt_live_scalein_not_executed:{okx_upgrade_result.get('reason') or okx_upgrade_result.get('error') or 'unknown'}",
+            })
             print(f"⚠️ BPT CQE LIVE UPGRADE ORDER FAILED/SKIPPED | {sym} | id={tid} | {okx_upgrade_result}", flush=True)
+    else:
+        safe_update_trade_telemetry(cur, tid, {
+            "probe_lifecycle_state": "FAST_TRACK_CONFIRMED_SCALEIN_DISABLED" if fast_track_active else "STANDARD_CONFIRMED_SCALEIN_DISABLED",
+            "size_scaling_reason": "bpt_scalein_disabled_or_not_allowed",
+        })
 
     print(
-        f"🚀 BPT CQE UPGRADED | {sym} | id={tid} | row={lifecycle_row} | "
-        f"upgrade={fmt_money(upgrade_size)} | dynamic={fmt_money(new_dynamic_size)} | "
-        f"peak={round(peak_for_confirmation,3)}%",
+        f"🚀 BPT CQE CONFIRMED | {sym} | id={tid} | row={lifecycle_row} | "
+        f"live_scalein={live_scalein_executed} | upgrade={fmt_money(actual_upgrade_size or upgrade_size)} | "
+        f"dynamic={fmt_money(displayed_dynamic_size)} | peak={round(peak_for_confirmation,3)}%",
         flush=True
     )
 
     send_telegram_alert(
-        f"🚀 <b>BPT CQE UPGRADED</b> | {sym}\n"
-        f"Row: <b>{lifecycle_row}</b> | Upgrade {fmt_money(upgrade_size)} | Total model size {fmt_money(new_dynamic_size)}\n"
+        f"🚀 <b>BPT CQE CONFIRMED</b> | {sym}\n"
+        f"Row: <b>{lifecycle_row}</b> | Live scale-in: <b>{'YES' if live_scalein_executed else 'NO'}</b>\n"
+        f"Upgrade attempted {fmt_money(upgrade_size)} | Actual added {fmt_money(actual_upgrade_size)} | Total live/model size {fmt_money(displayed_dynamic_size)}\n"
         f"Confirmed peak {fmt_num(peak_for_confirmation)}% | age {fmt_num(age_mins,1)}m\n"
         f"Trigger: {fast_track_reason or 'standard_30m_confirmation'}\n"
         f"Avg T/M {fmt_num(metrics['avg_trend'])} / {fmt_num(metrics['avg_momentum'])}\n"
