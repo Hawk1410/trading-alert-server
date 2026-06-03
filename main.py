@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v6.9.2
-# TITLE: CAPITAL ALLOCATION + ENGINE SHADOWING UPDATE
+# VERSION: v7.0
+# TITLE: ADAPTIVE DEAD-MARKET LEADERSHIP LIVE PROBES + CAPITAL ALLOCATION
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v6.9.2 CAPITAL ALLOCATION + ENGINE SHADOWING UPDATE RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v7.0 ADAPTIVE DEAD-MARKET LEADERSHIP LIVE PROBES RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -39,6 +39,20 @@ print("🔥🔥🔥 MAIN.PY v6.9.2 CAPITAL ALLOCATION + ENGINE SHADOWING UPDATE 
 # IMPORTANT:
 # Create signal_leadership_scores table before/after deployment using the SQL provided.
 # Call /score_signal_leadership every 5 minutes via cron.
+#
+# =========================
+# v7.0 CHANGE SUMMARY
+# =========================
+#
+# ✅ Adds ADAPTIVE_DEAD_MARKET_LEADERS as a toggleable live BPT probe pathway.
+# ✅ Research-backed condition:
+#      market_median_peak_context < 2
+#      leadership_rank <= 3
+#      leadership_score < 0.5
+# ✅ Does NOT alter stable/emerging leadership phase thresholds.
+# ✅ Does NOT alter BPT confirmation, upgrades, exits, partial banking, or sizing.
+# ✅ Tags adaptive probes with market_os_engine='ADAPTIVE_DEAD_MARKET_LEADER'
+#    and size_scaling_reason='adaptive_dead_market_leader_probe'.
 #
 # =========================
 
@@ -363,7 +377,7 @@ MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 3
 
 
 
-DATA_VERSION = "v6.9.2_CAPITAL_ALLOCATION_SHADOW_UPDATE"
+DATA_VERSION = "v7.0_ADAPTIVE_DEAD_MARKET_LEADERSHIP"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -698,6 +712,32 @@ BPT_CQE_MIN_TREND = float(os.environ.get("BPT_CQE_MIN_TREND", "0.25") or 0.25)
 BPT_CQE_MIN_MOMENTUM = float(os.environ.get("BPT_CQE_MIN_MOMENTUM", "0.50") or 0.50)
 BPT_CQE_MAX_LEADERSHIP_SCORE = float(os.environ.get("BPT_CQE_MAX_LEADERSHIP_SCORE", "0.50") or 0.50)
 BPT_CQE_MAX_LEADERSHIP_DELTA_30M = float(os.environ.get("BPT_CQE_MAX_LEADERSHIP_DELTA_30M", "1.00") or 1.00)
+
+# =========================
+# 🦄 v7.0 ADAPTIVE DEAD-MARKET LEADERSHIP
+# =========================
+# Research-backed live probe pathway from 2026-06-03 analysis:
+# In dead/compressed markets, top-ranked low-score leaders outperformed
+# higher-score leaders. This is deliberately implemented as a BPT probe
+# pathway, not a rewrite of stable/emerging leadership phase logic.
+ENABLE_ADAPTIVE_DEAD_MARKET_LEADERS = os.environ.get(
+    "ENABLE_ADAPTIVE_DEAD_MARKET_LEADERS",
+    "true"
+).lower() == "true"
+
+ADAPTIVE_DEAD_MARKET_CONTEXT_MAX = float(os.environ.get("ADAPTIVE_DEAD_MARKET_CONTEXT_MAX", "2.0") or 2.0)
+ADAPTIVE_DEAD_MARKET_MAX_RANK = int(os.environ.get("ADAPTIVE_DEAD_MARKET_MAX_RANK", "3") or 3)
+ADAPTIVE_DEAD_MARKET_MAX_SCORE = float(os.environ.get("ADAPTIVE_DEAD_MARKET_MAX_SCORE", "0.5") or 0.5)
+
+# Keep these deliberately permissive by default because the validated SQL cohort
+# was defined by decision=LONG + context/rank/score, not by the old BPT trend gate.
+# These toggles are here so we can tighten quickly from Render env if needed.
+ADAPTIVE_DEAD_MARKET_MIN_MOMENTUM = float(os.environ.get("ADAPTIVE_DEAD_MARKET_MIN_MOMENTUM", "0.0") or 0.0)
+ADAPTIVE_DEAD_MARKET_MIN_TREND = float(os.environ.get("ADAPTIVE_DEAD_MARKET_MIN_TREND", "0.0") or 0.0)
+ADAPTIVE_DEAD_MARKET_ENTRY_QUALITY = os.environ.get(
+    "ADAPTIVE_DEAD_MARKET_ENTRY_QUALITY",
+    "BPT_CQE_LIFECYCLE_V1"
+)
 
 # Upgrade confirmation cluster from sims:
 # 30m peak >= 1.0%, positive trend/momentum persistence.
@@ -3339,9 +3379,115 @@ def get_open_same_symbol_bpt_cqe_count(cur, symbol):
     return cur.fetchone()[0] or 0
 
 
+def is_adaptive_dead_market_leader_candidate(leadership_context, momentum=None, trend=None):
+    """
+    v7.0 live probe pathway.
+
+    Validated SQL cohort:
+      market_median_peak_context < 2
+      leadership_rank <= 3
+      leadership_score < 0.5
+
+    This intentionally uses rank/context/score only as the primary condition.
+    Momentum/trend minimums default to 0.0 and are env-tunable safety rails.
+    """
+    if not ENABLE_ADAPTIVE_DEAD_MARKET_LEADERS:
+        return False, "adaptive_dead_market_disabled"
+
+    ctx = leadership_context or {}
+
+    try:
+        market_context = float(
+            first_non_empty(
+                ctx.get("market_median_peak_context"),
+                ctx.get("market_median_peak_context_at_entry"),
+                default=999.0,
+            ) or 999.0
+        )
+    except Exception:
+        market_context = 999.0
+
+    try:
+        rank = int(float(first_non_empty(ctx.get("leadership_rank"), ctx.get("leadership_rank_at_entry"), default=999) or 999))
+    except Exception:
+        rank = 999
+
+    try:
+        score = float(first_non_empty(ctx.get("leadership_score"), ctx.get("prior_avg_peak"), default=0.0) or 0.0)
+    except Exception:
+        score = 0.0
+
+    try:
+        mom = float(momentum if momentum is not None else 0.0)
+    except Exception:
+        mom = 0.0
+
+    try:
+        tr = float(trend if trend is not None else 0.0)
+    except Exception:
+        tr = 0.0
+
+    if market_context >= ADAPTIVE_DEAD_MARKET_CONTEXT_MAX:
+        return False, "adaptive_dead_market_context_not_dead"
+
+    if rank > ADAPTIVE_DEAD_MARKET_MAX_RANK:
+        return False, "adaptive_dead_market_rank_too_low"
+
+    if score >= ADAPTIVE_DEAD_MARKET_MAX_SCORE:
+        return False, "adaptive_dead_market_score_not_compressed"
+
+    if mom < ADAPTIVE_DEAD_MARKET_MIN_MOMENTUM:
+        return False, "adaptive_dead_market_momentum_too_low"
+
+    if tr < ADAPTIVE_DEAD_MARKET_MIN_TREND:
+        return False, "adaptive_dead_market_trend_too_low"
+
+    return True, "adaptive_dead_market_leader_probe_allowed"
+
+
+def tag_adaptive_dead_market_leader_context(leadership_context):
+    """Mutates/returns context so entries are easy to track and toggle-analysis is clean."""
+    ctx = leadership_context or {}
+    ctx["adaptive_dead_market_leader"] = True
+    ctx["adaptive_dead_market_context_max"] = ADAPTIVE_DEAD_MARKET_CONTEXT_MAX
+    ctx["adaptive_dead_market_max_rank"] = ADAPTIVE_DEAD_MARKET_MAX_RANK
+    ctx["adaptive_dead_market_max_score"] = ADAPTIVE_DEAD_MARKET_MAX_SCORE
+    ctx["market_os_engine"] = "ADAPTIVE_DEAD_MARKET_LEADER"
+    ctx["leadership_mode"] = "ADAPTIVE_DEAD_MARKET_LEADER"
+    ctx["size_scaling_reason"] = "adaptive_dead_market_leader_probe"
+
+    # Preserve actual lifecycle phase if present, but make the leadership phase explicit
+    # so signals_raw / Telegram / trade rows identify why the BPT probe was allowed.
+    ctx["leadership_phase"] = "ADAPTIVE_DEAD_LEADER"
+    if not ctx.get("lifecycle_phase"):
+        ctx["lifecycle_phase"] = "ADAPTIVE_DEAD_LEADER"
+
+    return ctx
+
+
 def passes_bpt_cqe_probe_gate(cur, symbol, momentum, trend, leadership_context):
     if not ENABLE_BPT_CQE_LIFECYCLE_SHADOW:
         return False, "bpt_lifecycle_disabled"
+
+    adaptive_ok, adaptive_reason = is_adaptive_dead_market_leader_candidate(
+        leadership_context,
+        momentum=momentum,
+        trend=trend,
+    )
+
+    # v7.0: Adaptive dead-market leaders bypass the old BPT trend/momentum
+    # gate, because the validated cohort had compressed trend/score conditions.
+    # They still obey BPT max-open, same-symbol, probe size, confirmation, upgrade,
+    # exits, and OKX live toggles.
+    if adaptive_ok:
+        tag_adaptive_dead_market_leader_context(leadership_context)
+
+        if get_open_bpt_cqe_count(cur) >= BPT_CQE_MAX_OPEN_TRADES:
+            return False, "adaptive_dead_market_bpt_max_open_trades"
+        if get_open_same_symbol_bpt_cqe_count(cur, symbol) >= BPT_CQE_MAX_SAME_SYMBOL_OPEN:
+            return False, "adaptive_dead_market_bpt_max_same_symbol_open"
+
+        return True, adaptive_reason
 
     if trend < BPT_CQE_MIN_TREND:
         return False, "bpt_trend_too_low"
@@ -3404,6 +3550,9 @@ def open_bpt_cqe_probe_trade(cur, symbol, price, momentum, trend, signal_id, sig
     safe_update_trade_telemetry(cur, trade_id, {
         "is_shadow": not ENABLE_BPT_CQE_LIVE_PROBES,
         "entry_architecture": BPT_CQE_ENTRY_QUALITY,
+        "market_os_engine": (leadership_context or {}).get("market_os_engine"),
+        "size_scaling_reason": (leadership_context or {}).get("size_scaling_reason"),
+        "leadership_mode": (leadership_context or {}).get("leadership_mode"),
         "trade_size_gbp": BPT_CQE_PROBE_SIZE_GBP,
         "dynamic_trade_size_gbp": BPT_CQE_PROBE_SIZE_GBP,
         "probe_size_gbp": BPT_CQE_PROBE_SIZE_GBP,
@@ -6150,6 +6299,8 @@ def webhook():
                     "leadership_delta_60m_at_signal": leadership_context.get("leadership_delta_60m"),
                     "leadership_age_minutes_at_signal": leadership_context.get("leadership_age_minutes"),
                     "leadership_rank_at_signal": leadership_context.get("leadership_rank"),
+                    "adaptive_dead_market_leader_at_signal": leadership_context.get("adaptive_dead_market_leader"),
+                    "market_os_engine_at_signal": leadership_context.get("market_os_engine"),
                     "market_near_count_at_signal": leadership_context.get("market_near_count"),
                     "market_core_count_at_signal": leadership_context.get("market_core_count"),
                     "market_aggressive_count_at_signal": leadership_context.get("market_aggressive_count"),
@@ -7388,6 +7539,12 @@ def bool_status():
         "DENSITY_NULL_IS_VALID": DENSITY_NULL_IS_VALID,
         "ENABLE_BPT_CQE_LIVE_UPGRADES": ENABLE_BPT_CQE_LIVE_UPGRADES,
         "BPT_CQE_PROBE_SIZE_GBP": BPT_CQE_PROBE_SIZE_GBP,
+        "ENABLE_ADAPTIVE_DEAD_MARKET_LEADERS": ENABLE_ADAPTIVE_DEAD_MARKET_LEADERS,
+        "ADAPTIVE_DEAD_MARKET_CONTEXT_MAX": ADAPTIVE_DEAD_MARKET_CONTEXT_MAX,
+        "ADAPTIVE_DEAD_MARKET_MAX_RANK": ADAPTIVE_DEAD_MARKET_MAX_RANK,
+        "ADAPTIVE_DEAD_MARKET_MAX_SCORE": ADAPTIVE_DEAD_MARKET_MAX_SCORE,
+        "ADAPTIVE_DEAD_MARKET_MIN_MOMENTUM": ADAPTIVE_DEAD_MARKET_MIN_MOMENTUM,
+        "ADAPTIVE_DEAD_MARKET_MIN_TREND": ADAPTIVE_DEAD_MARKET_MIN_TREND,
         "BPT_EARLY_UPGRADE_GBP": BPT_EARLY_UPGRADE_GBP,
         "BPT_EXTREME_UPGRADE_GBP": BPT_EXTREME_UPGRADE_GBP,
         "BPT_HIGH_UPGRADE_GBP": BPT_HIGH_UPGRADE_GBP,
