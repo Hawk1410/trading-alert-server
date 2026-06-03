@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v7.0
-# TITLE: ADAPTIVE DEAD-MARKET LEADERSHIP LIVE PROBES + CAPITAL ALLOCATION
+# VERSION: v7.1
+# TITLE: ADAPTIVE DEAD-MARKET LEADERSHIP + USDT/GBP ACCOUNTING FIX
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v7.0 ADAPTIVE DEAD-MARKET LEADERSHIP LIVE PROBES RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v7.1 ADAPTIVE DEAD-MARKET LEADERSHIP + USDT/GBP ACCOUNTING FIX RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -54,6 +54,19 @@ print("🔥🔥🔥 MAIN.PY v7.0 ADAPTIVE DEAD-MARKET LEADERSHIP LIVE PROBES RUN
 # ✅ Tags adaptive probes with market_os_engine='ADAPTIVE_DEAD_MARKET_LEADER'
 #    and size_scaling_reason='adaptive_dead_market_leader_probe'.
 #
+#
+# =========================
+# v7.1 CHANGE SUMMARY
+# =========================
+#
+# ✅ Accounting-only upgrade.
+# ✅ Keeps v7.0 adaptive dead-market leadership behaviour unchanged.
+# ✅ Treats OKX quote-size orders as USDT, not GBP.
+# ✅ Populates trade_size_usdt, entry_value_usdt, exit_value_usdt, pnl_usdt, usd_gbp_rate.
+# ✅ Calculates pnl_gbp from pnl_usdt * USD_GBP_RATE.
+# ✅ Leaves legacy trade_size_gbp/dynamic_trade_size_gbp in place for backwards compatibility.
+#
+
 # =========================
 
 from flask import Flask, request, jsonify
@@ -367,6 +380,9 @@ force_okx_cache_refresh_if_empty("startup")
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
+# v7.1 accounting: OKX quote-size orders are USDT. Convert reporting to GBP.
+USD_GBP_RATE = float(os.environ.get("USD_GBP_RATE", "0.74") or 0.74)
+
 # =========================
 # CORE ENGINE SETTINGS
 # =========================
@@ -377,7 +393,7 @@ MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 3
 
 
 
-DATA_VERSION = "v7.0_ADAPTIVE_DEAD_MARKET_LEADERSHIP"
+DATA_VERSION = "v7.1_ADAPTIVE_DEAD_MARKET_ACCOUNTING_FIX"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -1485,6 +1501,75 @@ def fmt_money(value):
     except Exception:
         return f"£{value}"
 
+
+def get_usd_gbp_rate():
+    """v7.1: central USD→GBP conversion rate.
+
+    OKX spot orders use USDT quote sizing. We keep this as an env-controlled
+    rate for stable bot execution; update Render env var USD_GBP_RATE when needed.
+    """
+    try:
+        return float(os.environ.get("USD_GBP_RATE", USD_GBP_RATE) or USD_GBP_RATE)
+    except Exception:
+        return float(USD_GBP_RATE)
+
+def accounting_entry_telemetry(size_usdt):
+    """Telemetry payload for opening/expanding a USDT-quoted position."""
+    try:
+        size_usdt = float(size_usdt or 0)
+    except Exception:
+        size_usdt = 0.0
+    rate = get_usd_gbp_rate()
+    return {
+        "trade_size_usdt": size_usdt,
+        "entry_value_usdt": size_usdt,
+        "entry_value_gbp": size_usdt * rate,
+        "usd_gbp_rate": rate,
+    }
+
+def accounting_exit_values(size_usdt, pnl_percent, partial_bank_realized_gbp=0.0, remaining_fraction=1.0):
+    """v7.1 exit accounting.
+
+    size_usdt is the total OKX quote notional represented by the DB trade.
+    pnl_usdt is calculated from actual percent movement and converted to GBP.
+    Partial-bank GBP, when present, is added to the final GBP result.
+    """
+    try:
+        size_usdt = float(size_usdt or 0)
+    except Exception:
+        size_usdt = 0.0
+    try:
+        pnl_percent = float(pnl_percent or 0)
+    except Exception:
+        pnl_percent = 0.0
+    try:
+        remaining_fraction = float(remaining_fraction if remaining_fraction is not None else 1.0)
+    except Exception:
+        remaining_fraction = 1.0
+    try:
+        partial_bank_realized_gbp = float(partial_bank_realized_gbp or 0)
+    except Exception:
+        partial_bank_realized_gbp = 0.0
+
+    rate = get_usd_gbp_rate()
+    remaining_pnl_usdt = (pnl_percent / 100.0) * size_usdt * remaining_fraction
+    partial_bank_usdt_equiv = partial_bank_realized_gbp / rate if rate else 0.0
+    pnl_usdt = remaining_pnl_usdt + partial_bank_usdt_equiv
+    pnl_gbp = pnl_usdt * rate
+    entry_value_usdt = size_usdt
+    exit_value_usdt = entry_value_usdt + pnl_usdt
+
+    return {
+        "trade_size_usdt": size_usdt,
+        "entry_value_usdt": entry_value_usdt,
+        "exit_value_usdt": exit_value_usdt,
+        "pnl_usdt": pnl_usdt,
+        "usd_gbp_rate": rate,
+        "entry_value_gbp": entry_value_usdt * rate,
+        "exit_value_gbp": exit_value_usdt * rate,
+        "pnl_gbp": pnl_gbp,
+    }
+
 def fee_adjusted_pnl_gbp(pnl_gbp, fee_gbp=0):
     """Return net GBP PnL after fees when fee_gbp is available.
     We do not estimate fees here; if fee_gbp is NULL/0, net equals recorded PnL.
@@ -1668,6 +1753,11 @@ def ensure_archetype_state_columns(cur):
         ADD COLUMN IF NOT EXISTS partial_bank_4_pct FLOAT,
         ADD COLUMN IF NOT EXISTS partial_bank_4_fraction FLOAT,
         ADD COLUMN IF NOT EXISTS partial_bank_realized_pnl_gbp FLOAT,
+        ADD COLUMN IF NOT EXISTS trade_size_usdt FLOAT,
+        ADD COLUMN IF NOT EXISTS entry_value_usdt FLOAT,
+        ADD COLUMN IF NOT EXISTS exit_value_usdt FLOAT,
+        ADD COLUMN IF NOT EXISTS pnl_usdt FLOAT,
+        ADD COLUMN IF NOT EXISTS usd_gbp_rate FLOAT,
         ADD COLUMN IF NOT EXISTS market_os_engine TEXT,
         ADD COLUMN IF NOT EXISTS size_scaling_reason TEXT
     """)
@@ -1797,7 +1887,7 @@ def maybe_partial_profit_bank(cur, tid, sym, direction, entry_price, price, entr
 
         full_size = get_trade_size_for_context(entry_quality, leadership_context)
         bank_size = max(0.0, float(full_size) * float(PARTIAL_BANK_FRACTION))
-        realized_pnl_gbp = (float(PARTIAL_BANK_TRIGGER_PCT) / 100.0) * bank_size
+        realized_pnl_gbp = (float(PARTIAL_BANK_TRIGGER_PCT) / 100.0) * bank_size * get_usd_gbp_rate()
 
         if has_successful_okx_live_entry(cur, tid):
             okx_place_market_order(
@@ -3056,6 +3146,12 @@ def open_shadow_cqe_trade(cur, symbol, price, momentum, trend, signal_id, signal
     ))
     trade_id = cur.fetchone()[0]
 
+    try:
+        safe_update_trade_telemetry(cur, trade_id, accounting_entry_telemetry(CQE_SHADOW_TRADE_SIZE_GBP))
+    except Exception as e:
+        print(f"⚠️ v7.1 shadow CQE entry accounting telemetry failed | {symbol} | id={trade_id} | {e}", flush=True)
+        safe_telemetry_rollback(cur)
+
     # v6.6.13 CRITICAL: persist the base trade row immediately BEFORE any
     # telemetry/event/OKX work. Previous versions could insert the trade row,
     # then a telemetry helper rollback would erase it while the OKX order log
@@ -3225,7 +3321,8 @@ def process_shadow_cqe_trades(cur, symbol, price, momentum, trend, now):
             close_reason = "cqe_120m_time_exit"
 
         if close_reason:
-            pnl_gbp = (pnl_percent / 100) * CQE_SHADOW_TRADE_SIZE_GBP
+            accounting = accounting_exit_values(CQE_SHADOW_TRADE_SIZE_GBP, pnl_percent)
+            pnl_gbp = accounting["pnl_gbp"]
             cur.execute("""
                 UPDATE bot_trades_v4
                 SET status = 'CLOSED',
@@ -3233,12 +3330,26 @@ def process_shadow_cqe_trades(cur, symbol, price, momentum, trend, now):
                     close_price = %s,
                     pnl_percent = %s,
                     pnl_gbp = %s,
+                    pnl_usdt = %s,
+                    exit_value_usdt = %s,
+                    exit_value_gbp = %s,
+                    usd_gbp_rate = %s,
                     close_reason = %s,
                     telegram_close_alert_sent = FALSE
                 WHERE id = %s
                   AND status = 'OPEN'
                 RETURNING id
-            """, (price, pnl_percent, pnl_gbp, close_reason, tid))
+            """, (
+                price,
+                pnl_percent,
+                pnl_gbp,
+                accounting["pnl_usdt"],
+                accounting["exit_value_usdt"],
+                accounting["exit_value_gbp"],
+                accounting["usd_gbp_rate"],
+                close_reason,
+                tid,
+            ))
             closed_row = cur.fetchone()
             if not closed_row:
                 print(f"🔕 BPT close skipped; trade already closed or not open | {tid}", flush=True)
@@ -3556,6 +3667,7 @@ def open_bpt_cqe_probe_trade(cur, symbol, price, momentum, trend, signal_id, sig
         "trade_size_gbp": BPT_CQE_PROBE_SIZE_GBP,
         "dynamic_trade_size_gbp": BPT_CQE_PROBE_SIZE_GBP,
         "probe_size_gbp": BPT_CQE_PROBE_SIZE_GBP,
+        **accounting_entry_telemetry(BPT_CQE_PROBE_SIZE_GBP),
         "upgrade_size_gbp": params["upgrade_size"],
         "lifecycle_row": lifecycle_row,
         "lifecycle_quality_score": q,
@@ -3596,6 +3708,7 @@ def open_bpt_cqe_probe_trade(cur, symbol, price, momentum, trend, signal_id, sig
                     "trade_size_gbp": actual_probe_size,
                     "dynamic_trade_size_gbp": actual_probe_size,
                     "probe_size_gbp": actual_probe_size,
+                    **accounting_entry_telemetry(actual_probe_size),
                     "size_scaling_reason": "bpt_probe_partial_position_fill",
                 })
         else:
@@ -3728,6 +3841,7 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
     safe_update_trade_telemetry(cur, tid, {
         "dynamic_trade_size_gbp": new_dynamic_size,
         "trade_size_gbp": new_dynamic_size,
+        **accounting_entry_telemetry(new_dynamic_size),
     })
 
     try:
@@ -3754,6 +3868,7 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
                 safe_update_trade_telemetry(cur, tid, {
                     "dynamic_trade_size_gbp": new_dynamic_size,
                     "trade_size_gbp": new_dynamic_size,
+                    **accounting_entry_telemetry(new_dynamic_size),
                     "upgrade_size_gbp": actual_upgrade_size,
                     "size_scaling_reason": "bpt_upgrade_partial_position_fill",
                 })
@@ -3924,7 +4039,8 @@ def process_bpt_cqe_lifecycle_trades(cur, symbol, price, momentum, trend, now):
                 exit_architecture = "BPT_CQE_SAFETY_BACKSTOP"
 
         if close_reason:
-            pnl_gbp = (pnl_percent / 100) * float(dynamic_size or BPT_CQE_PROBE_SIZE_GBP)
+            accounting = accounting_exit_values(float(dynamic_size or BPT_CQE_PROBE_SIZE_GBP), pnl_percent)
+            pnl_gbp = accounting["pnl_gbp"]
 
             cur.execute("""
                 UPDATE bot_trades_v4
@@ -3933,12 +4049,26 @@ def process_bpt_cqe_lifecycle_trades(cur, symbol, price, momentum, trend, now):
                     close_price = %s,
                     pnl_percent = %s,
                     pnl_gbp = %s,
+                    pnl_usdt = %s,
+                    exit_value_usdt = %s,
+                    exit_value_gbp = %s,
+                    usd_gbp_rate = %s,
                     close_reason = %s,
                     telegram_close_alert_sent = FALSE
                 WHERE id = %s
                   AND status = 'OPEN'
                 RETURNING id
-            """, (price, pnl_percent, pnl_gbp, close_reason, tid))
+            """, (
+                price,
+                pnl_percent,
+                pnl_gbp,
+                accounting["pnl_usdt"],
+                accounting["exit_value_usdt"],
+                accounting["exit_value_gbp"],
+                accounting["usd_gbp_rate"],
+                close_reason,
+                tid,
+            ))
             closed_row = cur.fetchone()
             if not closed_row:
                 print(f"🔕 BPT close skipped; trade already closed or not open | {tid}", flush=True)
@@ -4152,6 +4282,12 @@ def open_persistence_hunter_trade(cur, symbol, price, momentum, trend, signal_id
     ))
     tid = cur.fetchone()[0]
 
+    try:
+        safe_update_trade_telemetry(cur, tid, accounting_entry_telemetry(PH_SHADOW_SIZE_GBP))
+    except Exception as e:
+        print(f"⚠️ v7.1 PH entry accounting telemetry failed | {symbol} | id={tid} | {e}", flush=True)
+        safe_telemetry_rollback(cur)
+
     safe_update_trade_telemetry(cur, tid, {
         "is_shadow": not ENABLE_PERSISTENCE_HUNTER_LIVE,
         "entry_architecture": PH_ENTRY_QUALITY,
@@ -4265,7 +4401,8 @@ def process_persistence_hunter_trades(cur, symbol, price, momentum, trend, now):
             close_reason = "ph_max_hold_exit"
 
         if close_reason:
-            pnl_gbp = (pnl_percent / 100.0) * float(dynamic_size or PH_SHADOW_SIZE_GBP)
+            accounting = accounting_exit_values(float(dynamic_size or PH_SHADOW_SIZE_GBP), pnl_percent)
+            pnl_gbp = accounting["pnl_gbp"]
             cur.execute("""
                 UPDATE bot_trades_v4
                 SET status='CLOSED',
@@ -4273,9 +4410,17 @@ def process_persistence_hunter_trades(cur, symbol, price, momentum, trend, now):
                     close_price=%s,
                     pnl_percent=%s,
                     pnl_gbp=%s,
+                    pnl_usdt=%s,
+                    exit_value_usdt=%s,
+                    exit_value_gbp=%s,
+                    usd_gbp_rate=%s,
                     close_reason=%s
                 WHERE id=%s
-            """, (price, pnl_percent, pnl_gbp, close_reason, tid))
+            """, (
+                price, pnl_percent, pnl_gbp,
+                accounting["pnl_usdt"], accounting["exit_value_usdt"], accounting["exit_value_gbp"],
+                accounting["usd_gbp_rate"], close_reason, tid
+            ))
             safe_update_trade_telemetry(cur, tid, {
                 "exit_architecture": "PERSISTENCE_HUNTER_EXIT",
                 "drawdown_from_peak_at_exit": drawdown,
@@ -5577,6 +5722,7 @@ def open_trade(cur, symbol, direction, price, momentum, trend, quality,
         entry_optional_telemetry = {
             "market_os_engine": entry_snapshot.get("market_os_engine"),
             "size_scaling_reason": entry_snapshot.get("size_scaling_reason"),
+            **accounting_entry_telemetry(entry_snapshot.get("dynamic_trade_size_gbp") or entry_snapshot.get("trade_size_gbp")),
         }
         entry_optional_telemetry.update(lifecycle_trade_telemetry_from_context(leadership_context))
         safe_update_trade_telemetry(cur, trade_id, entry_optional_telemetry)
@@ -5670,6 +5816,7 @@ def open_shadow_market_os_trade(cur, symbol, direction, price, momentum, trend, 
         "entry_architecture": quality,
         "trade_size_gbp": model_size_gbp,
         "dynamic_trade_size_gbp": model_size_gbp,
+        **accounting_entry_telemetry(model_size_gbp),
         "market_os_engine": (leadership_context or {}).get("market_os_engine"),
         "size_scaling_reason": shadow_reason,
         **lifecycle_trade_telemetry_from_context(leadership_context),
@@ -5723,7 +5870,8 @@ def process_market_os_shadow_trades(cur, symbol, price, momentum, trend, now):
                 close_reason = "shadow_time_exit"
 
             if close_reason:
-                pnl_gbp = (pnl_percent / 100.0) * model_size
+                accounting = accounting_exit_values(model_size, pnl_percent)
+                pnl_gbp = accounting["pnl_gbp"]
                 cur.execute("""
                     UPDATE bot_trades_v4
                     SET status = 'CLOSED',
@@ -5732,11 +5880,19 @@ def process_market_os_shadow_trades(cur, symbol, price, momentum, trend, now):
                         close_reason = %s,
                         pnl_percent = %s,
                         pnl_gbp = %s,
+                        pnl_usdt = %s,
+                        exit_value_usdt = %s,
+                        exit_value_gbp = %s,
+                        usd_gbp_rate = %s,
                         peak_pnl_percent = %s,
                         exit_momentum = %s,
                         exit_trend = %s
                     WHERE id = %s
-                """, (price, close_reason, pnl_percent, pnl_gbp, current_peak, momentum, trend, tid))
+                """, (
+                    price, close_reason, pnl_percent, pnl_gbp,
+                    accounting["pnl_usdt"], accounting["exit_value_usdt"], accounting["exit_value_gbp"],
+                    accounting["usd_gbp_rate"], current_peak, momentum, trend, tid
+                ))
                 log_trade_event(cur, tid, sym, close_reason, price, pnl_percent, current_peak, mins, momentum, trend, False)
                 print(f"🧪 CLOSE SHADOW | {entry_quality} | {sym} | {round(pnl_percent,3)}% | peak={round(current_peak,3)}% | {close_reason}", flush=True)
             else:
@@ -6574,7 +6730,8 @@ def webhook():
                 COALESCE(is_shadow, FALSE) AS is_shadow,
                 entry_quality,
                 COALESCE(partial_bank_4_done, FALSE) AS partial_bank_done,
-                COALESCE(partial_bank_realized_pnl_gbp, 0) AS partial_bank_realized_gbp
+                COALESCE(partial_bank_realized_pnl_gbp, 0) AS partial_bank_realized_gbp,
+                COALESCE(trade_size_usdt, dynamic_trade_size_gbp, trade_size_gbp, 0) AS trade_size_usdt_for_pnl
             FROM bot_trades_v4
             WHERE status = 'OPEN'
               AND COALESCE(is_shadow, FALSE) = FALSE
@@ -6582,7 +6739,7 @@ def webhook():
 
         open_trades = cur.fetchall()
 
-        for (tid, sym, direction, entry_price, opened_at, peak_pnl, is_shadow, entry_quality, partial_bank_done, partial_bank_realized_gbp) in open_trades:
+        for (tid, sym, direction, entry_price, opened_at, peak_pnl, is_shadow, entry_quality, partial_bank_done, partial_bank_realized_gbp, trade_size_usdt_for_pnl) in open_trades:
             try:
                 if sym != symbol:
                     continue
@@ -6742,9 +6899,16 @@ def webhook():
                     exit_architecture = "long_hard_stop"
 
                 if close_reason:
-                    trade_size_for_pnl = get_trade_size_for_quality(entry_quality)
+                    legacy_size = get_trade_size_for_quality(entry_quality)
+                    size_usdt_for_pnl = float(trade_size_usdt_for_pnl or legacy_size or 0)
                     remaining_fraction = (1.0 - PARTIAL_BANK_FRACTION) if partial_bank_done else 1.0
-                    pnl_gbp = ((pnl_percent / 100) * trade_size_for_pnl * remaining_fraction) + float(partial_bank_realized_gbp or 0)
+                    accounting = accounting_exit_values(
+                        size_usdt_for_pnl,
+                        pnl_percent,
+                        partial_bank_realized_gbp=partial_bank_realized_gbp,
+                        remaining_fraction=remaining_fraction
+                    )
+                    pnl_gbp = accounting["pnl_gbp"]
 
                     cur.execute("""
                         UPDATE bot_trades_v4
@@ -6753,12 +6917,20 @@ def webhook():
                             close_price = %s,
                             pnl_percent = %s,
                             pnl_gbp = %s,
+                            pnl_usdt = %s,
+                            exit_value_usdt = %s,
+                            exit_value_gbp = %s,
+                            usd_gbp_rate = %s,
                             close_reason = %s
                         WHERE id = %s
                     """, (
                         price,
                         pnl_percent,
                         pnl_gbp,
+                        accounting["pnl_usdt"],
+                        accounting["exit_value_usdt"],
+                        accounting["exit_value_gbp"],
+                        accounting["usd_gbp_rate"],
                         close_reason,
                         tid
                     ))
