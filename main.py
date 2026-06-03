@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v7.1
-# TITLE: ADAPTIVE DEAD-MARKET LEADERSHIP + USDT/GBP ACCOUNTING FIX
+# VERSION: v7.2
+# TITLE: ADAPTIVE PROBE LIFECYCLE ENGINE + ACCOUNTING FIX
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v7.1 ADAPTIVE DEAD-MARKET LEADERSHIP + USDT/GBP ACCOUNTING FIX RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v7.2 ADAPTIVE PROBE LIFECYCLE ENGINE RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -393,7 +393,7 @@ MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 3
 
 
 
-DATA_VERSION = "v7.1_ADAPTIVE_DEAD_MARKET_ACCOUNTING_FIX"
+DATA_VERSION = "v7.2_ADAPTIVE_PROBE_LIFECYCLE_ENGINE"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -762,6 +762,33 @@ BPT_CQE_CONFIRM_PEAK = float(os.environ.get("BPT_CQE_CONFIRM_PEAK", "1.0") or 1.
 BPT_CQE_CONFIRM_AVG_TREND = float(os.environ.get("BPT_CQE_CONFIRM_AVG_TREND", "0.05") or 0.05)
 BPT_CQE_CONFIRM_AVG_MOMENTUM = float(os.environ.get("BPT_CQE_CONFIRM_AVG_MOMENTUM", "0.05") or 0.05)
 BPT_CQE_CONFIRM_MIN_SIGNAL_COUNT = int(os.environ.get("BPT_CQE_CONFIRM_MIN_SIGNAL_COUNT", "0") or 0)
+# =========================
+# 🧬 v7.2 ADAPTIVE PROBE LIFECYCLE ENGINE
+# =========================
+# Evidence-backed from 2026-06-03 live V7.1 probe analysis.
+# Applies ONLY to live BPT adaptive dead-market probes before they have upgraded.
+ENABLE_BPT_PROBE_LIFECYCLE_ENGINE = os.environ.get(
+    "ENABLE_BPT_PROBE_LIFECYCLE_ENGINE",
+    "true"
+).lower() == "true"
+
+# 5m monster fast-track:
+# Very rare/high-quality cohort in live data.
+BPT_MONSTER_FASTTRACK_MIN_AGE_MINUTES = float(os.environ.get("BPT_MONSTER_FASTTRACK_MIN_AGE_MINUTES", "5") or 5)
+BPT_MONSTER_FASTTRACK_MIN_LEADERSHIP_DELTA = float(os.environ.get("BPT_MONSTER_FASTTRACK_MIN_LEADERSHIP_DELTA", "0.45") or 0.45)
+BPT_MONSTER_FASTTRACK_MIN_TREND = float(os.environ.get("BPT_MONSTER_FASTTRACK_MIN_TREND", "0.25") or 0.25)
+
+# 10m dead-probe protection:
+# momentum < 0 and trend < 0.10 showed 0% win rate in initial live sample.
+BPT_DEAD_PROBE_MIN_AGE_MINUTES = float(os.environ.get("BPT_DEAD_PROBE_MIN_AGE_MINUTES", "10") or 10)
+BPT_DEAD_PROBE_MAX_MOMENTUM = float(os.environ.get("BPT_DEAD_PROBE_MAX_MOMENTUM", "0.0") or 0.0)
+BPT_DEAD_PROBE_MAX_TREND = float(os.environ.get("BPT_DEAD_PROBE_MAX_TREND", "0.10") or 0.10)
+
+# 10m leader fast-track:
+# broad early-upgrade cohort with high win rate in V7.1 live sample.
+BPT_LEADER_FASTTRACK_MIN_AGE_MINUTES = float(os.environ.get("BPT_LEADER_FASTTRACK_MIN_AGE_MINUTES", "10") or 10)
+BPT_LEADER_FASTTRACK_MIN_LEADERSHIP_DELTA = float(os.environ.get("BPT_LEADER_FASTTRACK_MIN_LEADERSHIP_DELTA", "0.10") or 0.10)
+BPT_LEADER_FASTTRACK_MIN_TREND = float(os.environ.get("BPT_LEADER_FASTTRACK_MIN_TREND", "0.15") or 0.15)
 
 # Row thresholds: quality_score = trend + momentum.
 BPT_EXTREME_QUALITY_SCORE = float(os.environ.get("BPT_EXTREME_QUALITY_SCORE", "2.0") or 2.0)
@@ -3423,6 +3450,14 @@ def ensure_bpt_cqe_lifecycle_columns(cur):
         ADD COLUMN IF NOT EXISTS current_archetype TEXT,
         ADD COLUMN IF NOT EXISTS archetype_version TEXT,
         ADD COLUMN IF NOT EXISTS archetype_exit_reason TEXT,
+        ADD COLUMN IF NOT EXISTS probe_lifecycle_state TEXT,
+        ADD COLUMN IF NOT EXISTS probe_lifecycle_trigger TEXT,
+        ADD COLUMN IF NOT EXISTS probe_lifecycle_trigger_age_minutes NUMERIC,
+        ADD COLUMN IF NOT EXISTS probe_lifecycle_trigger_momentum NUMERIC,
+        ADD COLUMN IF NOT EXISTS probe_lifecycle_trigger_trend NUMERIC,
+        ADD COLUMN IF NOT EXISTS probe_lifecycle_trigger_delta NUMERIC,
+        ADD COLUMN IF NOT EXISTS live_probe_exited_at TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS live_probe_exit_reason TEXT,
         ADD COLUMN IF NOT EXISTS telegram_close_alert_sent BOOLEAN DEFAULT FALSE,
         ADD COLUMN IF NOT EXISTS telegram_close_alert_sent_at TIMESTAMPTZ
     """)
@@ -3768,7 +3803,128 @@ def get_bpt_confirmation_metrics(cur, symbol, opened_at, entry_price, now):
     }
 
 
-def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, current_peak, peak_time_minutes, momentum, trend, now):
+
+def get_latest_probe_lifecycle_delta(cur, symbol, opened_at, now):
+    """Returns the latest leadership_delta_30m_at_signal known for this probe up to now."""
+    try:
+        cur.execute("""
+            SELECT leadership_delta_30m_at_signal
+            FROM signals_raw
+            WHERE symbol = %s
+              AND timestamp >= %s
+              AND timestamp <= %s
+            ORDER BY timestamp DESC
+            LIMIT 1
+        """, (symbol, opened_at, now))
+        row = cur.fetchone()
+        if row and row[0] is not None:
+            return safe_float(row[0], None)
+    except Exception as e:
+        print(f"⚠️ probe lifecycle delta lookup failed | {symbol} | {e}", flush=True)
+    return None
+
+
+def classify_probe_lifecycle_state(age_mins, momentum, trend, leadership_delta):
+    """v7.2 evidence-based probe lifecycle classifier."""
+    if not ENABLE_BPT_PROBE_LIFECYCLE_ENGINE:
+        return None, "probe_lifecycle_disabled"
+
+    age = safe_float(age_mins, 0)
+    mom = safe_float(momentum, 0)
+    tr = safe_float(trend, 0)
+    delta = safe_float(leadership_delta, None)
+
+    # Defensive branch first: protect capital before considering scale-in.
+    if (
+        age >= BPT_DEAD_PROBE_MIN_AGE_MINUTES
+        and mom < BPT_DEAD_PROBE_MAX_MOMENTUM
+        and tr < BPT_DEAD_PROBE_MAX_TREND
+    ):
+        return "DEAD", "probe_health_fail_10m"
+
+    # Offensive 5m monster fast-track: intentionally strict.
+    if (
+        delta is not None
+        and age >= BPT_MONSTER_FASTTRACK_MIN_AGE_MINUTES
+        and delta > BPT_MONSTER_FASTTRACK_MIN_LEADERSHIP_DELTA
+        and tr > BPT_MONSTER_FASTTRACK_MIN_TREND
+    ):
+        return "MONSTER", "probe_monster_fasttrack_5m"
+
+    # Offensive 10m leader fast-track: broader emerging leader detector.
+    if (
+        delta is not None
+        and age >= BPT_LEADER_FASTTRACK_MIN_AGE_MINUTES
+        and delta > BPT_LEADER_FASTTRACK_MIN_LEADERSHIP_DELTA
+        and tr > BPT_LEADER_FASTTRACK_MIN_TREND
+    ):
+        return "LEADER", "probe_leader_fasttrack_10m"
+
+    return "NEUTRAL", "probe_lifecycle_neutral"
+
+
+def mark_probe_lifecycle_state(cur, tid, state, trigger, age_mins, momentum, trend, leadership_delta):
+    safe_update_trade_telemetry(cur, tid, {
+        "probe_lifecycle_state": state,
+        "probe_lifecycle_trigger": trigger,
+        "probe_lifecycle_trigger_age_minutes": age_mins,
+        "probe_lifecycle_trigger_momentum": momentum,
+        "probe_lifecycle_trigger_trend": trend,
+        "probe_lifecycle_trigger_delta": leadership_delta,
+    })
+
+
+def exit_live_probe_and_continue_shadow(cur, tid, sym, direction, entry_price, price, pnl_percent, current_peak, age_mins, momentum, trend, dynamic_size, reason):
+    """Sell the live probe but keep the DB row open as a shadow continuation."""
+    try:
+        if has_successful_okx_live_entry(cur, tid):
+            okx_place_market_order(
+                cur=cur,
+                trade_id=tid,
+                symbol=sym,
+                direction=direction,
+                action="exit",
+                price=price,
+                entry_price=entry_price,
+                trade_size_quote=float(dynamic_size or BPT_CQE_PROBE_SIZE_GBP),
+            )
+        else:
+            log_okx_exit_skip_no_live_entry(cur, tid, sym, direction, price)
+    except Exception as e:
+        print(f"⚠️ live probe exit for shadow continuation failed | {sym} | {tid} | {e}", flush=True)
+
+    safe_update_trade_telemetry(cur, tid, {
+        "is_shadow": True,
+        "live_probe_exited_at": datetime.now(timezone.utc),
+        "live_probe_exit_reason": reason,
+        "exit_architecture": "BPT_PROBE_LIFECYCLE_LIVE_EXIT_SHADOW_CONTINUATION",
+        "bpt_exit_reason": reason,
+        "archetype_exit_reason": reason,
+        "current_archetype": "SHADOW_CONTINUATION_AFTER_HEALTH_FAIL",
+    })
+
+    try:
+        log_trade_event(cur, tid, sym, f"live_exit_shadow_continue_{reason}", price, pnl_percent, current_peak, age_mins, momentum, trend, False)
+    except Exception as e:
+        print(f"⚠️ probe health fail shadow-continuation event log failed: {e}", flush=True)
+
+    print(
+        f"🛡️ PROBE HEALTH FAIL → LIVE EXIT + SHADOW CONTINUE | {sym} | id={tid} | "
+        f"{round(pnl_percent,3)}% | peak={round(float(current_peak or 0),3)} | age={round(float(age_mins or 0),1)}m | {reason}",
+        flush=True
+    )
+
+    send_telegram_alert(
+        f"🛡️ <b>PROBE HEALTH FAIL</b> | {sym}\n"
+        f"Live probe sold, shadow continuation remains open.\n"
+        f"PnL now {fmt_num(pnl_percent)}% | Peak {fmt_num(current_peak)}% | Age {fmt_num(age_mins,1)}m\n"
+        f"Reason: {reason}\n"
+        f"ID {tid}"
+    )
+
+    return True
+
+def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, current_peak, peak_time_minutes, momentum, trend, now, fast_track_reason=None):
     if peak_time_minutes is None:
         peak_time_minutes = 999999
 
@@ -3799,17 +3955,19 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
         "confirmation_age_minutes": age_mins,
     })
 
-    if not confirmed:
+    fast_track_active = bool(fast_track_reason)
+    if not confirmed and not fast_track_active:
         return False
 
     cur.execute("""
-        SELECT lifecycle_row, upgrade_size_gbp, dynamic_trade_size_gbp
+        SELECT lifecycle_row, upgrade_size_gbp, dynamic_trade_size_gbp, COALESCE(is_shadow, TRUE)
         FROM bot_trades_v4
         WHERE id = %s
     """, (tid,))
     row = cur.fetchone()
     lifecycle_row = row[0] if row else None
     upgrade_size = float(row[1] or get_bpt_row_params(lifecycle_row).get("upgrade_size", 0)) if row else 0
+    is_shadow_trade = bool(row[3]) if row else True
 
     # v6.6.20:
     # ensure OKX minimum notional compatibility
@@ -3825,9 +3983,15 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
 
     scalein_allowed = (
         ENABLE_CQE_REAL_SCALEINS
+        and not is_shadow_trade
         and lifecycle_row in CQE_REAL_SCALEIN_ALLOWED_ROWS
-        and live_pressure_30m >= CQE_SCALEIN_MIN_LIVE_PRESSURE
-        and live_delta_30m >= CQE_SCALEIN_MIN_DELTA_30M
+        and (
+            fast_track_active
+            or (
+                live_pressure_30m >= CQE_SCALEIN_MIN_LIVE_PRESSURE
+                and live_delta_30m >= CQE_SCALEIN_MIN_DELTA_30M
+            )
+        )
     )
 
     cur.execute("""
@@ -3842,6 +4006,11 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
         "dynamic_trade_size_gbp": new_dynamic_size,
         "trade_size_gbp": new_dynamic_size,
         **accounting_entry_telemetry(new_dynamic_size),
+        "probe_lifecycle_state": "FAST_TRACK_UPGRADED" if fast_track_active else "STANDARD_UPGRADED",
+        "probe_lifecycle_trigger": fast_track_reason or "standard_30m_confirmation",
+        "probe_lifecycle_trigger_age_minutes": age_mins,
+        "probe_lifecycle_trigger_momentum": momentum,
+        "probe_lifecycle_trigger_trend": trend,
     })
 
     try:
@@ -3886,6 +4055,7 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
         f"🚀 <b>BPT CQE UPGRADED</b> | {sym}\n"
         f"Row: <b>{lifecycle_row}</b> | Upgrade {fmt_money(upgrade_size)} | Total model size {fmt_money(new_dynamic_size)}\n"
         f"Confirmed peak {fmt_num(peak_for_confirmation)}% | age {fmt_num(age_mins,1)}m\n"
+        f"Trigger: {fast_track_reason or 'standard_30m_confirmation'}\n"
         f"Avg T/M {fmt_num(metrics['avg_trend'])} / {fmt_num(metrics['avg_momentum'])}\n"
         f"Live upgrades: {ENABLE_BPT_CQE_LIVE_UPGRADES}\n"
         f"ID {tid}"
@@ -3966,9 +4136,53 @@ def process_bpt_cqe_lifecycle_trades(cur, symbol, price, momentum, trend, now):
             print(f"⚠️ BPT CQE update trade_events log failed: {e}", flush=True)
 
         if not cqe_upgraded:
+            lifecycle_delta = get_latest_probe_lifecycle_delta(cur, sym, opened_at, now)
+            lifecycle_state, lifecycle_trigger = classify_probe_lifecycle_state(
+                mins,
+                momentum,
+                trend,
+                lifecycle_delta,
+            )
+            mark_probe_lifecycle_state(
+                cur,
+                tid,
+                lifecycle_state,
+                lifecycle_trigger,
+                mins,
+                momentum,
+                trend,
+                lifecycle_delta,
+            )
+
+            if lifecycle_state == "DEAD" and not is_shadow:
+                exit_live_probe_and_continue_shadow(
+                    cur=cur,
+                    tid=tid,
+                    sym=sym,
+                    direction=direction,
+                    entry_price=entry_price,
+                    price=price,
+                    pnl_percent=pnl_percent,
+                    current_peak=current_peak,
+                    age_mins=mins,
+                    momentum=momentum,
+                    trend=trend,
+                    dynamic_size=dynamic_size,
+                    reason=lifecycle_trigger,
+                )
+                is_shadow = True
+                continue
+
+            fast_track_reason = None
+            if lifecycle_state == "MONSTER":
+                fast_track_reason = lifecycle_trigger
+            elif lifecycle_state == "LEADER":
+                fast_track_reason = lifecycle_trigger
+
             maybe_confirm_and_upgrade_bpt_trade(
                 cur, tid, sym, entry_price, opened_at, current_peak,
-                peak_time_minutes, momentum, trend, now
+                peak_time_minutes, momentum, trend, now,
+                fast_track_reason=fast_track_reason
             )
 
         # Reload upgrade state after possible upgrade.
@@ -7711,6 +7925,16 @@ def bool_status():
         "DENSITY_NULL_IS_VALID": DENSITY_NULL_IS_VALID,
         "ENABLE_BPT_CQE_LIVE_UPGRADES": ENABLE_BPT_CQE_LIVE_UPGRADES,
         "BPT_CQE_PROBE_SIZE_GBP": BPT_CQE_PROBE_SIZE_GBP,
+        "ENABLE_BPT_PROBE_LIFECYCLE_ENGINE": ENABLE_BPT_PROBE_LIFECYCLE_ENGINE,
+        "BPT_MONSTER_FASTTRACK_MIN_AGE_MINUTES": BPT_MONSTER_FASTTRACK_MIN_AGE_MINUTES,
+        "BPT_MONSTER_FASTTRACK_MIN_LEADERSHIP_DELTA": BPT_MONSTER_FASTTRACK_MIN_LEADERSHIP_DELTA,
+        "BPT_MONSTER_FASTTRACK_MIN_TREND": BPT_MONSTER_FASTTRACK_MIN_TREND,
+        "BPT_DEAD_PROBE_MIN_AGE_MINUTES": BPT_DEAD_PROBE_MIN_AGE_MINUTES,
+        "BPT_DEAD_PROBE_MAX_MOMENTUM": BPT_DEAD_PROBE_MAX_MOMENTUM,
+        "BPT_DEAD_PROBE_MAX_TREND": BPT_DEAD_PROBE_MAX_TREND,
+        "BPT_LEADER_FASTTRACK_MIN_AGE_MINUTES": BPT_LEADER_FASTTRACK_MIN_AGE_MINUTES,
+        "BPT_LEADER_FASTTRACK_MIN_LEADERSHIP_DELTA": BPT_LEADER_FASTTRACK_MIN_LEADERSHIP_DELTA,
+        "BPT_LEADER_FASTTRACK_MIN_TREND": BPT_LEADER_FASTTRACK_MIN_TREND,
         "ENABLE_ADAPTIVE_DEAD_MARKET_LEADERS": ENABLE_ADAPTIVE_DEAD_MARKET_LEADERS,
         "ADAPTIVE_DEAD_MARKET_CONTEXT_MAX": ADAPTIVE_DEAD_MARKET_CONTEXT_MAX,
         "ADAPTIVE_DEAD_MARKET_MAX_RANK": ADAPTIVE_DEAD_MARKET_MAX_RANK,
