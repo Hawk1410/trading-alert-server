@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v7.2
-# TITLE: ADAPTIVE PROBE LIFECYCLE ENGINE + ACCOUNTING FIX
+# VERSION: v7.3
+# TITLE: ADAPTIVE PROBE LIFECYCLE ENGINE + ACCOUNTING + TRUE GBP SIZING HOTFIX
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v7.2 ADAPTIVE PROBE LIFECYCLE ENGINE RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v7.3 ACCOUNTING + TRUE GBP SIZING HOTFIX RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -393,7 +393,7 @@ MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 3
 
 
 
-DATA_VERSION = "v7.2_ADAPTIVE_PROBE_LIFECYCLE_ENGINE"
+DATA_VERSION = "v7.3_ACCOUNTING_TRUE_GBP_SIZING_HOTFIX"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -1540,6 +1540,31 @@ def get_usd_gbp_rate():
     except Exception:
         return float(USD_GBP_RATE)
 
+
+def gbp_to_usdt_quote(size_gbp):
+    """
+    v7.3 hotfix:
+    Config/model sizes are GBP, but OKX spot market buys use USDT quote sizing.
+    Convert intended GBP exposure into USDT before sending live orders.
+    Example at USD_GBP_RATE=0.74: £10 -> ~$13.51 USDT.
+    """
+    try:
+        size_gbp = float(size_gbp or 0)
+        rate = float(get_usd_gbp_rate() or USD_GBP_RATE or 0.74)
+        if rate <= 0:
+            rate = 0.74
+        return round(size_gbp / rate, 4)
+    except Exception:
+        return float(size_gbp or 0)
+
+
+def usdt_quote_to_gbp(size_usdt):
+    """Convert actual OKX USDT quote notional back into GBP reporting value."""
+    try:
+        return float(size_usdt or 0) * float(get_usd_gbp_rate())
+    except Exception:
+        return float(size_usdt or 0) * float(USD_GBP_RATE)
+
 def accounting_entry_telemetry(size_usdt):
     """Telemetry payload for opening/expanding a USDT-quoted position."""
     try:
@@ -1834,7 +1859,8 @@ def get_trade_size_for_context(entry_quality, leadership_context=None):
 
 
 def get_trade_size_quote_for_context(entry_quality, leadership_context=None):
-    return get_trade_size_for_context(entry_quality, leadership_context)
+    """Return USDT quote size for OKX from the configured GBP model size."""
+    return gbp_to_usdt_quote(get_trade_size_for_context(entry_quality, leadership_context))
 
 
 def is_rot_micro_candidate(cur, symbol, momentum, trend, leadership_context=None, shadow_mode=False):
@@ -3702,7 +3728,7 @@ def open_bpt_cqe_probe_trade(cur, symbol, price, momentum, trend, signal_id, sig
         "trade_size_gbp": BPT_CQE_PROBE_SIZE_GBP,
         "dynamic_trade_size_gbp": BPT_CQE_PROBE_SIZE_GBP,
         "probe_size_gbp": BPT_CQE_PROBE_SIZE_GBP,
-        **accounting_entry_telemetry(BPT_CQE_PROBE_SIZE_GBP),
+        **accounting_entry_telemetry(gbp_to_usdt_quote(BPT_CQE_PROBE_SIZE_GBP)),
         "upgrade_size_gbp": params["upgrade_size"],
         "lifecycle_row": lifecycle_row,
         "lifecycle_quality_score": q,
@@ -3734,16 +3760,18 @@ def open_bpt_cqe_probe_trade(cur, symbol, price, momentum, trend, signal_id, sig
             action="entry",
             price=price,
             entry_price=price,
-            trade_size_quote=BPT_CQE_PROBE_SIZE_GBP,
+            trade_size_quote=gbp_to_usdt_quote(BPT_CQE_PROBE_SIZE_GBP),
         )
         if okx_probe_result.get("success"):
-            actual_probe_size = float(okx_probe_result.get("actual_quote_size") or BPT_CQE_PROBE_SIZE_GBP)
-            if abs(actual_probe_size - float(BPT_CQE_PROBE_SIZE_GBP)) > 0.0001:
+            requested_probe_quote = gbp_to_usdt_quote(BPT_CQE_PROBE_SIZE_GBP)
+            actual_probe_quote = float(okx_probe_result.get("actual_quote_size") or requested_probe_quote)
+            actual_probe_gbp = usdt_quote_to_gbp(actual_probe_quote)
+            if abs(actual_probe_quote - float(requested_probe_quote)) > 0.0001:
                 safe_update_trade_telemetry(cur, trade_id, {
-                    "trade_size_gbp": actual_probe_size,
-                    "dynamic_trade_size_gbp": actual_probe_size,
-                    "probe_size_gbp": actual_probe_size,
-                    **accounting_entry_telemetry(actual_probe_size),
+                    "trade_size_gbp": actual_probe_gbp,
+                    "dynamic_trade_size_gbp": actual_probe_gbp,
+                    "probe_size_gbp": actual_probe_gbp,
+                    **accounting_entry_telemetry(actual_probe_quote),
                     "size_scaling_reason": "bpt_probe_partial_position_fill",
                 })
         else:
@@ -3874,7 +3902,7 @@ def mark_probe_lifecycle_state(cur, tid, state, trigger, age_mins, momentum, tre
     })
 
 
-def exit_live_probe_and_continue_shadow(cur, tid, sym, direction, entry_price, price, pnl_percent, current_peak, age_mins, momentum, trend, dynamic_size, reason):
+def exit_live_probe_and_continue_shadow(cur, tid, sym, direction, entry_price, price, pnl_percent, current_peak, age_mins, momentum, trend, dynamic_size, reason, trade_size_usdt=None):
     """Sell the live probe but keep the DB row open as a shadow continuation."""
     try:
         if has_successful_okx_live_entry(cur, tid):
@@ -3886,7 +3914,7 @@ def exit_live_probe_and_continue_shadow(cur, tid, sym, direction, entry_price, p
                 action="exit",
                 price=price,
                 entry_price=entry_price,
-                trade_size_quote=float(dynamic_size or BPT_CQE_PROBE_SIZE_GBP),
+                trade_size_quote=float(trade_size_usdt or gbp_to_usdt_quote(float(dynamic_size or BPT_CQE_PROBE_SIZE_GBP))),
             )
         else:
             log_okx_exit_skip_no_live_entry(cur, tid, sym, direction, price)
@@ -3960,7 +3988,7 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
         return False
 
     cur.execute("""
-        SELECT lifecycle_row, upgrade_size_gbp, dynamic_trade_size_gbp, COALESCE(is_shadow, TRUE)
+        SELECT lifecycle_row, upgrade_size_gbp, dynamic_trade_size_gbp, COALESCE(is_shadow, TRUE), trade_size_usdt
         FROM bot_trades_v4
         WHERE id = %s
     """, (tid,))
@@ -3968,6 +3996,7 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
     lifecycle_row = row[0] if row else None
     upgrade_size = float(row[1] or get_bpt_row_params(lifecycle_row).get("upgrade_size", 0)) if row else 0
     is_shadow_trade = bool(row[3]) if row else True
+    current_trade_size_usdt = float(row[4] or gbp_to_usdt_quote(row[2] or BPT_CQE_PROBE_SIZE_GBP)) if row else gbp_to_usdt_quote(BPT_CQE_PROBE_SIZE_GBP)
 
     # v6.6.20:
     # ensure OKX minimum notional compatibility
@@ -4032,7 +4061,7 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
             action="entry",
             price=entry_price,
             entry_price=entry_price,
-            trade_size_quote=upgrade_size,
+            trade_size_quote=gbp_to_usdt_quote(upgrade_size),
         )
 
         live_scalein_executed = bool(
@@ -4043,8 +4072,11 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
         )
 
         if live_scalein_executed:
-            actual_upgrade_size = float(okx_upgrade_result.get("actual_quote_size") or upgrade_size or 0)
+            requested_upgrade_quote = gbp_to_usdt_quote(upgrade_size)
+            actual_upgrade_quote = float(okx_upgrade_result.get("actual_quote_size") or requested_upgrade_quote or 0)
+            actual_upgrade_size = usdt_quote_to_gbp(actual_upgrade_quote)
             new_dynamic_size = current_dynamic_size + actual_upgrade_size
+            new_trade_size_usdt = current_trade_size_usdt + actual_upgrade_quote
             displayed_dynamic_size = new_dynamic_size
 
             cur.execute("""
@@ -4056,7 +4088,7 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
             safe_update_trade_telemetry(cur, tid, {
                 "dynamic_trade_size_gbp": new_dynamic_size,
                 "trade_size_gbp": new_dynamic_size,
-                **accounting_entry_telemetry(new_dynamic_size),
+                **accounting_entry_telemetry(new_trade_size_usdt),
                 "upgrade_size_gbp": actual_upgrade_size,
                 "probe_lifecycle_state": "FAST_TRACK_UPGRADED" if fast_track_active else "STANDARD_UPGRADED",
                 "size_scaling_reason": "bpt_live_scalein_executed",
@@ -4117,7 +4149,8 @@ def process_bpt_cqe_lifecycle_trades(cur, symbol, price, momentum, trend, now):
             COALESCE(dynamic_trade_size_gbp, trade_size_gbp, %s),
             COALESCE(lifecycle_trail_activation, 0),
             COALESCE(lifecycle_trail_drawdown, 0),
-            COALESCE(is_shadow, TRUE)
+            COALESCE(is_shadow, TRUE),
+            trade_size_usdt
         FROM bot_trades_v4
         WHERE status = 'OPEN'
           AND entry_quality = %s
@@ -4128,7 +4161,7 @@ def process_bpt_cqe_lifecycle_trades(cur, symbol, price, momentum, trend, now):
     for (
         tid, sym, direction, entry_price, opened_at, peak_pnl, peak_time_minutes,
         cqe_confirmed, cqe_upgraded, lifecycle_row, dynamic_size,
-        trail_activation, trail_drawdown, is_shadow
+        trail_activation, trail_drawdown, is_shadow, trade_size_usdt
     ) in rows:
         if direction != "LONG" or not entry_price:
             continue
@@ -4199,6 +4232,7 @@ def process_bpt_cqe_lifecycle_trades(cur, symbol, price, momentum, trend, now):
                     trend=trend,
                     dynamic_size=dynamic_size,
                     reason=lifecycle_trigger,
+                    trade_size_usdt=trade_size_usdt,
                 )
                 is_shadow = True
                 continue
@@ -4220,13 +4254,14 @@ def process_bpt_cqe_lifecycle_trades(cur, symbol, price, momentum, trend, now):
             SELECT COALESCE(cqe_upgraded, FALSE), lifecycle_row,
                    COALESCE(dynamic_trade_size_gbp, trade_size_gbp, %s),
                    COALESCE(lifecycle_trail_activation, %s),
-                   COALESCE(lifecycle_trail_drawdown, %s)
+                   COALESCE(lifecycle_trail_drawdown, %s),
+                   trade_size_usdt
             FROM bot_trades_v4
             WHERE id = %s
         """, (BPT_CQE_PROBE_SIZE_GBP, trail_activation, trail_drawdown, tid))
         state = cur.fetchone()
         if state:
-            cqe_upgraded, lifecycle_row, dynamic_size, trail_activation, trail_drawdown = state
+            cqe_upgraded, lifecycle_row, dynamic_size, trail_activation, trail_drawdown, trade_size_usdt = state
 
         close_reason = None
         exit_architecture = None
@@ -4283,7 +4318,8 @@ def process_bpt_cqe_lifecycle_trades(cur, symbol, price, momentum, trend, now):
                 exit_architecture = "BPT_CQE_SAFETY_BACKSTOP"
 
         if close_reason:
-            accounting = accounting_exit_values(float(dynamic_size or BPT_CQE_PROBE_SIZE_GBP), pnl_percent)
+            bpt_size_usdt_for_pnl = float(trade_size_usdt or gbp_to_usdt_quote(float(dynamic_size or BPT_CQE_PROBE_SIZE_GBP)))
+            accounting = accounting_exit_values(bpt_size_usdt_for_pnl, pnl_percent)
             pnl_gbp = accounting["pnl_gbp"]
 
             cur.execute("""
@@ -4344,7 +4380,7 @@ def process_bpt_cqe_lifecycle_trades(cur, symbol, price, momentum, trend, now):
                     action="exit",
                     price=price,
                     entry_price=entry_price,
-                    trade_size_quote=float(dynamic_size or BPT_CQE_PROBE_SIZE_GBP),
+                    trade_size_quote=bpt_size_usdt_for_pnl,
                 )
             elif not is_shadow:
                 log_okx_exit_skip_no_live_entry(cur, tid, sym, direction, price)
@@ -4956,7 +4992,8 @@ def get_trade_size_for_quality(entry_quality):
     return CORE_TRADE_SIZE_GBP
 
 def get_trade_size_quote_for_quality(entry_quality):
-    return get_trade_size_for_quality(entry_quality)
+    """Return USDT quote size for OKX from the configured GBP model size."""
+    return gbp_to_usdt_quote(get_trade_size_for_quality(entry_quality))
 
 
 def phase_from_score(score):
@@ -5966,7 +6003,7 @@ def open_trade(cur, symbol, direction, price, momentum, trend, quality,
         entry_optional_telemetry = {
             "market_os_engine": entry_snapshot.get("market_os_engine"),
             "size_scaling_reason": entry_snapshot.get("size_scaling_reason"),
-            **accounting_entry_telemetry(entry_snapshot.get("dynamic_trade_size_gbp") or entry_snapshot.get("trade_size_gbp")),
+            **accounting_entry_telemetry(gbp_to_usdt_quote(entry_snapshot.get("dynamic_trade_size_gbp") or entry_snapshot.get("trade_size_gbp"))),
         }
         entry_optional_telemetry.update(lifecycle_trade_telemetry_from_context(leadership_context))
         safe_update_trade_telemetry(cur, trade_id, entry_optional_telemetry)
@@ -6916,9 +6953,11 @@ def webhook():
                     else:
                         actual_entry_quote_size = float(okx_entry_result.get("actual_quote_size") or entry_quote_size)
                         if abs(actual_entry_quote_size - float(entry_quote_size or 0)) > 0.0001:
+                            actual_entry_gbp_size = usdt_quote_to_gbp(actual_entry_quote_size)
                             safe_update_trade_telemetry(cur, trade_id, {
-                                "trade_size_gbp": actual_entry_quote_size,
-                                "dynamic_trade_size_gbp": actual_entry_quote_size,
+                                "trade_size_gbp": actual_entry_gbp_size,
+                                "dynamic_trade_size_gbp": actual_entry_gbp_size,
+                                **accounting_entry_telemetry(actual_entry_quote_size),
                                 "size_scaling_reason": (leadership_context.get("size_scaling_reason") or "") + "_partial_position_fill",
                             })
                         conn.commit()
@@ -7143,7 +7182,7 @@ def webhook():
                     exit_architecture = "long_hard_stop"
 
                 if close_reason:
-                    legacy_size = get_trade_size_for_quality(entry_quality)
+                    legacy_size = get_trade_size_quote_for_quality(entry_quality)
                     size_usdt_for_pnl = float(trade_size_usdt_for_pnl or legacy_size or 0)
                     remaining_fraction = (1.0 - PARTIAL_BANK_FRACTION) if partial_bank_done else 1.0
                     accounting = accounting_exit_values(
@@ -7239,7 +7278,7 @@ def webhook():
                             action="exit",
                             price=price,
                             entry_price=entry_price,
-                            trade_size_quote=get_trade_size_quote_for_quality(entry_quality)
+                            trade_size_quote=size_usdt_for_pnl
                         )
                     else:
                         log_okx_exit_skip_no_live_entry(
