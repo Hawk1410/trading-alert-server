@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v7.3
-# TITLE: ADAPTIVE PROBE LIFECYCLE ENGINE + ACCOUNTING + TRUE GBP SIZING HOTFIX
+# VERSION: v7.4
+# TITLE: ADAPTIVE PROBE LIFECYCLE ENGINE + ACCOUNTING + TRUE GBP SIZING + SCALE-IN VISIBILITY HOTFIX
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v7.3 ACCOUNTING + TRUE GBP SIZING HOTFIX RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v7.4 ACCOUNTING + TRUE GBP SIZING + SCALE-IN VISIBILITY HOTFIX RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -393,7 +393,7 @@ MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 3
 
 
 
-DATA_VERSION = "v7.3_ACCOUNTING_TRUE_GBP_SIZING_HOTFIX"
+DATA_VERSION = "v7.4_ACCOUNTING_TRUE_GBP_SIZING_SCALEIN_VISIBILITY_HOTFIX"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -4010,18 +4010,42 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
     live_pressure_30m = safe_float(live_ctx.get("live_pressure_30m"), 0)
     live_delta_30m = safe_float(live_ctx.get("live_delta_30m"), 0)
 
+    row_allows_scalein = lifecycle_row in CQE_REAL_SCALEIN_ALLOWED_ROWS
+    confirmation_allows_scalein = (
+        fast_track_active
+        or (
+            live_pressure_30m >= CQE_SCALEIN_MIN_LIVE_PRESSURE
+            and live_delta_30m >= CQE_SCALEIN_MIN_DELTA_30M
+        )
+    )
+
     scalein_allowed = (
         ENABLE_CQE_REAL_SCALEINS
         and not is_shadow_trade
-        and lifecycle_row in CQE_REAL_SCALEIN_ALLOWED_ROWS
-        and (
-            fast_track_active
-            or (
-                live_pressure_30m >= CQE_SCALEIN_MIN_LIVE_PRESSURE
-                and live_delta_30m >= CQE_SCALEIN_MIN_DELTA_30M
-            )
-        )
+        and row_allows_scalein
+        and confirmation_allows_scalein
     )
+
+    # v7.4 SCALE-IN VISIBILITY HOTFIX:
+    # The old Telegram/log line displayed "Live upgrades: True" even for shadow probes,
+    # which made normal shadow confirmations look like failed live scale-ins.
+    # This keeps behaviour unchanged but makes the reason explicit.
+    if not ENABLE_BPT_CQE_LIVE_UPGRADES:
+        scalein_block_reason = "live_upgrade_toggle_off"
+    elif not ENABLE_CQE_REAL_SCALEINS:
+        scalein_block_reason = "real_scaleins_toggle_off"
+    elif is_shadow_trade:
+        scalein_block_reason = "shadow_trade_no_live_scalein"
+    elif not row_allows_scalein:
+        scalein_block_reason = f"row_not_scalein_allowed:{lifecycle_row}"
+    elif not confirmation_allows_scalein:
+        scalein_block_reason = (
+            f"live_context_below_threshold:"
+            f"pressure={round(live_pressure_30m, 4)}<={CQE_SCALEIN_MIN_LIVE_PRESSURE},"
+            f"delta={round(live_delta_30m, 4)}<={CQE_SCALEIN_MIN_DELTA_30M}"
+        )
+    else:
+        scalein_block_reason = "scalein_allowed"
 
     # v7.2.1 ACCOUNTING HOTFIX:
     # Do NOT increase DB trade size/accounting until the OKX live scale-in order
@@ -4102,24 +4126,35 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
     else:
         safe_update_trade_telemetry(cur, tid, {
             "probe_lifecycle_state": "FAST_TRACK_CONFIRMED_SCALEIN_DISABLED" if fast_track_active else "STANDARD_CONFIRMED_SCALEIN_DISABLED",
-            "size_scaling_reason": "bpt_scalein_disabled_or_not_allowed",
+            "size_scaling_reason": f"bpt_scalein_disabled_or_not_allowed:{scalein_block_reason}",
         })
 
+    trade_mode_label = "SHADOW" if is_shadow_trade else "LIVE"
+    if live_scalein_executed:
+        live_scalein_label = "YES"
+    elif is_shadow_trade:
+        live_scalein_label = "N/A - SHADOW"
+    else:
+        live_scalein_label = f"NO - {scalein_block_reason}"
+
     print(
-        f"🚀 BPT CQE CONFIRMED | {sym} | id={tid} | row={lifecycle_row} | "
-        f"live_scalein={live_scalein_executed} | upgrade={fmt_money(actual_upgrade_size or upgrade_size)} | "
-        f"dynamic={fmt_money(displayed_dynamic_size)} | peak={round(peak_for_confirmation,3)}%",
+        f"🚀 BPT CQE CONFIRMED | {sym} | id={tid} | mode={trade_mode_label} | row={lifecycle_row} | "
+        f"scalein_allowed={scalein_allowed} | live_scalein={live_scalein_executed} | reason={scalein_block_reason} | "
+        f"upgrade={fmt_money(actual_upgrade_size or upgrade_size)} | dynamic={fmt_money(displayed_dynamic_size)} | "
+        f"peak={round(peak_for_confirmation,3)}%",
         flush=True
     )
 
     send_telegram_alert(
         f"🚀 <b>BPT CQE CONFIRMED</b> | {sym}\n"
-        f"Row: <b>{lifecycle_row}</b> | Live scale-in: <b>{'YES' if live_scalein_executed else 'NO'}</b>\n"
-        f"Upgrade attempted {fmt_money(upgrade_size)} | Actual added {fmt_money(actual_upgrade_size)} | Total live/model size {fmt_money(displayed_dynamic_size)}\n"
+        f"Mode: <b>{trade_mode_label}</b> | Row: <b>{lifecycle_row}</b>\n"
+        f"Live scale-in: <b>{live_scalein_label}</b>\n"
+        f"Model upgrade target {fmt_money(upgrade_size)} | Actual live added {fmt_money(actual_upgrade_size)} | Total live/model size {fmt_money(displayed_dynamic_size)}\n"
         f"Confirmed peak {fmt_num(peak_for_confirmation)}% | age {fmt_num(age_mins,1)}m\n"
         f"Trigger: {fast_track_reason or 'standard_30m_confirmation'}\n"
         f"Avg T/M {fmt_num(metrics['avg_trend'])} / {fmt_num(metrics['avg_momentum'])}\n"
-        f"Live upgrades: {ENABLE_BPT_CQE_LIVE_UPGRADES}\n"
+        f"Live upgrades toggle: {ENABLE_BPT_CQE_LIVE_UPGRADES} | Real scale-in allowed: {scalein_allowed}\n"
+        f"Reason: {scalein_block_reason}\n"
         f"ID {tid}"
     )
     return True
