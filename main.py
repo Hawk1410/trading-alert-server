@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v7.4
-# TITLE: ADAPTIVE PROBE LIFECYCLE ENGINE + ACCOUNTING + TRUE GBP SIZING + SCALE-IN VISIBILITY HOTFIX
+# VERSION: v7.6
+# TITLE: COIN HEALTH SELF-HEALING SHADOW FILTER + DATA LOGGING FIXES
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v7.4 ACCOUNTING + TRUE GBP SIZING + SCALE-IN VISIBILITY HOTFIX RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v7.6 COIN HEALTH SELF-HEALING SHADOW FILTER RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -393,7 +393,7 @@ MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 3
 
 
 
-DATA_VERSION = "v7.5_DEAD_CORE_NOT_RISING_SHADOW_FILTER"
+DATA_VERSION = "v7.6_COIN_HEALTH_SELF_HEALING_SHADOW_FILTER"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -535,6 +535,27 @@ ENABLE_DENSITY_AS_CROWDING_TELEMETRY = True
 
 MAX_SAME_SYMBOL_OPEN = int(os.environ.get("MAX_SAME_SYMBOL_OPEN", "1") or 1)
 ENABLE_SAME_SYMBOL_STACKING_LIMIT = os.environ.get("ENABLE_SAME_SYMBOL_STACKING_LIMIT", "true").lower() == "true"
+
+# =========================
+# 🩺 v7.6 COIN EXPANSION HEALTH ENGINE
+# =========================
+# Simulation-backed 2026-06-05:
+# 2 dead expansion trades out of the last 3 gave the strongest improvement.
+# This does NOT delete a coin permanently. It routes the next qualifying live entry
+# to shadow until the coin proves expansion has returned.
+ENABLE_COIN_HEALTH_ENGINE = env_bool("ENABLE_COIN_HEALTH_ENGINE", True)
+COIN_HEALTH_SHADOW_ENTRY_QUALITY = os.environ.get("COIN_HEALTH_SHADOW_ENTRY_QUALITY", "COIN_HEALTH_SHADOW")
+COIN_HEALTH_DEAD_WINDOW = int(os.environ.get("COIN_HEALTH_DEAD_WINDOW", "3") or 3)
+COIN_HEALTH_DEAD_THRESHOLD = int(os.environ.get("COIN_HEALTH_DEAD_THRESHOLD", "2") or 2)
+COIN_HEALTH_DEAD_PEAK_PCT = float(os.environ.get("COIN_HEALTH_DEAD_PEAK_PCT", "0.25") or 0.25)
+COIN_HEALTH_RECOVERY_WINDOW = int(os.environ.get("COIN_HEALTH_RECOVERY_WINDOW", "2") or 2)
+COIN_HEALTH_RECOVERY_THRESHOLD = int(os.environ.get("COIN_HEALTH_RECOVERY_THRESHOLD", "2") or 2)
+COIN_HEALTH_RECOVERY_PEAK_PCT = float(os.environ.get("COIN_HEALTH_RECOVERY_PEAK_PCT", "1.00") or 1.00)
+COIN_HEALTH_LOOKBACK_HOURS = int(os.environ.get("COIN_HEALTH_LOOKBACK_HOURS", "168") or 168)
+COIN_HEALTH_SHADOW_SIZE_GBP = float(os.environ.get("COIN_HEALTH_SHADOW_SIZE_GBP", "20") or 20)
+COIN_HEALTH_SHADOW_HOLD_MINUTES = float(os.environ.get("COIN_HEALTH_SHADOW_HOLD_MINUTES", "120") or 120)
+COIN_HEALTH_SHADOW_HARD_STOP = float(os.environ.get("COIN_HEALTH_SHADOW_HARD_STOP", "-0.60") or -0.60)
+ENABLE_COIN_HEALTH_TELEGRAM = env_bool("ENABLE_COIN_HEALTH_TELEGRAM", True)
 
 # =========================
 # 🧠 LEADERSHIP ENGINE
@@ -1639,6 +1660,7 @@ def engine_display_name(entry_quality):
         "ROT_MICRO_V1": "ROT_MICRO_V1",
         "BPT_CQE_LIFECYCLE_V1": "BPT_CQE_LIFECYCLE_V1",
         "PERSISTENCE_HUNTER_V1": "PERSISTENCE_HUNTER_V1",
+        "COIN_HEALTH_SHADOW": "COIN_HEALTH_SHADOW",
     }
     return mapping.get(entry_quality, entry_quality or "UNKNOWN_ENGINE")
 
@@ -1653,6 +1675,8 @@ def engine_emoji(entry_quality, is_shadow=False):
         return "⚡"
     if entry_quality == "BPT_CQE_LIFECYCLE_V1":
         return "🧬"
+    if entry_quality == "COIN_HEALTH_SHADOW":
+        return "🩺"
     return "🤖"
 
 def live_shadow_label(is_shadow=False):
@@ -5977,6 +6001,197 @@ def log_trade_event(cur, trade_id, symbol, event_type, price, pnl_percent,
         is_entry
     ))
 
+def get_coin_health_snapshot(cur, symbol):
+    """
+    v7.6 self-healing expansion health.
+    A symbol is routed to shadow when 2 of its last 3 closed observations failed
+    to produce any useful expansion (peak < COIN_HEALTH_DEAD_PEAK_PCT).
+
+    Recovery is intentionally self-healing: if the last 2 closed observations have
+    both expanded above COIN_HEALTH_RECOVERY_PEAK_PCT, the symbol is treated LIVE.
+    Shadow rows count as observations, so a coin can prove itself back without
+    risking capital.
+    """
+    default = {
+        "coin_health_mode": "LIVE",
+        "coin_health_reason": "insufficient_history",
+        "coin_dead_streak": 0,
+        "coin_recovery_streak": 0,
+        "coin_health_sample_size": 0,
+        "coin_health_avg_peak": None,
+        "coin_health_dead_rate": None,
+    }
+
+    if not ENABLE_COIN_HEALTH_ENGINE:
+        default["coin_health_reason"] = "disabled"
+        return default
+
+    try:
+        limit_n = max(COIN_HEALTH_DEAD_WINDOW, COIN_HEALTH_RECOVERY_WINDOW)
+        cur.execute("""
+            SELECT
+                id,
+                COALESCE(peak_pnl_percent, 0) AS peak_pnl_percent,
+                COALESCE(is_shadow, FALSE) AS is_shadow,
+                COALESCE(closed_at, opened_at) AS resolved_at,
+                close_reason
+            FROM bot_trades_v4
+            WHERE symbol = %s
+              AND status = 'CLOSED'
+              AND COALESCE(closed_at, opened_at) >= NOW() - (%s || ' hours')::INTERVAL
+              AND peak_pnl_percent IS NOT NULL
+            ORDER BY COALESCE(closed_at, opened_at) DESC
+            LIMIT %s
+        """, (symbol, COIN_HEALTH_LOOKBACK_HOURS, limit_n))
+        rows = cur.fetchall() or []
+
+        peaks = [float(r[1] or 0) for r in rows]
+        sample_size = len(peaks)
+        if sample_size == 0:
+            return default
+
+        avg_peak = sum(peaks) / sample_size if sample_size else None
+        dead_count = sum(1 for x in peaks[:COIN_HEALTH_DEAD_WINDOW] if x < COIN_HEALTH_DEAD_PEAK_PCT)
+        dead_rate = (dead_count / min(sample_size, COIN_HEALTH_DEAD_WINDOW) * 100.0) if sample_size else None
+        recovery_count = sum(1 for x in peaks[:COIN_HEALTH_RECOVERY_WINDOW] if x >= COIN_HEALTH_RECOVERY_PEAK_PCT)
+
+        mode = "LIVE"
+        reason = "healthy"
+
+        if sample_size >= COIN_HEALTH_RECOVERY_WINDOW and recovery_count >= COIN_HEALTH_RECOVERY_THRESHOLD:
+            mode = "LIVE"
+            reason = f"recovered_{recovery_count}_of_{COIN_HEALTH_RECOVERY_WINDOW}_expanding"
+        elif sample_size >= COIN_HEALTH_DEAD_WINDOW and dead_count >= COIN_HEALTH_DEAD_THRESHOLD:
+            mode = "SHADOW"
+            reason = f"dead_{dead_count}_of_{COIN_HEALTH_DEAD_WINDOW}_peak_under_{COIN_HEALTH_DEAD_PEAK_PCT}"
+        elif sample_size < COIN_HEALTH_DEAD_WINDOW:
+            reason = "insufficient_history"
+
+        return {
+            "coin_health_mode": mode,
+            "coin_health_reason": reason,
+            "coin_dead_streak": int(dead_count),
+            "coin_recovery_streak": int(recovery_count),
+            "coin_health_sample_size": int(sample_size),
+            "coin_health_avg_peak": avg_peak,
+            "coin_health_dead_rate": dead_rate,
+        }
+    except Exception as e:
+        print(f"⚠️ coin health lookup failed for {symbol}: {e}", flush=True)
+        default["coin_health_reason"] = "lookup_error"
+        return default
+
+
+def coin_health_trade_telemetry(snapshot):
+    snapshot = snapshot or {}
+    return {
+        "coin_health_mode": snapshot.get("coin_health_mode"),
+        "coin_health_reason": snapshot.get("coin_health_reason"),
+        "coin_dead_streak": snapshot.get("coin_dead_streak"),
+        "coin_recovery_streak": snapshot.get("coin_recovery_streak"),
+        "coin_health_sample_size": snapshot.get("coin_health_sample_size"),
+        "coin_health_avg_peak": snapshot.get("coin_health_avg_peak"),
+        "coin_health_dead_rate": snapshot.get("coin_health_dead_rate"),
+    }
+
+
+def market_context_trade_telemetry(ctx):
+    """Best-effort v7.6 logging repair. Uses safe_update_trade_telemetry, so missing columns are harmless."""
+    ctx = ctx or {}
+    median_ctx = ctx.get("market_median_peak_context")
+    lifecycle_state = ctx.get("market_lifecycle_state")
+    lifecycle_window = ctx.get("market_lifecycle_window")
+    return {
+        "global_avg_peak": median_ctx,
+        "global_regime": lifecycle_window or lifecycle_state,
+        "market_median_peak_context": median_ctx,
+        "market_median_peak_context_at_entry": median_ctx,
+        "market_breadth": ctx.get("market_breadth"),
+        "market_breadth_at_entry": ctx.get("market_breadth"),
+        "market_breadth_accel": ctx.get("market_breadth_accel"),
+        "market_breadth_accel_at_entry": ctx.get("market_breadth_accel"),
+        "market_lifecycle_state": lifecycle_state,
+        "market_lifecycle_state_at_entry": lifecycle_state,
+        "market_lifecycle_movement": ctx.get("market_lifecycle_movement"),
+        "market_lifecycle_movement_at_entry": ctx.get("market_lifecycle_movement"),
+        "market_lifecycle_window": lifecycle_window,
+        "market_lifecycle_window_at_entry": lifecycle_window,
+        "market_near_count_at_entry": ctx.get("market_near_count"),
+        "market_core_count_at_entry": ctx.get("market_core_count"),
+        "market_aggressive_count_at_entry": ctx.get("market_aggressive_count"),
+        "market_monster_count_at_entry": ctx.get("market_monster_count"),
+    }
+
+
+def open_coin_health_shadow_trade(cur, symbol, direction, price, momentum, trend, signal_id, signal_time, leadership_context, health_snapshot):
+    if not ENABLE_SHADOWS:
+        print(f"🩺 COIN HEALTH SHADOW SKIPPED | {symbol} | shadows disabled", flush=True)
+        return None
+
+    try:
+        cur.execute("""
+            SELECT COUNT(*)
+            FROM bot_trades_v4
+            WHERE status = 'OPEN'
+              AND symbol = %s
+              AND COALESCE(is_shadow, FALSE) = TRUE
+              AND entry_quality = %s
+        """, (symbol, COIN_HEALTH_SHADOW_ENTRY_QUALITY))
+        existing = cur.fetchone()[0] or 0
+        if existing >= 1:
+            print(f"🩺 COIN HEALTH SHADOW ALREADY OPEN | {symbol} | skipping duplicate", flush=True)
+            return None
+    except Exception as e:
+        print(f"⚠️ coin health duplicate-shadow check failed for {symbol}: {e}", flush=True)
+
+    shadow_reason = (health_snapshot or {}).get("coin_health_reason") or "coin_health_shadow"
+    ctx = dict(leadership_context or {})
+    ctx["market_os_engine"] = COIN_HEALTH_SHADOW_ENTRY_QUALITY
+
+    trade_id = open_shadow_market_os_trade(
+        cur,
+        symbol,
+        direction,
+        price,
+        momentum,
+        trend,
+        COIN_HEALTH_SHADOW_ENTRY_QUALITY,
+        signal_id,
+        signal_time,
+        ctx,
+        shadow_reason,
+        model_size_gbp=COIN_HEALTH_SHADOW_SIZE_GBP,
+    )
+
+    if trade_id:
+        safe_update_trade_telemetry(cur, trade_id, {
+            **coin_health_trade_telemetry(health_snapshot),
+            **market_context_trade_telemetry(ctx),
+            "shadow_reason": f"COIN_HEALTH:{shadow_reason}",
+            "entry_block_reason": f"coin_health_{shadow_reason}",
+        })
+        try:
+            cur.connection.commit()
+        except Exception:
+            pass
+
+        if ENABLE_COIN_HEALTH_TELEGRAM:
+            try:
+                send_telegram_alert(
+                    f"🩺 <b>COIN HEALTH SHADOW</b> | {symbol}\n"
+                    f"Reason: {shadow_reason}\n"
+                    f"Dead {health_snapshot.get('coin_dead_streak')}/{COIN_HEALTH_DEAD_WINDOW} | "
+                    f"Recovery {health_snapshot.get('coin_recovery_streak')}/{COIN_HEALTH_RECOVERY_WINDOW}\n"
+                    f"Avg peak {fmt_num(health_snapshot.get('coin_health_avg_peak'), 3)} | "
+                    f"Dead rate {fmt_num(health_snapshot.get('coin_health_dead_rate'), 1)}%\n"
+                    "Real capital blocked; shadow observation opened."
+                )
+            except Exception as e:
+                print(f"⚠️ coin health telegram failed: {e}", flush=True)
+
+    return trade_id
+
+
 def open_trade(cur, symbol, direction, price, momentum, trend, quality,
                signal_id, signal_time, leadership_context):
     entry_snapshot = build_entry_leadership_snapshot(quality, leadership_context)
@@ -6041,6 +6256,8 @@ def open_trade(cur, symbol, direction, price, momentum, trend, quality,
             **accounting_entry_telemetry(gbp_to_usdt_quote(entry_snapshot.get("dynamic_trade_size_gbp") or entry_snapshot.get("trade_size_gbp"))),
         }
         entry_optional_telemetry.update(lifecycle_trade_telemetry_from_context(leadership_context))
+        entry_optional_telemetry.update(market_context_trade_telemetry(leadership_context))
+        entry_optional_telemetry.update(coin_health_trade_telemetry((leadership_context or {}).get("coin_health_snapshot") or {"coin_health_mode": "LIVE", "coin_health_reason": "live_entry"}))
         safe_update_trade_telemetry(cur, trade_id, entry_optional_telemetry)
         cur.connection.commit()
     except Exception as e:
@@ -6135,7 +6352,10 @@ def open_shadow_market_os_trade(cur, symbol, direction, price, momentum, trend, 
         **accounting_entry_telemetry(model_size_gbp),
         "market_os_engine": (leadership_context or {}).get("market_os_engine"),
         "size_scaling_reason": shadow_reason,
+        "shadow_reason": shadow_reason,
         **lifecycle_trade_telemetry_from_context(leadership_context),
+        **market_context_trade_telemetry(leadership_context),
+        **coin_health_trade_telemetry((leadership_context or {}).get("coin_health_snapshot") or {}),
     })
 
     try:
@@ -6164,7 +6384,7 @@ def process_market_os_shadow_trades(cur, symbol, price, momentum, trend, now):
         FROM bot_trades_v4
         WHERE status = 'OPEN'
           AND COALESCE(is_shadow, FALSE) = TRUE
-          AND entry_quality IN ('ROT_MICRO_V1', 'LEADERSHIP_CORE')
+          AND entry_quality IN ('ROT_MICRO_V1', 'LEADERSHIP_CORE', 'COIN_HEALTH_SHADOW')
           AND symbol = %s
     """, (symbol,))
     rows = cur.fetchall() or []
@@ -6176,8 +6396,15 @@ def process_market_os_shadow_trades(cur, symbol, price, momentum, trend, now):
             mins = safe_age_minutes(opened_at, now) or 0
             model_size = float(dyn_size or 10)
 
-            hold_minutes = ROT_MICRO_SHADOW_HOLD_MINUTES if entry_quality == "ROT_MICRO_V1" else LEADERSHIP_CORE_SHADOW_HOLD_MINUTES
-            hard_stop = ROT_MICRO_SHADOW_HARD_STOP if entry_quality == "ROT_MICRO_V1" else LEADERSHIP_CORE_SHADOW_HARD_STOP
+            if entry_quality == "ROT_MICRO_V1":
+                hold_minutes = ROT_MICRO_SHADOW_HOLD_MINUTES
+                hard_stop = ROT_MICRO_SHADOW_HARD_STOP
+            elif entry_quality == "COIN_HEALTH_SHADOW":
+                hold_minutes = COIN_HEALTH_SHADOW_HOLD_MINUTES
+                hard_stop = COIN_HEALTH_SHADOW_HARD_STOP
+            else:
+                hold_minutes = LEADERSHIP_CORE_SHADOW_HOLD_MINUTES
+                hard_stop = LEADERSHIP_CORE_SHADOW_HARD_STOP
 
             close_reason = None
             if pnl_percent <= hard_stop:
@@ -6906,10 +7133,32 @@ def webhook():
                 block_reason = "control_panel_entries_disabled"
 
             if entry_allowed:
+                # ================= COIN HEALTH SELF-HEALING GATE v7.6 =================
+                # If a symbol has stopped producing expansion, do not risk capital.
+                # Open a same-setup shadow observation instead so the coin can prove recovery.
+                coin_health_snapshot = get_coin_health_snapshot(cur, symbol)
+                leadership_context = leadership_context or {}
+                leadership_context["coin_health_snapshot"] = coin_health_snapshot
+
+                if ENABLE_COIN_HEALTH_ENGINE and coin_health_snapshot.get("coin_health_mode") == "SHADOW":
+                    entry_allowed = False
+                    block_reason = f"coin_health_{coin_health_snapshot.get('coin_health_reason')}"
+                    print(
+                        f"🩺 COIN HEALTH ROUTE TO SHADOW | {symbol} | "
+                        f"dead={coin_health_snapshot.get('coin_dead_streak')}/{COIN_HEALTH_DEAD_WINDOW} | "
+                        f"avg_peak={coin_health_snapshot.get('coin_health_avg_peak')} | "
+                        f"reason={coin_health_snapshot.get('coin_health_reason')}",
+                        flush=True
+                    )
+                    open_coin_health_shadow_trade(
+                        cur, symbol, "LONG", price, momentum, trend,
+                        signal_id, signal_time, leadership_context, coin_health_snapshot
+                    )
+
                 # v6.6.12 EMERGENCY EXCHANGE RECONCILIATION GUARD:
                 # OKX exchange truth overrides Supabase state. If OKX already holds
                 # this base asset, block the live entry to prevent repeated duplicate buys.
-                if ENABLE_OKX_POSITION_ENTRY_GUARD:
+                if entry_allowed and ENABLE_OKX_POSITION_ENTRY_GUARD:
                     okx_position_exists, okx_position_context = okx_has_live_position(symbol, price)
                     if okx_position_exists:
                         entry_allowed = False
@@ -8091,6 +8340,13 @@ def bool_status():
         "PH_MAX_CORE_AGE_MINUTES": PH_MAX_CORE_AGE_MINUTES,
         "MAX_OPEN_TRADES": MAX_OPEN_TRADES,
         "MAX_SAME_SYMBOL_OPEN": MAX_SAME_SYMBOL_OPEN,
+        "ENABLE_COIN_HEALTH_ENGINE": ENABLE_COIN_HEALTH_ENGINE,
+        "COIN_HEALTH_DEAD_WINDOW": COIN_HEALTH_DEAD_WINDOW,
+        "COIN_HEALTH_DEAD_THRESHOLD": COIN_HEALTH_DEAD_THRESHOLD,
+        "COIN_HEALTH_DEAD_PEAK_PCT": COIN_HEALTH_DEAD_PEAK_PCT,
+        "COIN_HEALTH_RECOVERY_WINDOW": COIN_HEALTH_RECOVERY_WINDOW,
+        "COIN_HEALTH_RECOVERY_THRESHOLD": COIN_HEALTH_RECOVERY_THRESHOLD,
+        "COIN_HEALTH_RECOVERY_PEAK_PCT": COIN_HEALTH_RECOVERY_PEAK_PCT,
         "ENABLE_LIVE_ORDERS": ENABLE_LIVE_ORDERS,
         "ENABLE_ORDER_LOGGING": ENABLE_ORDER_LOGGING,
         "MAX_LIVE_OPEN_TRADES": MAX_LIVE_OPEN_TRADES,
