@@ -393,7 +393,7 @@ MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 3
 
 
 
-DATA_VERSION = "v7.4_ACCOUNTING_TRUE_GBP_SIZING_SCALEIN_VISIBILITY_HOTFIX"
+DATA_VERSION = "v7.5_DEAD_CORE_NOT_RISING_SHADOW_FILTER"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -6649,6 +6649,40 @@ def webhook():
                         )
                     entry_allowed = False
                     block_reason = "leadership_core_shadow_only"
+
+                # v7.5 SHADOW FILTER:
+                # DEAD_CORE markets that are not RISING are shadow-only.
+                if entry_allowed:
+                    market_state = (leadership_context or {}).get("market_lifecycle_state")
+                    market_move = (leadership_context or {}).get("market_lifecycle_movement")
+
+                    if (
+                        market_state == "DEAD_CORE"
+                        and market_move != "RISING"
+                    ):
+                        shadow_ctx = dict(leadership_context or {})
+                        shadow_ctx["market_os_engine"] = "DEAD_CORE_FILTER_SHADOW"
+
+                        try:
+                            open_shadow_market_os_trade(
+                                cur,
+                                symbol,
+                                "LONG",
+                                price,
+                                momentum,
+                                trend,
+                                entry_quality or "DEAD_CORE_FILTER",
+                                signal_id,
+                                signal_time,
+                                shadow_ctx,
+                                "dead_core_not_rising_shadow",
+                                model_size_gbp=float(get_trade_size_for_quality(entry_quality or "STANDARD"))
+                            )
+                        except Exception as e:
+                            print(f"⚠️ DEAD_CORE shadow creation failed: {e}", flush=True)
+
+                        entry_allowed = False
+                        block_reason = "dead_core_not_rising_shadow"
 
                 # v6.1.4: check OKX tradability BEFORE creating DB trade / consuming slot.
                 if entry_allowed:
