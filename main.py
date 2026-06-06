@@ -3831,7 +3831,7 @@ def open_bpt_cqe_probe_trade(cur, symbol, price, momentum, trend, signal_id, sig
     )
 
     send_telegram_alert(
-        f"{live_shadow_label(not ENABLE_BPT_CQE_LIVE_PROBES)} ENTRY\n🧪 <b>BPT_CQE_LIFECYCLE_V1</b> | {symbol} LONG\n"
+        f"👻 <b>GHOST PROBE OPENED</b>\n🧪 <b>BPT_CQE_LIFECYCLE_V1</b> | {symbol} LONG\n"
         f"Row: <b>{lifecycle_row}</b> | Q {fmt_num(q)}\n"
         f"Probe size: {fmt_money(BPT_CQE_PROBE_SIZE_GBP)} | Live probe: {ENABLE_BPT_CQE_LIVE_PROBES}\n"
         f"Entry {price} | T/M {fmt_num(trend)} / {fmt_num(momentum)}\n"
@@ -4198,7 +4198,7 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
     )
 
     send_telegram_alert(
-        f"🚀 <b>BPT CQE CONFIRMED</b> | {sym}\n"
+        f"🚀 <b>LIVE UPGRADE EXECUTED</b> | {sym}\n"
         f"Mode: <b>{trade_mode_label}</b> | Row: <b>{lifecycle_row}</b>\n"
         f"Live scale-in: <b>{live_scalein_label}</b>\n"
         f"Model upgrade target {fmt_money(upgrade_size)} | Actual live added {fmt_money(actual_upgrade_size)} | Total live/model size {fmt_money(displayed_dynamic_size)}\n"
@@ -4480,7 +4480,7 @@ def process_bpt_cqe_lifecycle_trades(cur, symbol, price, momentum, trend, now):
             )
 
             send_telegram_alert(
-                f"{live_shadow_label(is_shadow)} EXIT\n🧪 <b>BPT_CQE_LIFECYCLE_V1</b> | {sym}\n"
+                f"{'👻 GHOST EXIT' if is_shadow else '💰 LIVE EXIT'}\n🧪 <b>BPT_CQE_LIFECYCLE_V1</b> | {sym}\n"
                 f"Row: {lifecycle_row} | " + format_trade_pnl_lines(pnl_percent, pnl_gbp, 0) + "\n"
                 + f"Peak {fmt_num(current_peak)}% | DD {fmt_num(drawdown_from_peak)}%\n"
                 f"Size model {fmt_money(dynamic_size)} | Reason {close_reason}\n"
