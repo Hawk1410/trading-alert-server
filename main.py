@@ -6405,6 +6405,18 @@ def open_shadow_market_os_trade(cur, symbol, direction, price, momentum, trend, 
     return trade_id
 
 
+
+def calculate_pnl_percent(direction, entry_price, current_price):
+    """Shared helper for shadow engines."""
+    if not entry_price:
+        return 0.0
+
+    if direction == "SHORT":
+        return ((entry_price - current_price) / entry_price) * 100
+
+    return ((current_price - entry_price) / entry_price) * 100
+
+
 def process_market_os_shadow_trades(cur, symbol, price, momentum, trend, now):
     """Simple shadow lifecycle for ROT/Core research rows."""
     cur.execute("""
