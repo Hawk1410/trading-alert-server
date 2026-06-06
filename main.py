@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v7.6
-# TITLE: COIN HEALTH SELF-HEALING SHADOW FILTER + DATA LOGGING FIXES
+# VERSION: v7.7
+# TITLE: GHOST PROBES + LIVE UPGRADES ONLY + COIN HEALTH SELF-HEALING
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v7.6 COIN HEALTH SELF-HEALING SHADOW FILTER RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v7.7 GHOST PROBES + LIVE UPGRADES ONLY RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -393,7 +393,7 @@ MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 3
 
 
 
-DATA_VERSION = "v7.6_COIN_HEALTH_SELF_HEALING_SHADOW_FILTER"
+DATA_VERSION = "v7.7_GHOST_PROBES_LIVE_UPGRADES_ONLY"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -714,6 +714,15 @@ ENABLE_BPT_CQE_LIVE_PROBES = os.environ.get(
 ENABLE_BPT_CQE_LIVE_UPGRADES = os.environ.get(
     "ENABLE_BPT_CQE_LIVE_UPGRADES", "true"
 ).lower() == "true"
+
+# v7.7 capital-protection architecture:
+# Probes remain OPEN DB lifecycle rows and still drive confirmation/coin-health telemetry,
+# but they do NOT place real OKX capital. They are labelled as GHOST_PROBE.
+# Real capital is only added if/when the lifecycle confirms and a live upgrade scale-in succeeds.
+ENABLE_BPT_CQE_GHOST_PROBES = os.environ.get(
+    "ENABLE_BPT_CQE_GHOST_PROBES", "true"
+).lower() == "true"
+GHOST_PROBE_LABEL = "GHOST_PROBE_NO_CAPITAL"
 
 # v6.6.19/v6.6.20: real capital only added AFTER CQE confirmation.
 ENABLE_CQE_REAL_SCALEINS = os.environ.get(
@@ -3743,16 +3752,24 @@ def open_bpt_cqe_probe_trade(cur, symbol, price, momentum, trend, signal_id, sig
     ))
     trade_id = cur.fetchone()[0]
 
+    ghost_probe_active = bool(ENABLE_BPT_CQE_GHOST_PROBES)
+    live_probe_enabled = bool(ENABLE_BPT_CQE_LIVE_PROBES and not ghost_probe_active)
+    model_probe_size_gbp = 0.0 if ghost_probe_active else BPT_CQE_PROBE_SIZE_GBP
+    model_probe_size_usdt = 0.0 if ghost_probe_active else gbp_to_usdt_quote(BPT_CQE_PROBE_SIZE_GBP)
+
     safe_update_trade_telemetry(cur, trade_id, {
-        "is_shadow": not ENABLE_BPT_CQE_LIVE_PROBES,
+        # Ghost probes are not marked shadow because they are eligible for a future live upgrade.
+        # They simply carry zero capital until confirmation.
+        "is_shadow": False if ghost_probe_active else not ENABLE_BPT_CQE_LIVE_PROBES,
         "entry_architecture": BPT_CQE_ENTRY_QUALITY,
         "market_os_engine": (leadership_context or {}).get("market_os_engine"),
-        "size_scaling_reason": (leadership_context or {}).get("size_scaling_reason"),
+        "size_scaling_reason": GHOST_PROBE_LABEL if ghost_probe_active else (leadership_context or {}).get("size_scaling_reason"),
+        "shadow_reason": GHOST_PROBE_LABEL if ghost_probe_active else None,
         "leadership_mode": (leadership_context or {}).get("leadership_mode"),
-        "trade_size_gbp": BPT_CQE_PROBE_SIZE_GBP,
-        "dynamic_trade_size_gbp": BPT_CQE_PROBE_SIZE_GBP,
-        "probe_size_gbp": BPT_CQE_PROBE_SIZE_GBP,
-        **accounting_entry_telemetry(gbp_to_usdt_quote(BPT_CQE_PROBE_SIZE_GBP)),
+        "trade_size_gbp": model_probe_size_gbp,
+        "dynamic_trade_size_gbp": model_probe_size_gbp,
+        "probe_size_gbp": model_probe_size_gbp,
+        **accounting_entry_telemetry(model_probe_size_usdt),
         "upgrade_size_gbp": params["upgrade_size"],
         "lifecycle_row": lifecycle_row,
         "lifecycle_quality_score": q,
@@ -3775,7 +3792,7 @@ def open_bpt_cqe_probe_trade(cur, symbol, price, momentum, trend, signal_id, sig
     except Exception as e:
         print(f"⚠️ BPT CQE trade_events probe entry log failed: {e}", flush=True)
 
-    if ENABLE_BPT_CQE_LIVE_PROBES:
+    if live_probe_enabled:
         okx_probe_result = okx_place_market_order(
             cur=cur,
             trade_id=trade_id,
@@ -3808,8 +3825,8 @@ def open_bpt_cqe_probe_trade(cur, symbol, price, momentum, trend, signal_id, sig
             """, (f"okx_bpt_probe_failed: {okx_probe_result.get('reason') or okx_probe_result.get('error')}", trade_id))
 
     print(
-        f"🧬 OPEN BPT CQE PROBE | {symbol} | id={trade_id} | row={lifecycle_row} | "
-        f"q={round(q,3)} | size={fmt_money(BPT_CQE_PROBE_SIZE_GBP)} | T/M={round(trend,3)}/{round(momentum,3)}",
+        f"👻 OPEN BPT CQE GHOST PROBE | {symbol} | id={trade_id} | row={lifecycle_row} | "
+        f"q={round(q,3)} | size={fmt_money(model_probe_size_gbp)} | live_probe={live_probe_enabled} | T/M={round(trend,3)}/{round(momentum,3)}",
         flush=True
     )
 
@@ -3976,7 +3993,7 @@ def exit_live_probe_and_continue_shadow(cur, tid, sym, direction, entry_price, p
 
     return True
 
-def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, current_peak, peak_time_minutes, momentum, trend, now, fast_track_reason=None):
+def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, current_peak, peak_time_minutes, momentum, trend, now, fast_track_reason=None, current_price=None):
     if peak_time_minutes is None:
         peak_time_minutes = 999999
 
@@ -4012,7 +4029,7 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
         return False
 
     cur.execute("""
-        SELECT lifecycle_row, upgrade_size_gbp, dynamic_trade_size_gbp, COALESCE(is_shadow, TRUE), trade_size_usdt
+        SELECT lifecycle_row, upgrade_size_gbp, dynamic_trade_size_gbp, COALESCE(is_shadow, TRUE), trade_size_usdt, probe_size_gbp, size_scaling_reason
         FROM bot_trades_v4
         WHERE id = %s
     """, (tid,))
@@ -4020,7 +4037,10 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
     lifecycle_row = row[0] if row else None
     upgrade_size = float(row[1] or get_bpt_row_params(lifecycle_row).get("upgrade_size", 0)) if row else 0
     is_shadow_trade = bool(row[3]) if row else True
-    current_trade_size_usdt = float(row[4] or gbp_to_usdt_quote(row[2] or BPT_CQE_PROBE_SIZE_GBP)) if row else gbp_to_usdt_quote(BPT_CQE_PROBE_SIZE_GBP)
+    probe_size_gbp = float(row[5] or 0) if row else 0.0
+    size_scaling_reason = str(row[6] or "") if row else ""
+    ghost_probe_active = (probe_size_gbp == 0.0 and size_scaling_reason == GHOST_PROBE_LABEL)
+    current_trade_size_usdt = float(row[4] or 0) if row else 0.0
 
     # v6.6.20:
     # ensure OKX minimum notional compatibility
@@ -4028,7 +4048,7 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
         upgrade_size,
         MIN_OKX_ORDER_NOTIONAL_GBP
     )
-    current_dynamic_size = float(row[2] or BPT_CQE_PROBE_SIZE_GBP) if row else BPT_CQE_PROBE_SIZE_GBP
+    current_dynamic_size = float(row[2]) if row and row[2] is not None else (0.0 if ghost_probe_active else BPT_CQE_PROBE_SIZE_GBP)
     new_dynamic_size = current_dynamic_size + upgrade_size
 
     live_pressure_30m = safe_float(live_ctx.get("live_pressure_30m"), 0)
@@ -4107,8 +4127,8 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
             symbol=sym,
             direction="LONG",
             action="entry",
-            price=entry_price,
-            entry_price=entry_price,
+            price=current_price or entry_price,
+            entry_price=current_price or entry_price,
             trade_size_quote=gbp_to_usdt_quote(upgrade_size),
         )
 
@@ -4133,13 +4153,21 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
                 WHERE id = %s
             """, (tid,))
 
+            ghost_upgrade_reset = {
+                "entry_price": current_price or entry_price,
+                "peak_pnl_percent": 0,
+                "size_scaling_reason": "ghost_probe_upgraded_live_capital_only",
+                "shadow_reason": None,
+            } if ghost_probe_active else {}
+
             safe_update_trade_telemetry(cur, tid, {
+                **ghost_upgrade_reset,
                 "dynamic_trade_size_gbp": new_dynamic_size,
                 "trade_size_gbp": new_dynamic_size,
                 **accounting_entry_telemetry(new_trade_size_usdt),
                 "upgrade_size_gbp": actual_upgrade_size,
                 "probe_lifecycle_state": "FAST_TRACK_UPGRADED" if fast_track_active else "STANDARD_UPGRADED",
-                "size_scaling_reason": "bpt_live_scalein_executed",
+                "size_scaling_reason": "ghost_probe_upgraded_live_capital_only" if ghost_probe_active else "bpt_live_scalein_executed",
             })
         else:
             safe_update_trade_telemetry(cur, tid, {
@@ -4305,7 +4333,8 @@ def process_bpt_cqe_lifecycle_trades(cur, symbol, price, momentum, trend, now):
             maybe_confirm_and_upgrade_bpt_trade(
                 cur, tid, sym, entry_price, opened_at, current_peak,
                 peak_time_minutes, momentum, trend, now,
-                fast_track_reason=fast_track_reason
+                fast_track_reason=fast_track_reason,
+                current_price=price
             )
 
         # Reload upgrade state after possible upgrade.
@@ -7726,7 +7755,7 @@ def build_telegram_health_message(cur):
         f"Stable: score>={STABLE_LEADER_MIN_SCORE}, Δ{STABLE_LEADER_DELTA_MIN}..{STABLE_LEADER_DELTA_MAX}\n"
         f"Shadow ignition: {ENABLE_SHADOW_EMERGENCE_TELEMETRY} | Δ{CONTROLLED_IGNITION_DELTA_MIN}..{CONTROLLED_IGNITION_DELTA_MAX}\n"
         f"CQE continuation: {ENABLE_SHADOW_CQE} | future name {CQE_CONTINUATION_ENTRY_QUALITY} | Q>={CQE_MIN_QUALITY_SCORE}\n"
-        f"BPT lifecycle: {ENABLE_BPT_CQE_LIFECYCLE_SHADOW} | live probes {ENABLE_BPT_CQE_LIVE_PROBES} | live upgrades {ENABLE_BPT_CQE_LIVE_UPGRADES}\n"
+        f"BPT lifecycle: {ENABLE_BPT_CQE_LIFECYCLE_SHADOW} | ghost probes {ENABLE_BPT_CQE_GHOST_PROBES} | live probes {ENABLE_BPT_CQE_LIVE_PROBES} | live upgrades {ENABLE_BPT_CQE_LIVE_UPGRADES}\n"
         f"Density relaxed: {ENABLE_RELAXED_DENSITY_DEPENDENCY} | fixed real exits: {ENABLE_FIXED_TIME_EXITS_REAL}\n"
         f"Persistence Hunter: {ENABLE_PERSISTENCE_HUNTER_SHADOW} | live {ENABLE_PERSISTENCE_HUNTER_LIVE} | score>={PH_MIN_LEADERSHIP_SCORE} age {PH_MIN_CORE_AGE_MINUTES}-{PH_MAX_CORE_AGE_MINUTES}m\n"
         f"Max same symbol: {MAX_SAME_SYMBOL_OPEN}\n"
@@ -8305,6 +8334,7 @@ def bool_status():
         "DATA_VERSION": DATA_VERSION,
         "ENABLE_BPT_CQE_LIFECYCLE_SHADOW": ENABLE_BPT_CQE_LIFECYCLE_SHADOW,
         "ENABLE_BPT_CQE_LIVE_PROBES": ENABLE_BPT_CQE_LIVE_PROBES,
+        "ENABLE_BPT_CQE_GHOST_PROBES": ENABLE_BPT_CQE_GHOST_PROBES,
         "ENABLE_RELAXED_DENSITY_DEPENDENCY": ENABLE_RELAXED_DENSITY_DEPENDENCY,
         "ENABLE_TELEMETRY_V1": ENABLE_TELEMETRY_V1,
         "TELEMETRY_VERSION": TELEMETRY_VERSION,
@@ -8420,6 +8450,7 @@ def build_bpt_debug_summary():
     try:
         return {
             "live_probes": ENABLE_BPT_CQE_LIVE_PROBES,
+            "ghost_probes": ENABLE_BPT_CQE_GHOST_PROBES,
             "live_upgrades": ENABLE_BPT_CQE_LIVE_UPGRADES,
             "extreme_live": ENABLE_EXTREME_RUNNER_ROW_LIVE,
             "monster_live": ENABLE_HIGH_MONSTER_ROW_LIVE,
