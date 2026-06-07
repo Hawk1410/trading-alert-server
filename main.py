@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v8.3
+# VERSION: v8.3.1
 # TITLE: GHOST PROBES + LIVE UPGRADES ONLY + COIN HEALTH SELF-HEALING
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v8.3 MARKET HEAT + COIN INTELLIGENCE RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v8.3.1 MARKET HEAT EXIT BUGFIX RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -393,7 +393,7 @@ MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 3
 
 
 
-DATA_VERSION = "v8.3_MARKET_HEAT_TELEMETRY"
+DATA_VERSION = "v8.3.1_MARKET_HEAT_EXIT_BUGFIX"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -7523,6 +7523,7 @@ def webhook():
                 peak_pnl_percent,
                 COALESCE(is_shadow, FALSE) AS is_shadow,
                 entry_quality,
+                COALESCE(cqe_upgraded, FALSE) AS cqe_upgraded,
                 COALESCE(partial_bank_4_done, FALSE) AS partial_bank_done,
                 COALESCE(partial_bank_realized_pnl_gbp, 0) AS partial_bank_realized_gbp,
                 COALESCE(trade_size_usdt, dynamic_trade_size_gbp, trade_size_gbp, 0) AS trade_size_usdt_for_pnl
@@ -7533,7 +7534,7 @@ def webhook():
 
         open_trades = cur.fetchall()
 
-        for (tid, sym, direction, entry_price, opened_at, peak_pnl, is_shadow, entry_quality, partial_bank_done, partial_bank_realized_gbp, trade_size_usdt_for_pnl) in open_trades:
+        for (tid, sym, direction, entry_price, opened_at, peak_pnl, is_shadow, entry_quality, cqe_upgraded, partial_bank_done, partial_bank_realized_gbp, trade_size_usdt_for_pnl) in open_trades:
             try:
                 if sym != symbol:
                     continue
