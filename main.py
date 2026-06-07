@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v8.1
+# VERSION: v8.2
 # TITLE: GHOST PROBES + LIVE UPGRADES ONLY + COIN HEALTH SELF-HEALING
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v8.1 COIN INTELLIGENCE + ADAPTIVE DEAD MARKET SHADOW RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v8.2 PROFIT PROTECTION + COIN INTELLIGENCE RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -393,7 +393,7 @@ MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 3
 
 
 
-DATA_VERSION = "v8.1_ADAPTIVE_DEAD_MARKET_SHADOW"
+DATA_VERSION = "v8.2_PROFIT_PROTECTION"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -450,10 +450,11 @@ ENABLE_LEADERSHIP_CORE_SHADOW = os.environ.get("ENABLE_LEADERSHIP_CORE_SHADOW", 
 LEADERSHIP_CORE_SHADOW_HOLD_MINUTES = float(os.environ.get("LEADERSHIP_CORE_SHADOW_HOLD_MINUTES", "120") or 120)
 LEADERSHIP_CORE_SHADOW_HARD_STOP = float(os.environ.get("LEADERSHIP_CORE_SHADOW_HARD_STOP", "-0.60") or -0.60)
 
-# Partial profit bank: bank a small piece of position only after meaningful expansion.
+# Partial profit bank: v8.2 lowers the default because recent data showed +2% peaks fading to ~0%.
+# This banks half the live position after a meaningful +1.5% expansion, while leaving a runner alive.
 ENABLE_PARTIAL_PROFIT_BANK_V66 = os.environ.get("ENABLE_PARTIAL_PROFIT_BANK_V66", "true").lower() == "true"
-PARTIAL_BANK_TRIGGER_PCT = float(os.environ.get("PARTIAL_BANK_TRIGGER_PCT", "4.0") or 4.0)
-PARTIAL_BANK_FRACTION = float(os.environ.get("PARTIAL_BANK_FRACTION", "0.25") or 0.25)
+PARTIAL_BANK_TRIGGER_PCT = float(os.environ.get("PARTIAL_BANK_TRIGGER_PCT", "1.50") or 1.50)
+PARTIAL_BANK_FRACTION = float(os.environ.get("PARTIAL_BANK_FRACTION", "0.50") or 0.50)
 
 # Rotational micro continuation layer. Independent from elite core, tiny size only.
 ENABLE_ROT_MICRO_LIVE = os.environ.get("ENABLE_ROT_MICRO_LIVE", "false").lower() == "true"
@@ -998,9 +999,9 @@ ADAPTIVE_TREND_WEAK_THRESHOLD = float(os.environ.get("ADAPTIVE_TREND_WEAK_THRESH
 ENABLE_PROFIT_LOCKS = os.environ.get("ENABLE_PROFIT_LOCKS", "true").lower() == "true"
 
 LONG_LOCK_1_TRIGGER = float(os.environ.get("LONG_LOCK_1_TRIGGER", "0.75") or 0.75)
-LONG_LOCK_1_RATIO = float(os.environ.get("LONG_LOCK_1_RATIO", "0.50") or 0.50)
+LONG_LOCK_1_RATIO = float(os.environ.get("LONG_LOCK_1_RATIO", "0.60") or 0.60)
 
-LONG_LOCK_2_TRIGGER = float(os.environ.get("LONG_LOCK_2_TRIGGER", "1.50") or 1.50)
+LONG_LOCK_2_TRIGGER = float(os.environ.get("LONG_LOCK_2_TRIGGER", "1.25") or 1.25)
 LONG_LOCK_2_RATIO = float(os.environ.get("LONG_LOCK_2_RATIO", "0.70") or 0.70)
 
 LONG_LOCK_3_TRIGGER = float(os.environ.get("LONG_LOCK_3_TRIGGER", "3.00") or 3.00)
@@ -1011,6 +1012,15 @@ LONG_LOCK_4_RATIO = float(os.environ.get("LONG_LOCK_4_RATIO", "0.80") or 0.80)
 
 LONG_HARD_STOP = float(os.environ.get("LONG_HARD_STOP", "-0.40") or -0.40)
 LONG_NO_RED_AFTER_WIN_TRIGGER = float(os.environ.get("LONG_NO_RED_AFTER_WIN_TRIGGER", "0.75") or 0.75)
+
+# v8.2: upgraded-trade giveback guard.
+# Prevents trades like TIA (+2.08% peak) exiting near flat after trend fails.
+BPT_UPGRADED_GIVEBACK_GUARD_ENABLED = os.environ.get(
+    "BPT_UPGRADED_GIVEBACK_GUARD_ENABLED", "true"
+).lower() == "true"
+BPT_UPGRADED_GIVEBACK_GUARD_PEAK = float(os.environ.get("BPT_UPGRADED_GIVEBACK_GUARD_PEAK", "1.25") or 1.25)
+BPT_UPGRADED_GIVEBACK_GUARD_MIN_KEEP = float(os.environ.get("BPT_UPGRADED_GIVEBACK_GUARD_MIN_KEEP", "0.35") or 0.35)
+
 
 # =========================
 # DB
@@ -7472,12 +7482,6 @@ def webhook():
                 slot_recycle_candidate = False
                 drawdown_from_peak = current_peak - pnl_percent
 
-                if should_trend_persistence_exit(entry_quality, mins, trend):
-                    close_reason = trend_persistence_exit_reason(entry_quality)
-                    exit_architecture = "TREND_PERSISTENCE_EXIT"
-                    decay_triggered = True
-                    slot_recycle_candidate = True
-
                 # v6.6 partial profit bank: take 25% at +4%, leave runner open.
                 if not close_reason:
                     maybe_partial_profit_bank(
@@ -7559,6 +7563,23 @@ def webhook():
                 if not close_reason and current_peak >= LONG_NO_RED_AFTER_WIN_TRIGGER and pnl_percent < 0:
                     close_reason = "long_gave_back_winner"
                     exit_architecture = "long_no_red_after_win"
+
+                if (
+                    not close_reason
+                    and BPT_UPGRADED_GIVEBACK_GUARD_ENABLED
+                    and entry_quality == "BPT_CQE_LIFECYCLE_V1"
+                    and bool(cqe_upgraded)
+                    and current_peak >= BPT_UPGRADED_GIVEBACK_GUARD_PEAK
+                    and pnl_percent <= BPT_UPGRADED_GIVEBACK_GUARD_MIN_KEEP
+                ):
+                    close_reason = "bpt_upgrade_giveback_guard"
+                    exit_architecture = "bpt_upgrade_profit_protection"
+
+                if not close_reason and should_trend_persistence_exit(entry_quality, mins, trend):
+                    close_reason = trend_persistence_exit_reason(entry_quality)
+                    exit_architecture = "TREND_PERSISTENCE_EXIT"
+                    decay_triggered = True
+                    slot_recycle_candidate = True
 
                 if not close_reason and pnl_percent <= LONG_HARD_STOP:
                     close_reason = "long_hard_stop"
