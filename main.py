@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v8.4
-# TITLE: COIN HEALTH + PERSONALITY LEARNING + ADAPTIVE TIERS
+# VERSION: v8.4.1
+# TITLE: AUTO-DISCOVERY SHADOW COINS + COIN HEALTH + PERSONALITY LEARNING
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v8.4 COIN HEALTH + PERSONALITY LEARNING RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v8.4.1 AUTO-DISCOVERY SHADOW COINS RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -566,6 +566,12 @@ ENABLE_COIN_PERSONALITY_LEARNING = env_bool("ENABLE_COIN_PERSONALITY_LEARNING", 
 ENABLE_COIN_TIER_GATE = env_bool("ENABLE_COIN_TIER_GATE", True)
 ENABLE_COIN_TIER_TELEGRAM = env_bool("ENABLE_COIN_TIER_TELEGRAM", True)
 ENABLE_COIN_SCORE_UPSERT_ON_SIGNAL = env_bool("ENABLE_COIN_SCORE_UPSERT_ON_SIGNAL", True)
+# v8.4.1: any new TradingView/OKX symbol not listed below is auto-registered
+# into the discovery pool as SHADOW mode, so extra alert slots can collect data safely.
+ENABLE_UNKNOWN_SYMBOL_AUTO_DISCOVERY = env_bool("ENABLE_UNKNOWN_SYMBOL_AUTO_DISCOVERY", True)
+UNKNOWN_SYMBOL_DEFAULT_TIER = os.environ.get("UNKNOWN_SYMBOL_DEFAULT_TIER", "DISCOVERY")
+UNKNOWN_SYMBOL_DEFAULT_MODE = os.environ.get("UNKNOWN_SYMBOL_DEFAULT_MODE", "SHADOW")
+UNKNOWN_SYMBOL_DEFAULT_PERSONALITY = os.environ.get("UNKNOWN_SYMBOL_DEFAULT_PERSONALITY", "UNKNOWN")
 COIN_PROMOTION_MIN_PROBES = int(os.environ.get("COIN_PROMOTION_MIN_PROBES", "20") or 20)
 COIN_PROMOTION_MIN_UPGRADES = int(os.environ.get("COIN_PROMOTION_MIN_UPGRADES", "5") or 5)
 COIN_PROMOTION_MIN_UPGRADE_AVG = float(os.environ.get("COIN_PROMOTION_MIN_UPGRADE_AVG", "0.50") or 0.50)
@@ -576,7 +582,7 @@ COIN_RECENT_WINDOW = int(os.environ.get("COIN_RECENT_WINDOW", "10") or 10)
 
 COIN_TIER_A = {"HBARUSDT", "INJUSDT", "OPUSDT", "ARUSDT", "TIAUSDT", "FETUSDT", "NEARUSDT"}
 COIN_TIER_B = {"ETCUSDT", "ARBUSDT", "SUIUSDT"}
-COIN_TIER_C = {"ONDOUSDT", "WLDUSDT", "RENDERUSDT", "IMXUSDT", "APTUSDT", "LPTUSDT", "KSMUSDT", "BNBUSDT", "SOLUSDT", "LINKUSDT"}
+COIN_TIER_C = {"ONDOUSDT", "WLDUSDT", "RENDERUSDT", "JUPUSDT", "IMXUSDT", "APTUSDT", "LPTUSDT", "KSMUSDT", "BNBUSDT", "SOLUSDT", "LINKUSDT"}
 COIN_TIER_D = {"ATOMUSDT", "ASTRUSDT"}
 COIN_RETIRED = {"PHAUSDT", "ADAUSDT"}
 
@@ -594,6 +600,7 @@ INITIAL_COIN_PERSONALITY = {
     "ONDOUSDT": "UNKNOWN",
     "WLDUSDT": "UNKNOWN",
     "RENDERUSDT": "UNKNOWN",
+    "JUPUSDT": "UNKNOWN",
     "IMXUSDT": "LEARNING_POOL",
     "APTUSDT": "LEARNING_POOL",
     "LPTUSDT": "LEARNING_POOL",
@@ -1241,14 +1248,27 @@ def normalize_symbol(symbol):
 def get_initial_coin_profile(symbol):
     sym = normalize_symbol(symbol)
     if sym in COIN_RETIRED:
-        return {"tier": "RETIRED", "mode": "DISABLED", "personality": INITIAL_COIN_PERSONALITY.get(sym, "RETIRED")}
+        return {"tier": "RETIRED", "mode": "DISABLED", "personality": INITIAL_COIN_PERSONALITY.get(sym, "RETIRED"), "is_unknown": False}
     if sym in COIN_TIER_D:
-        return {"tier": "D", "mode": "DISABLED", "personality": INITIAL_COIN_PERSONALITY.get(sym, "DISABLED")}
+        return {"tier": "D", "mode": "DISABLED", "personality": INITIAL_COIN_PERSONALITY.get(sym, "DISABLED"), "is_unknown": False}
     if sym in COIN_TIER_A:
-        return {"tier": "A", "mode": "LIVE", "personality": INITIAL_COIN_PERSONALITY.get(sym, "UNKNOWN")}
+        return {"tier": "A", "mode": "LIVE", "personality": INITIAL_COIN_PERSONALITY.get(sym, "UNKNOWN"), "is_unknown": False}
     if sym in COIN_TIER_B:
-        return {"tier": "B", "mode": "LIVE", "personality": INITIAL_COIN_PERSONALITY.get(sym, "UNKNOWN")}
-    return {"tier": "C", "mode": "SHADOW", "personality": INITIAL_COIN_PERSONALITY.get(sym, "UNKNOWN")}
+        return {"tier": "B", "mode": "LIVE", "personality": INITIAL_COIN_PERSONALITY.get(sym, "UNKNOWN"), "is_unknown": False}
+    if sym in COIN_TIER_C:
+        return {"tier": "C", "mode": "SHADOW", "personality": INITIAL_COIN_PERSONALITY.get(sym, "UNKNOWN"), "is_unknown": False}
+
+    # v8.4.1: true auto-discovery. Any new alert symbol not configured above
+    # starts safely in SHADOW/DISCOVERY and can only earn live permission via promotion.
+    if ENABLE_UNKNOWN_SYMBOL_AUTO_DISCOVERY:
+        return {
+            "tier": UNKNOWN_SYMBOL_DEFAULT_TIER,
+            "mode": UNKNOWN_SYMBOL_DEFAULT_MODE.upper(),
+            "personality": INITIAL_COIN_PERSONALITY.get(sym, UNKNOWN_SYMBOL_DEFAULT_PERSONALITY),
+            "is_unknown": True,
+        }
+
+    return {"tier": "C", "mode": "SHADOW", "personality": INITIAL_COIN_PERSONALITY.get(sym, "UNKNOWN"), "is_unknown": True}
 
 
 def ensure_coin_scores_v84_columns(cur):
