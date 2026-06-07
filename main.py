@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v7.7
+# VERSION: v8.1
 # TITLE: GHOST PROBES + LIVE UPGRADES ONLY + COIN HEALTH SELF-HEALING
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v7.7 GHOST PROBES + LIVE UPGRADES ONLY RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v8.1 COIN INTELLIGENCE + ADAPTIVE DEAD MARKET SHADOW RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -393,7 +393,7 @@ MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 3
 
 
 
-DATA_VERSION = "v7.7_GHOST_PROBES_LIVE_UPGRADES_ONLY"
+DATA_VERSION = "v8.1_ADAPTIVE_DEAD_MARKET_SHADOW"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -770,6 +770,14 @@ ENABLE_ADAPTIVE_DEAD_MARKET_LEADERS = os.environ.get(
     "ENABLE_ADAPTIVE_DEAD_MARKET_LEADERS",
     "true"
 ).lower() == "true"
+
+# v8.1 safety: keep the Adaptive Dead Market Leader pathway for telemetry,
+# but do not allow it to deploy live upgrade capital unless explicitly re-enabled.
+ENABLE_ADAPTIVE_DEAD_MARKET_LIVE_UPGRADES = os.environ.get(
+    "ENABLE_ADAPTIVE_DEAD_MARKET_LIVE_UPGRADES",
+    "false"
+).lower() == "true"
+
 
 ADAPTIVE_DEAD_MARKET_CONTEXT_MAX = float(os.environ.get("ADAPTIVE_DEAD_MARKET_CONTEXT_MAX", "2.0") or 2.0)
 ADAPTIVE_DEAD_MARKET_MAX_RANK = int(os.environ.get("ADAPTIVE_DEAD_MARKET_MAX_RANK", "3") or 3)
@@ -1745,12 +1753,7 @@ def telegram_send_message(chat_id, message):
         print(f"⚠️ TELEGRAM SEND ERROR | {e}", flush=True)
         return False
 
-def try:
-            if cqe_upgraded:
-                update_coin_score(conn, sym if 'sym' in locals() else symbol, peak_pnl_percent, pnl_percent, pnl_gbp)
-        except Exception as e:
-            print(f'coin telemetry error: {e}', flush=True)
-        send_telegram_alert(message):
+def send_telegram_alert(message):
     return telegram_send_message(TELEGRAM_CHAT_ID, message)
 
 
@@ -4034,7 +4037,7 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
         return False
 
     cur.execute("""
-        SELECT lifecycle_row, upgrade_size_gbp, dynamic_trade_size_gbp, COALESCE(is_shadow, TRUE), trade_size_usdt, probe_size_gbp, size_scaling_reason
+        SELECT lifecycle_row, upgrade_size_gbp, dynamic_trade_size_gbp, COALESCE(is_shadow, TRUE), trade_size_usdt, probe_size_gbp, size_scaling_reason, market_os_engine
         FROM bot_trades_v4
         WHERE id = %s
     """, (tid,))
@@ -4044,6 +4047,11 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
     is_shadow_trade = bool(row[3]) if row else True
     probe_size_gbp = float(row[5] or 0) if row else 0.0
     size_scaling_reason = str(row[6] or "") if row else ""
+    market_os_engine = str(row[7] or "") if row and len(row) > 7 else ""
+    adaptive_dead_market_shadow_only = (
+        market_os_engine == "ADAPTIVE_DEAD_MARKET_LEADER"
+        and not ENABLE_ADAPTIVE_DEAD_MARKET_LIVE_UPGRADES
+    )
     ghost_probe_active = (probe_size_gbp == 0.0 and size_scaling_reason == GHOST_PROBE_LABEL)
     current_trade_size_usdt = float(row[4] or 0) if row else 0.0
 
@@ -4071,6 +4079,7 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
     scalein_allowed = (
         ENABLE_CQE_REAL_SCALEINS
         and not is_shadow_trade
+        and not adaptive_dead_market_shadow_only
         and row_allows_scalein
         and confirmation_allows_scalein
     )
@@ -4081,6 +4090,8 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
     # This keeps behaviour unchanged but makes the reason explicit.
     if not ENABLE_BPT_CQE_LIVE_UPGRADES:
         scalein_block_reason = "live_upgrade_toggle_off"
+    elif adaptive_dead_market_shadow_only:
+        scalein_block_reason = "adaptive_dead_market_leader_shadow_only"
     elif not ENABLE_CQE_REAL_SCALEINS:
         scalein_block_reason = "real_scaleins_toggle_off"
     elif is_shadow_trade:
@@ -4181,9 +4192,16 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
             })
             print(f"⚠️ BPT CQE LIVE UPGRADE ORDER FAILED/SKIPPED | {sym} | id={tid} | {okx_upgrade_result}", flush=True)
     else:
+        extra_shadow_tags = {
+            "shadow_reason": "ADAPTIVE_DEAD_MARKET_LEADER_SHADOW",
+            "size_scaling_reason": "adaptive_dead_market_leader_shadow_only",
+        } if adaptive_dead_market_shadow_only else {
+            "size_scaling_reason": f"bpt_scalein_disabled_or_not_allowed:{scalein_block_reason}",
+        }
+
         safe_update_trade_telemetry(cur, tid, {
             "probe_lifecycle_state": "FAST_TRACK_CONFIRMED_SCALEIN_DISABLED" if fast_track_active else "STANDARD_CONFIRMED_SCALEIN_DISABLED",
-            "size_scaling_reason": f"bpt_scalein_disabled_or_not_allowed:{scalein_block_reason}",
+            **extra_shadow_tags,
         })
 
     trade_mode_label = "SHADOW" if is_shadow_trade else "LIVE"
@@ -4202,8 +4220,9 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
         flush=True
     )
 
+    upgrade_alert_title = "🚀 LIVE UPGRADE EXECUTED" if live_scalein_executed else "👻 SHADOW UPGRADE CONFIRMED"
     send_telegram_alert(
-        f"🚀 <b>LIVE UPGRADE EXECUTED</b> | {sym}\n"
+        f"{upgrade_alert_title} | {sym}\n"
         f"Mode: <b>{trade_mode_label}</b> | Row: <b>{lifecycle_row}</b>\n"
         f"Live scale-in: <b>{live_scalein_label}</b>\n"
         f"Model upgrade target {fmt_money(upgrade_size)} | Actual live added {fmt_money(actual_upgrade_size)} | Total live/model size {fmt_money(displayed_dynamic_size)}\n"
