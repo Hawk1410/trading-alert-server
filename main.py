@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v8.3.1
-# TITLE: GHOST PROBES + LIVE UPGRADES ONLY + COIN HEALTH SELF-HEALING
+# VERSION: v8.4
+# TITLE: COIN HEALTH + PERSONALITY LEARNING + ADAPTIVE TIERS
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v8.3.1 MARKET HEAT EXIT BUGFIX RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v8.4 COIN HEALTH + PERSONALITY LEARNING RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -393,7 +393,7 @@ MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 3
 
 
 
-DATA_VERSION = "v8.3.1_MARKET_HEAT_EXIT_BUGFIX"
+DATA_VERSION = "v8.4_COIN_HEALTH_PERSONALITY_LEARNING"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -557,6 +557,55 @@ COIN_HEALTH_SHADOW_SIZE_GBP = float(os.environ.get("COIN_HEALTH_SHADOW_SIZE_GBP"
 COIN_HEALTH_SHADOW_HOLD_MINUTES = float(os.environ.get("COIN_HEALTH_SHADOW_HOLD_MINUTES", "120") or 120)
 COIN_HEALTH_SHADOW_HARD_STOP = float(os.environ.get("COIN_HEALTH_SHADOW_HARD_STOP", "-0.60") or -0.60)
 ENABLE_COIN_HEALTH_TELEGRAM = env_bool("ENABLE_COIN_HEALTH_TELEGRAM", True)
+
+
+# =========================
+# 🧬 v8.4 COIN HEALTH + PERSONALITY LEARNING ENGINE
+# =========================
+ENABLE_COIN_PERSONALITY_LEARNING = env_bool("ENABLE_COIN_PERSONALITY_LEARNING", True)
+ENABLE_COIN_TIER_GATE = env_bool("ENABLE_COIN_TIER_GATE", True)
+ENABLE_COIN_TIER_TELEGRAM = env_bool("ENABLE_COIN_TIER_TELEGRAM", True)
+ENABLE_COIN_SCORE_UPSERT_ON_SIGNAL = env_bool("ENABLE_COIN_SCORE_UPSERT_ON_SIGNAL", True)
+COIN_PROMOTION_MIN_PROBES = int(os.environ.get("COIN_PROMOTION_MIN_PROBES", "20") or 20)
+COIN_PROMOTION_MIN_UPGRADES = int(os.environ.get("COIN_PROMOTION_MIN_UPGRADES", "5") or 5)
+COIN_PROMOTION_MIN_UPGRADE_AVG = float(os.environ.get("COIN_PROMOTION_MIN_UPGRADE_AVG", "0.50") or 0.50)
+COIN_PROMOTION_MIN_IMPROVEMENT = float(os.environ.get("COIN_PROMOTION_MIN_IMPROVEMENT", "0.50") or 0.50)
+COIN_DEMOTION_FAILED_UPGRADES = int(os.environ.get("COIN_DEMOTION_FAILED_UPGRADES", "3") or 3)
+COIN_DEMOTION_RECENT_UPGRADE_AVG = float(os.environ.get("COIN_DEMOTION_RECENT_UPGRADE_AVG", "-0.20") or -0.20)
+COIN_RECENT_WINDOW = int(os.environ.get("COIN_RECENT_WINDOW", "10") or 10)
+
+COIN_TIER_A = {"HBARUSDT", "INJUSDT", "OPUSDT", "ARUSDT", "TIAUSDT", "FETUSDT", "NEARUSDT"}
+COIN_TIER_B = {"ETCUSDT", "ARBUSDT", "SUIUSDT"}
+COIN_TIER_C = {"ONDOUSDT", "WLDUSDT", "RENDERUSDT", "IMXUSDT", "APTUSDT", "LPTUSDT", "KSMUSDT", "BNBUSDT", "SOLUSDT", "LINKUSDT"}
+COIN_TIER_D = {"ATOMUSDT", "ASTRUSDT"}
+COIN_RETIRED = {"PHAUSDT", "ADAUSDT"}
+
+INITIAL_COIN_PERSONALITY = {
+    "HBARUSDT": "MARKET_SUPPORT",
+    "INJUSDT": "TREND_PERSISTENCE",
+    "OPUSDT": "MOMENTUM_LEADERSHIP",
+    "ARUSDT": "MOMENTUM_TREND",
+    "TIAUSDT": "MOMENTUM_LEADERSHIP",
+    "FETUSDT": "CONFIRMATION_CLEANER",
+    "NEARUSDT": "RUNNER_UPGRADE",
+    "ETCUSDT": "SECONDARY_UPGRADE",
+    "ARBUSDT": "SECONDARY_UPGRADE",
+    "SUIUSDT": "SECONDARY_UPGRADE",
+    "ONDOUSDT": "UNKNOWN",
+    "WLDUSDT": "UNKNOWN",
+    "RENDERUSDT": "UNKNOWN",
+    "IMXUSDT": "LEARNING_POOL",
+    "APTUSDT": "LEARNING_POOL",
+    "LPTUSDT": "LEARNING_POOL",
+    "KSMUSDT": "LEARNING_POOL",
+    "BNBUSDT": "OBSERVE",
+    "SOLUSDT": "OBSERVE",
+    "LINKUSDT": "OBSERVE",
+    "ATOMUSDT": "DISABLED_WEAK_UPGRADE",
+    "ASTRUSDT": "DISABLED_UNKNOWN_WEAK",
+    "PHAUSDT": "RETIRED_FAILED_ALL_TESTS",
+    "ADAUSDT": "RETIRED_LOW_OPPORTUNITY",
+}
 
 # =========================
 # 🧠 LEADERSHIP ENGINE
@@ -1180,6 +1229,275 @@ def apply_market_heat_to_signal(cur, signal_id):
     except Exception as e:
         print(f"⚠️ market heat signal update failed | id={signal_id} | {e}", flush=True)
         safe_telemetry_rollback(cur)
+
+
+# =========================
+# 🧬 COIN SCORE / PERSONALITY HELPERS v8.4
+# =========================
+def normalize_symbol(symbol):
+    return (symbol or "").strip().upper()
+
+
+def get_initial_coin_profile(symbol):
+    sym = normalize_symbol(symbol)
+    if sym in COIN_RETIRED:
+        return {"tier": "RETIRED", "mode": "DISABLED", "personality": INITIAL_COIN_PERSONALITY.get(sym, "RETIRED")}
+    if sym in COIN_TIER_D:
+        return {"tier": "D", "mode": "DISABLED", "personality": INITIAL_COIN_PERSONALITY.get(sym, "DISABLED")}
+    if sym in COIN_TIER_A:
+        return {"tier": "A", "mode": "LIVE", "personality": INITIAL_COIN_PERSONALITY.get(sym, "UNKNOWN")}
+    if sym in COIN_TIER_B:
+        return {"tier": "B", "mode": "LIVE", "personality": INITIAL_COIN_PERSONALITY.get(sym, "UNKNOWN")}
+    return {"tier": "C", "mode": "SHADOW", "personality": INITIAL_COIN_PERSONALITY.get(sym, "UNKNOWN")}
+
+
+def ensure_coin_scores_v84_columns(cur):
+    try:
+        cur.execute("""
+            ALTER TABLE coin_scores
+            ADD COLUMN IF NOT EXISTS coin_health_mode TEXT DEFAULT 'SHADOW',
+            ADD COLUMN IF NOT EXISTS personality TEXT,
+            ADD COLUMN IF NOT EXISTS best_metric TEXT,
+            ADD COLUMN IF NOT EXISTS momentum_lift NUMERIC DEFAULT 0,
+            ADD COLUMN IF NOT EXISTS trend_lift NUMERIC DEFAULT 0,
+            ADD COLUMN IF NOT EXISTS leadership_lift NUMERIC DEFAULT 0,
+            ADD COLUMN IF NOT EXISTS heat_lift NUMERIC DEFAULT 0,
+            ADD COLUMN IF NOT EXISTS recent_probe_avg NUMERIC DEFAULT 0,
+            ADD COLUMN IF NOT EXISTS recent_upgrade_avg NUMERIC DEFAULT 0,
+            ADD COLUMN IF NOT EXISTS promotion_score NUMERIC DEFAULT 0,
+            ADD COLUMN IF NOT EXISTS demotion_score NUMERIC DEFAULT 0,
+            ADD COLUMN IF NOT EXISTS sample_size INTEGER DEFAULT 0
+        """)
+    except Exception as e:
+        print(f"⚠️ coin_scores v8.4 column ensure failed: {e}", flush=True)
+        safe_telemetry_rollback(cur)
+
+
+def upsert_initial_coin_score(cur, symbol):
+    sym = normalize_symbol(symbol)
+    profile = get_initial_coin_profile(sym)
+    try:
+        ensure_coin_scores_v84_columns(cur)
+        cur.execute("""
+            INSERT INTO coin_scores (
+                symbol, total_upgrades, winning_upgrades, losing_upgrades,
+                avg_peak, avg_final, total_pnl_gbp, consecutive_failed_upgrades,
+                hero_points, tier, last_updated, coin_health_mode, personality,
+                best_metric, sample_size
+            )
+            VALUES (%s,0,0,0,0,0,0,0,0,%s,NOW(),%s,%s,'UNKNOWN',0)
+            ON CONFLICT (symbol)
+            DO UPDATE SET
+                tier = COALESCE(NULLIF(coin_scores.tier,''), EXCLUDED.tier),
+                coin_health_mode = COALESCE(NULLIF(coin_scores.coin_health_mode,''), EXCLUDED.coin_health_mode),
+                personality = COALESCE(NULLIF(coin_scores.personality,''), EXCLUDED.personality),
+                last_updated = NOW()
+        """, (sym, profile["tier"], profile["mode"], profile["personality"]))
+        if sym in COIN_RETIRED or sym in COIN_TIER_D:
+            cur.execute("""
+                UPDATE coin_scores
+                SET coin_health_mode='DISABLED', tier=%s,
+                    personality=COALESCE(NULLIF(personality,''), %s), last_updated=NOW()
+                WHERE symbol=%s
+            """, (profile["tier"], profile["personality"], sym))
+    except Exception as e:
+        print(f"⚠️ initial coin score upsert failed for {sym}: {e}", flush=True)
+        safe_telemetry_rollback(cur)
+
+
+def get_coin_score_profile(cur, symbol):
+    sym = normalize_symbol(symbol)
+    initial = get_initial_coin_profile(sym)
+    if not ENABLE_COIN_TIER_GATE:
+        return {"symbol": sym, "tier": initial["tier"], "coin_health_mode": "LIVE", "personality": initial["personality"], "source": "tier_gate_disabled"}
+    try:
+        upsert_initial_coin_score(cur, sym)
+        cur.execute("""
+            SELECT tier, coin_health_mode, personality, best_metric,
+                   promotion_score, demotion_score, total_upgrades, avg_final,
+                   consecutive_failed_upgrades
+            FROM coin_scores WHERE symbol=%s
+        """, (sym,))
+        row = cur.fetchone()
+        if not row:
+            return {"symbol": sym, "tier": initial["tier"], "coin_health_mode": initial["mode"], "personality": initial["personality"], "source": "initial"}
+        tier, mode, personality, best_metric, promotion_score, demotion_score, total_upgrades, avg_final, failed = row
+        mode = (mode or initial["mode"] or "SHADOW").upper()
+        tier = tier or initial["tier"]
+        personality = personality or initial["personality"]
+        if sym in COIN_RETIRED or sym in COIN_TIER_D:
+            mode = "DISABLED"
+        return {
+            "symbol": sym, "tier": tier, "coin_health_mode": mode,
+            "personality": personality, "best_metric": best_metric,
+            "promotion_score": float(promotion_score or 0),
+            "demotion_score": float(demotion_score or 0),
+            "total_upgrades": int(total_upgrades or 0),
+            "avg_final": float(avg_final or 0),
+            "consecutive_failed_upgrades": int(failed or 0),
+            "source": "coin_scores",
+        }
+    except Exception as e:
+        print(f"⚠️ coin score profile lookup failed for {sym}: {e}", flush=True)
+        safe_telemetry_rollback(cur)
+        return {"symbol": sym, "tier": initial["tier"], "coin_health_mode": initial["mode"], "personality": initial["personality"], "source": "fallback_error"}
+
+
+def classify_personality_from_lifts(momentum_lift, trend_lift, leadership_lift, heat_lift, current_personality="UNKNOWN"):
+    lifts = {
+        "MOMENTUM": float(momentum_lift or 0),
+        "TREND": float(trend_lift or 0),
+        "LEADERSHIP": float(leadership_lift or 0),
+        "MARKET_HEAT": float(heat_lift or 0),
+    }
+    best_metric, best_value = max(lifts.items(), key=lambda kv: kv[1])
+    if best_value < 0.05:
+        return (current_personality or "UNKNOWN"), "NONE"
+    if sum(1 for v in lifts.values() if v >= 0.10) >= 2:
+        return "HYBRID", best_metric
+    return best_metric, best_metric
+
+
+def maybe_send_coin_mode_alert(symbol, old_mode, new_mode, old_tier, new_tier, reason, stats=None):
+    if not ENABLE_COIN_TIER_TELEGRAM:
+        return
+    old_mode = old_mode or "UNKNOWN"
+    new_mode = new_mode or "UNKNOWN"
+    if old_mode == new_mode and old_tier == new_tier:
+        return
+    emoji = "🟢" if new_mode == "LIVE" else "🟡" if new_mode == "SHADOW" else "🔴"
+    title = "COIN PROMOTED" if new_mode == "LIVE" else "COIN DEMOTED" if new_mode == "SHADOW" else "COIN DISABLED"
+    stats = stats or {}
+    try:
+        send_telegram_alert(
+            f"{emoji} <b>{title}</b>\n"
+            f"{symbol}\n"
+            f"{old_tier or 'UNKNOWN'} / {old_mode} → {new_tier or old_tier or 'UNKNOWN'} / {new_mode}\n"
+            f"Reason: {reason}\n"
+            f"Probe avg {fmt_num(stats.get('probe_avg'),3)} | Upgrade avg {fmt_num(stats.get('upgrade_avg'),3)}\n"
+            f"Probes {stats.get('probe_trades', 0)} | Upgrades {stats.get('upgrade_trades', 0)}\n"
+            f"Best metric: {stats.get('best_metric') or 'UNKNOWN'} | Personality: {stats.get('personality') or 'UNKNOWN'}"
+        )
+    except Exception as e:
+        print(f"⚠️ coin mode telegram failed for {symbol}: {e}", flush=True)
+
+
+def refresh_coin_learning_from_history(cur, symbol, allow_mode_change=True):
+    if not ENABLE_COIN_PERSONALITY_LEARNING:
+        return None
+    sym = normalize_symbol(symbol)
+    try:
+        ensure_coin_scores_v84_columns(cur)
+        upsert_initial_coin_score(cur, sym)
+        cur.execute("""
+            WITH closed AS (
+                SELECT * FROM bot_trades_v4
+                WHERE symbol=%s AND status='CLOSED' AND pnl_percent IS NOT NULL
+            ),
+            agg AS (
+                SELECT
+                    COUNT(*) FILTER (WHERE COALESCE(cqe_upgraded,FALSE)=FALSE) AS probe_trades,
+                    AVG(pnl_percent) FILTER (WHERE COALESCE(cqe_upgraded,FALSE)=FALSE) AS probe_avg,
+                    AVG(peak_pnl_percent) FILTER (WHERE COALESCE(cqe_upgraded,FALSE)=FALSE) AS probe_peak,
+                    COUNT(*) FILTER (WHERE COALESCE(cqe_upgraded,FALSE)=TRUE) AS upgrade_trades,
+                    COUNT(*) FILTER (WHERE COALESCE(cqe_upgraded,FALSE)=TRUE AND pnl_percent > 0) AS winning_upgrades,
+                    COUNT(*) FILTER (WHERE COALESCE(cqe_upgraded,FALSE)=TRUE AND pnl_percent <= 0) AS losing_upgrades,
+                    AVG(pnl_percent) FILTER (WHERE COALESCE(cqe_upgraded,FALSE)=TRUE) AS upgrade_avg,
+                    AVG(peak_pnl_percent) FILTER (WHERE COALESCE(cqe_upgraded,FALSE)=TRUE) AS upgrade_peak,
+                    SUM(pnl_gbp) FILTER (WHERE COALESCE(cqe_upgraded,FALSE)=TRUE) AS upgrade_pnl_gbp,
+                    AVG(momentum_strength) FILTER (WHERE COALESCE(cqe_upgraded,FALSE)=TRUE) - AVG(momentum_strength) FILTER (WHERE COALESCE(cqe_upgraded,FALSE)=FALSE) AS momentum_lift,
+                    AVG(trend_strength) FILTER (WHERE COALESCE(cqe_upgraded,FALSE)=TRUE) - AVG(trend_strength) FILTER (WHERE COALESCE(cqe_upgraded,FALSE)=FALSE) AS trend_lift,
+                    AVG(leadership_delta_30m_at_entry) FILTER (WHERE COALESCE(cqe_upgraded,FALSE)=TRUE) - AVG(leadership_delta_30m_at_entry) FILTER (WHERE COALESCE(cqe_upgraded,FALSE)=FALSE) AS leadership_lift,
+                    AVG(market_heat_avg_trend) FILTER (WHERE COALESCE(cqe_upgraded,FALSE)=TRUE) - AVG(market_heat_avg_trend) FILTER (WHERE COALESCE(cqe_upgraded,FALSE)=FALSE) AS heat_lift
+                FROM closed
+            ),
+            recent_probe AS (
+                SELECT AVG(pnl_percent) AS recent_probe_avg FROM (
+                    SELECT pnl_percent FROM closed WHERE COALESCE(cqe_upgraded,FALSE)=FALSE ORDER BY closed_at DESC NULLS LAST LIMIT %s
+                ) x
+            ),
+            recent_upgrade AS (
+                SELECT AVG(pnl_percent) AS recent_upgrade_avg FROM (
+                    SELECT pnl_percent FROM closed WHERE COALESCE(cqe_upgraded,FALSE)=TRUE ORDER BY closed_at DESC NULLS LAST LIMIT %s
+                ) x
+            ),
+            failed_streak AS (
+                SELECT COUNT(*) AS consecutive_failed_upgrades FROM (
+                    SELECT pnl_percent,
+                           SUM(CASE WHEN pnl_percent > 0 THEN 1 ELSE 0 END) OVER (ORDER BY closed_at DESC NULLS LAST) AS wins_seen
+                    FROM closed WHERE COALESCE(cqe_upgraded,FALSE)=TRUE ORDER BY closed_at DESC NULLS LAST
+                ) y WHERE wins_seen = 0
+            )
+            SELECT
+                COALESCE(a.probe_trades,0), COALESCE(a.probe_avg,0), COALESCE(a.probe_peak,0),
+                COALESCE(a.upgrade_trades,0), COALESCE(a.winning_upgrades,0), COALESCE(a.losing_upgrades,0),
+                COALESCE(a.upgrade_avg,0), COALESCE(a.upgrade_peak,0), COALESCE(a.upgrade_pnl_gbp,0),
+                COALESCE(a.momentum_lift,0), COALESCE(a.trend_lift,0), COALESCE(a.leadership_lift,0), COALESCE(a.heat_lift,0),
+                COALESCE(rp.recent_probe_avg,0), COALESCE(ru.recent_upgrade_avg,0), COALESCE(fs.consecutive_failed_upgrades,0)
+            FROM agg a, recent_probe rp, recent_upgrade ru, failed_streak fs
+        """, (sym, COIN_RECENT_WINDOW, COIN_RECENT_WINDOW))
+        row = cur.fetchone()
+        if not row:
+            return None
+        (probe_trades, probe_avg, probe_peak, upgrade_trades, winning_upgrades, losing_upgrades,
+         upgrade_avg, upgrade_peak, upgrade_pnl_gbp, momentum_lift, trend_lift, leadership_lift,
+         heat_lift, recent_probe_avg, recent_upgrade_avg, failed_streak) = row
+        profile = get_coin_score_profile(cur, sym)
+        old_mode = profile.get("coin_health_mode")
+        old_tier = profile.get("tier")
+        static = get_initial_coin_profile(sym)
+        personality, best_metric = classify_personality_from_lifts(momentum_lift, trend_lift, leadership_lift, heat_lift, profile.get("personality") or static.get("personality"))
+        improvement = float(upgrade_avg or 0) - float(probe_avg or 0)
+        promotion_score = 0.0
+        if int(upgrade_trades or 0) >= COIN_PROMOTION_MIN_UPGRADES: promotion_score += 1.0
+        if int(probe_trades or 0) >= COIN_PROMOTION_MIN_PROBES: promotion_score += 1.0
+        if float(upgrade_avg or 0) >= COIN_PROMOTION_MIN_UPGRADE_AVG: promotion_score += 2.0
+        if improvement >= COIN_PROMOTION_MIN_IMPROVEMENT: promotion_score += 1.0
+        if float(upgrade_peak or 0) >= 1.0: promotion_score += 1.0
+        demotion_score = 0.0
+        if int(failed_streak or 0) >= COIN_DEMOTION_FAILED_UPGRADES: demotion_score += 2.0
+        if int(upgrade_trades or 0) >= COIN_PROMOTION_MIN_UPGRADES and float(recent_upgrade_avg or 0) <= COIN_DEMOTION_RECENT_UPGRADE_AVG: demotion_score += 2.0
+        if int(upgrade_trades or 0) >= COIN_PROMOTION_MIN_UPGRADES and float(upgrade_avg or 0) < 0: demotion_score += 1.0
+        new_mode = old_mode or static["mode"]
+        new_tier = old_tier or static["tier"]
+        reason = "no_mode_change"
+        if sym in COIN_RETIRED or sym in COIN_TIER_D:
+            new_mode, new_tier, reason = "DISABLED", static["tier"], "static_disabled_or_retired"
+        elif allow_mode_change:
+            if (old_mode or static["mode"]) == "SHADOW" and promotion_score >= 5:
+                new_mode, new_tier, reason = "LIVE", ("B" if static["tier"] == "C" else static["tier"]), f"promotion_score_{round(promotion_score,2)}_upgrade_edge_confirmed"
+            elif (old_mode or static["mode"]) == "LIVE" and demotion_score >= 3:
+                new_mode, reason = "SHADOW", f"demotion_score_{round(demotion_score,2)}_edge_deterioration"
+        if not old_mode:
+            new_mode, new_tier, reason = static["mode"], static["tier"], "initial_profile"
+        sample_size = int(probe_trades or 0) + int(upgrade_trades or 0)
+        hero_points = 3 if float(upgrade_peak or 0) >= 20 else 2 if float(upgrade_peak or 0) >= 10 else 1 if float(upgrade_peak or 0) >= 5 else 0
+        cur.execute("""
+            UPDATE coin_scores SET
+                total_upgrades=%s, winning_upgrades=%s, losing_upgrades=%s,
+                avg_peak=%s, avg_final=%s, total_pnl_gbp=%s,
+                consecutive_failed_upgrades=%s, hero_points=%s, tier=%s,
+                coin_health_mode=%s, personality=%s, best_metric=%s,
+                momentum_lift=%s, trend_lift=%s, leadership_lift=%s, heat_lift=%s,
+                recent_probe_avg=%s, recent_upgrade_avg=%s,
+                promotion_score=%s, demotion_score=%s, sample_size=%s,
+                last_updated=NOW()
+            WHERE symbol=%s
+        """, (
+            int(upgrade_trades or 0), int(winning_upgrades or 0), int(losing_upgrades or 0),
+            float(upgrade_peak or 0), float(upgrade_avg or 0), float(upgrade_pnl_gbp or 0),
+            int(failed_streak or 0), int(hero_points), new_tier, new_mode, personality, best_metric,
+            float(momentum_lift or 0), float(trend_lift or 0), float(leadership_lift or 0), float(heat_lift or 0),
+            float(recent_probe_avg or 0), float(recent_upgrade_avg or 0), float(promotion_score), float(demotion_score),
+            sample_size, sym
+        ))
+        stats = {"probe_trades": int(probe_trades or 0), "probe_avg": float(probe_avg or 0), "upgrade_trades": int(upgrade_trades or 0), "upgrade_avg": float(upgrade_avg or 0), "best_metric": best_metric, "personality": personality}
+        maybe_send_coin_mode_alert(sym, old_mode, new_mode, old_tier, new_tier, reason, stats)
+        return stats
+    except Exception as e:
+        print(f"⚠️ coin learning refresh failed for {sym}: {e}", flush=True)
+        safe_telemetry_rollback(cur)
+        return None
 
 
 # =========================
@@ -3970,6 +4288,15 @@ def open_bpt_cqe_probe_trade(cur, symbol, price, momentum, trend, signal_id, sig
 
 
 def maybe_open_bpt_cqe_probe(cur, symbol, price, momentum, trend, signal_id, signal_time, leadership_context=None):
+    try:
+        coin_profile = get_coin_score_profile(cur, symbol)
+        if coin_profile.get("coin_health_mode") == "DISABLED":
+            print(f"🚫 BPT probe skipped | {symbol} | coin disabled/retired", flush=True)
+            return None
+    except Exception as e:
+        print(f"⚠️ BPT coin profile check failed for {symbol}: {e}", flush=True)
+        safe_telemetry_rollback(cur)
+
     allowed, reason = passes_bpt_cqe_probe_gate(cur, symbol, momentum, trend, leadership_context)
     if not allowed:
         return None
@@ -4195,10 +4522,14 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
         )
     )
 
+    coin_profile_for_scalein = get_coin_score_profile(cur, sym)
+    coin_allows_live_upgrade = (coin_profile_for_scalein.get("coin_health_mode") == "LIVE")
+
     scalein_allowed = (
         ENABLE_CQE_REAL_SCALEINS
         and not is_shadow_trade
         and not adaptive_dead_market_shadow_only
+        and coin_allows_live_upgrade
         and row_allows_scalein
         and confirmation_allows_scalein
     )
@@ -4213,6 +4544,8 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
         scalein_block_reason = "adaptive_dead_market_leader_shadow_only"
     elif not ENABLE_CQE_REAL_SCALEINS:
         scalein_block_reason = "real_scaleins_toggle_off"
+    elif not coin_allows_live_upgrade:
+        scalein_block_reason = f"coin_profile_{coin_profile_for_scalein.get('tier')}_{coin_profile_for_scalein.get('coin_health_mode')}_no_live_upgrade"
     elif is_shadow_trade:
         scalein_block_reason = "shadow_trade_no_live_scalein"
     elif not row_allows_scalein:
@@ -4600,6 +4933,11 @@ def process_bpt_cqe_lifecycle_trades(cur, symbol, price, momentum, trend, now):
                 log_trade_event(cur, tid, sym, f"exit_{close_reason}", price, pnl_percent, current_peak, mins, momentum, trend, False)
             except Exception as e:
                 print(f"⚠️ BPT CQE exit trade_events log failed: {e}", flush=True)
+
+            try:
+                refresh_coin_learning_from_history(cur, sym, allow_mode_change=True)
+            except Exception as e:
+                print(f"⚠️ coin learning refresh after BPT close failed: {e}", flush=True)
 
             # Only send OKX exit if this BPT trade actually had live BPT orders.
             if not is_shadow and has_successful_okx_live_entry(cur, tid):
@@ -6176,16 +6514,7 @@ def log_trade_event(cur, trade_id, symbol, event_type, price, pnl_percent,
     ))
 
 def get_coin_health_snapshot(cur, symbol):
-    """
-    v7.6 self-healing expansion health.
-    A symbol is routed to shadow when 2 of its last 3 closed observations failed
-    to produce any useful expansion (peak < COIN_HEALTH_DEAD_PEAK_PCT).
-
-    Recovery is intentionally self-healing: if the last 2 closed observations have
-    both expanded above COIN_HEALTH_RECOVERY_PEAK_PCT, the symbol is treated LIVE.
-    Shadow rows count as observations, so a coin can prove itself back without
-    risking capital.
-    """
+    """v8.4 coin gate. Persistent coin_scores tier/mode is checked before legacy expansion health."""
     default = {
         "coin_health_mode": "LIVE",
         "coin_health_reason": "insufficient_history",
@@ -6199,6 +6528,18 @@ def get_coin_health_snapshot(cur, symbol):
     if not ENABLE_COIN_HEALTH_ENGINE:
         default["coin_health_reason"] = "disabled"
         return default
+
+    try:
+        profile = get_coin_score_profile(cur, symbol)
+        mode = (profile.get("coin_health_mode") or "LIVE").upper()
+        if mode in ("DISABLED", "RETIRED"):
+            return {**default, "coin_health_mode": "DISABLED", "coin_health_reason": f"coin_profile_{profile.get('tier')}_disabled", "coin_profile": profile}
+        if mode in ("SHADOW", "SHADOW_ONLY"):
+            return {**default, "coin_health_mode": "SHADOW", "coin_health_reason": f"coin_profile_{profile.get('tier')}_shadow_only", "coin_profile": profile}
+        default["coin_profile"] = profile
+    except Exception as e:
+        print(f"⚠️ coin profile pre-gate failed for {symbol}: {e}", flush=True)
+        safe_telemetry_rollback(cur)
 
     try:
         limit_n = max(COIN_HEALTH_DEAD_WINDOW, COIN_HEALTH_RECOVERY_WINDOW)
@@ -6627,6 +6968,10 @@ def process_market_os_shadow_trades(cur, symbol, price, momentum, trend, now):
                     accounting["usd_gbp_rate"], current_peak, momentum, trend, tid
                 ))
                 log_trade_event(cur, tid, sym, close_reason, price, pnl_percent, current_peak, mins, momentum, trend, False)
+                try:
+                    refresh_coin_learning_from_history(cur, sym, allow_mode_change=True)
+                except Exception as e:
+                    print(f"⚠️ coin learning refresh after shadow close failed: {e}", flush=True)
                 print(f"🧪 CLOSE SHADOW | {entry_quality} | {sym} | {round(pnl_percent,3)}% | peak={round(current_peak,3)}% | {close_reason}", flush=True)
             else:
                 cur.execute("""
@@ -6962,6 +7307,7 @@ def webhook():
 
         ensure_signal_leadership_scores_table(cur)
         ensure_market_heat_columns(cur)
+        ensure_coin_scores_v84_columns(cur)
         if ENABLE_BPT_CQE_LIFECYCLE_SHADOW:
             ensure_bpt_cqe_lifecycle_columns(cur)
         if ENABLE_ARCHETYPE_STATE_ENGINE:
@@ -6992,6 +7338,9 @@ def webhook():
         signal_id, signal_time = cur.fetchone()
 
         apply_market_heat_to_signal(cur, signal_id)
+        if ENABLE_COIN_SCORE_UPSERT_ON_SIGNAL:
+            upsert_initial_coin_score(cur, symbol)
+            refresh_coin_learning_from_history(cur, symbol, allow_mode_change=True)
 
         # ================= ENTRY ENGINE =================
         entry_allowed = False
@@ -7333,7 +7682,12 @@ def webhook():
                 leadership_context = leadership_context or {}
                 leadership_context["coin_health_snapshot"] = coin_health_snapshot
 
-                if ENABLE_COIN_HEALTH_ENGINE and coin_health_snapshot.get("coin_health_mode") == "SHADOW":
+                if ENABLE_COIN_HEALTH_ENGINE and coin_health_snapshot.get("coin_health_mode") == "DISABLED":
+                    entry_allowed = False
+                    block_reason = f"coin_disabled_{coin_health_snapshot.get('coin_health_reason')}"
+                    print(f"🚫 COIN DISABLED | {symbol} | reason={coin_health_snapshot.get('coin_health_reason')}", flush=True)
+
+                elif ENABLE_COIN_HEALTH_ENGINE and coin_health_snapshot.get("coin_health_mode") == "SHADOW":
                     entry_allowed = False
                     block_reason = f"coin_health_{coin_health_snapshot.get('coin_health_reason')}"
                     print(
@@ -7818,6 +8172,11 @@ def webhook():
                         f"dd_from_peak={round(drawdown_from_peak,3)} | {close_reason}",
                         flush=True
                     )
+
+                    try:
+                        refresh_coin_learning_from_history(cur, sym, allow_mode_change=True)
+                    except Exception as e:
+                        print(f"⚠️ coin learning refresh after real close failed: {e}", flush=True)
 
                     exit_leadership_state = get_latest_leadership_state(cur, sym)
                     latest_signal_state = get_latest_signal_state(cur, sym)
@@ -9049,33 +9408,13 @@ except Exception as e:
 #     sizing
 
 # =========================
-# 🏆 COIN INTELLIGENCE V1
+# 🏆 COIN INTELLIGENCE v8.4 COMPATIBILITY WRAPPER
 # =========================
-def update_coin_score(conn, symbol, peak_pnl_percent, pnl_percent, pnl_gbp):
+def update_coin_score(conn, symbol, peak_pnl_percent=None, pnl_percent=None, pnl_gbp=None):
+    """Backward-compatible wrapper. v8.4 recomputes coin_scores from closed history."""
     try:
         cur = conn.cursor()
-        hero_points = 3 if peak_pnl_percent >= 20 else 2 if peak_pnl_percent >= 10 else 1 if peak_pnl_percent >= 5 else 0
-        win = 1 if pnl_percent > 0 else 0
-        loss = 0 if win else 1
-
-        cur.execute("""
-        INSERT INTO coin_scores
-        (symbol,total_upgrades,winning_upgrades,losing_upgrades,
-         avg_peak,avg_final,total_pnl_gbp,
-         consecutive_failed_upgrades,hero_points,last_updated)
-        VALUES (%s,1,%s,%s,%s,%s,%s,%s,%s,NOW())
-        ON CONFLICT (symbol)
-        DO UPDATE SET
-          total_upgrades = coin_scores.total_upgrades + 1,
-          winning_upgrades = coin_scores.winning_upgrades + EXCLUDED.winning_upgrades,
-          losing_upgrades = coin_scores.losing_upgrades + EXCLUDED.losing_upgrades,
-          avg_peak = ((coin_scores.avg_peak * coin_scores.total_upgrades) + EXCLUDED.avg_peak)/(coin_scores.total_upgrades + 1),
-          avg_final = ((coin_scores.avg_final * coin_scores.total_upgrades) + EXCLUDED.avg_final)/(coin_scores.total_upgrades + 1),
-          total_pnl_gbp = coin_scores.total_pnl_gbp + EXCLUDED.total_pnl_gbp,
-          consecutive_failed_upgrades = CASE WHEN EXCLUDED.winning_upgrades > 0 THEN 0 ELSE coin_scores.consecutive_failed_upgrades + 1 END,
-          hero_points = coin_scores.hero_points + EXCLUDED.hero_points,
-          last_updated = NOW()
-        """, (symbol, win, loss, peak_pnl_percent or 0, pnl_percent or 0, pnl_gbp or 0, 0 if win else 1, hero_points))
+        refresh_coin_learning_from_history(cur, symbol, allow_mode_change=True)
         conn.commit()
     except Exception as e:
         print(f"⚠️ coin score update failed: {e}", flush=True)
