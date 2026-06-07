@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v8.2
+# VERSION: v8.3
 # TITLE: GHOST PROBES + LIVE UPGRADES ONLY + COIN HEALTH SELF-HEALING
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v8.2 PROFIT PROTECTION + COIN INTELLIGENCE RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v8.3 MARKET HEAT + COIN INTELLIGENCE RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -393,7 +393,7 @@ MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 3
 
 
 
-DATA_VERSION = "v8.2_PROFIT_PROTECTION"
+DATA_VERSION = "v8.3_MARKET_HEAT_TELEMETRY"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -1075,6 +1075,111 @@ def safe_update_signal_telemetry(cur, signal_id, telemetry):
         SET {set_sql}
         WHERE id = %s
     """, values)
+
+
+# =========================
+# 🌡️ MARKET HEAT TELEMETRY v8.3
+# =========================
+# Backfill discovery:
+# hourly average market trend is a strong regime detector.
+# DEAD < 0.00, NEUTRAL 0.00-0.05, HEALTHY 0.05-0.15, HOT >= 0.15.
+# v8.3 stores this as telemetry only; it does NOT block or resize trades.
+
+MARKET_HEAT_LOOKBACK_MINUTES = int(os.environ.get("MARKET_HEAT_LOOKBACK_MINUTES", "60") or 60)
+MARKET_HEAT_HOT_TREND = float(os.environ.get("MARKET_HEAT_HOT_TREND", "0.15") or 0.15)
+MARKET_HEAT_HEALTHY_TREND = float(os.environ.get("MARKET_HEAT_HEALTHY_TREND", "0.05") or 0.05)
+MARKET_HEAT_NEUTRAL_TREND = float(os.environ.get("MARKET_HEAT_NEUTRAL_TREND", "0.00") or 0.00)
+
+def classify_market_heat(avg_trend):
+    try:
+        t = float(avg_trend or 0)
+    except Exception:
+        t = 0.0
+
+    if t >= MARKET_HEAT_HOT_TREND:
+        return "HOT", 3
+    if t >= MARKET_HEAT_HEALTHY_TREND:
+        return "HEALTHY", 2
+    if t >= MARKET_HEAT_NEUTRAL_TREND:
+        return "NEUTRAL", 1
+    return "DEAD", 0
+
+def ensure_market_heat_columns(cur):
+    try:
+        cur.execute("""
+            ALTER TABLE bot_trades_v4
+            ADD COLUMN IF NOT EXISTS market_heat_regime TEXT,
+            ADD COLUMN IF NOT EXISTS market_heat_score INTEGER,
+            ADD COLUMN IF NOT EXISTS market_heat_avg_trend NUMERIC,
+            ADD COLUMN IF NOT EXISTS market_heat_avg_momentum NUMERIC,
+            ADD COLUMN IF NOT EXISTS market_heat_signal_count INTEGER,
+            ADD COLUMN IF NOT EXISTS market_heat_lookback_minutes INTEGER,
+            ADD COLUMN IF NOT EXISTS market_heat_calculated_at TIMESTAMPTZ
+        """)
+        cur.execute("""
+            ALTER TABLE signals_raw
+            ADD COLUMN IF NOT EXISTS market_heat_regime TEXT,
+            ADD COLUMN IF NOT EXISTS market_heat_score INTEGER,
+            ADD COLUMN IF NOT EXISTS market_heat_avg_trend NUMERIC,
+            ADD COLUMN IF NOT EXISTS market_heat_avg_momentum NUMERIC,
+            ADD COLUMN IF NOT EXISTS market_heat_signal_count INTEGER,
+            ADD COLUMN IF NOT EXISTS market_heat_lookback_minutes INTEGER,
+            ADD COLUMN IF NOT EXISTS market_heat_calculated_at TIMESTAMPTZ
+        """)
+    except Exception as e:
+        print(f"⚠️ market heat column ensure failed: {e}", flush=True)
+        safe_telemetry_rollback(cur)
+
+def get_market_heat_context(cur, lookback_minutes=None):
+    lookback = int(lookback_minutes or MARKET_HEAT_LOOKBACK_MINUTES)
+    try:
+        cur.execute("""
+            SELECT
+                COALESCE(AVG(momentum), 0),
+                COALESCE(AVG(trend), 0),
+                COUNT(*)
+            FROM signals_raw
+            WHERE timestamp >= NOW() - (%s || ' minutes')::INTERVAL
+        """, (lookback,))
+        avg_momentum, avg_trend, signal_count = cur.fetchone() or (0, 0, 0)
+        regime, score = classify_market_heat(avg_trend)
+        return {
+            "market_heat_regime": regime,
+            "market_heat_score": score,
+            "market_heat_avg_trend": float(avg_trend or 0),
+            "market_heat_avg_momentum": float(avg_momentum or 0),
+            "market_heat_signal_count": int(signal_count or 0),
+            "market_heat_lookback_minutes": lookback,
+            "market_heat_calculated_at": datetime.now(timezone.utc),
+        }
+    except Exception as e:
+        print(f"⚠️ market heat context failed: {e}", flush=True)
+        safe_telemetry_rollback(cur)
+        return {
+            "market_heat_regime": "UNKNOWN",
+            "market_heat_score": None,
+            "market_heat_avg_trend": None,
+            "market_heat_avg_momentum": None,
+            "market_heat_signal_count": None,
+            "market_heat_lookback_minutes": lookback,
+            "market_heat_calculated_at": datetime.now(timezone.utc),
+        }
+
+def apply_market_heat_to_trade(cur, trade_id):
+    try:
+        ensure_market_heat_columns(cur)
+        safe_update_trade_telemetry(cur, trade_id, get_market_heat_context(cur))
+    except Exception as e:
+        print(f"⚠️ market heat trade update failed | id={trade_id} | {e}", flush=True)
+        safe_telemetry_rollback(cur)
+
+def apply_market_heat_to_signal(cur, signal_id):
+    try:
+        ensure_market_heat_columns(cur)
+        safe_update_signal_telemetry(cur, signal_id, get_market_heat_context(cur))
+    except Exception as e:
+        print(f"⚠️ market heat signal update failed | id={signal_id} | {e}", flush=True)
+        safe_telemetry_rollback(cur)
 
 
 # =========================
@@ -3250,6 +3355,8 @@ def open_shadow_cqe_trade(cur, symbol, price, momentum, trend, signal_id, signal
     ))
     trade_id = cur.fetchone()[0]
 
+    apply_market_heat_to_trade(cur, trade_id)
+
     try:
         safe_update_trade_telemetry(cur, trade_id, accounting_entry_telemetry(CQE_SHADOW_TRADE_SIZE_GBP))
     except Exception as e:
@@ -3769,6 +3876,8 @@ def open_bpt_cqe_probe_trade(cur, symbol, price, momentum, trend, signal_id, sig
         signal_time,
     ))
     trade_id = cur.fetchone()[0]
+
+    apply_market_heat_to_trade(cur, trade_id)
 
     ghost_probe_active = bool(ENABLE_BPT_CQE_GHOST_PROBES)
     live_probe_enabled = bool(ENABLE_BPT_CQE_LIVE_PROBES and not ghost_probe_active)
@@ -4683,6 +4792,8 @@ def open_persistence_hunter_trade(cur, symbol, price, momentum, trend, signal_id
         signal_time,
     ))
     tid = cur.fetchone()[0]
+
+    apply_market_heat_to_trade(cur, tid)
 
     try:
         safe_update_trade_telemetry(cur, tid, accounting_entry_telemetry(PH_SHADOW_SIZE_GBP))
@@ -6300,6 +6411,8 @@ def open_trade(cur, symbol, direction, price, momentum, trend, quality,
 
     trade_id = cur.fetchone()[0]
 
+    apply_market_heat_to_trade(cur, trade_id)
+
     try:
         cur.connection.commit()
         print(
@@ -6406,6 +6519,8 @@ def open_shadow_market_os_trade(cur, symbol, direction, price, momentum, trend, 
         entry_snapshot.get("shadow_emergence_reason_at_entry"),
     ))
     trade_id = cur.fetchone()[0]
+
+    apply_market_heat_to_trade(cur, trade_id)
 
     safe_update_trade_telemetry(cur, trade_id, {
         "is_shadow": True,
@@ -6846,6 +6961,7 @@ def webhook():
             ensure_okx_order_log_table(cur)
 
         ensure_signal_leadership_scores_table(cur)
+        ensure_market_heat_columns(cur)
         if ENABLE_BPT_CQE_LIFECYCLE_SHADOW:
             ensure_bpt_cqe_lifecycle_columns(cur)
         if ENABLE_ARCHETYPE_STATE_ENGINE:
@@ -6874,6 +6990,8 @@ def webhook():
         ))
 
         signal_id, signal_time = cur.fetchone()
+
+        apply_market_heat_to_signal(cur, signal_id)
 
         # ================= ENTRY ENGINE =================
         entry_allowed = False
