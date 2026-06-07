@@ -2467,7 +2467,7 @@ def maybe_partial_profit_bank(cur, tid, sym, direction, entry_price, price, entr
             tid,
             "partial_bank_4pct",
             sym,
-            f"💚 <b>PARTIAL BANK</b> | {sym}\n"
+            f"{'💚 LIVE PARTIAL BANK' if not is_shadow_trade else '👻 SHADOW PARTIAL BANK'} | {sym}\n"
             f"Banked {int(PARTIAL_BANK_FRACTION*100)}% at +{fmt_num(PARTIAL_BANK_TRIGGER_PCT)}%\n"
             f"Approx realised: {fmt_money(realized_pnl_gbp)} | Runner remains open\n"
             f"Current peak {fmt_num(current_peak)}% | PnL now {fmt_num(pnl_percent)}%\n"
@@ -4676,7 +4676,7 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
             **extra_shadow_tags,
         })
 
-    trade_mode_label = "SHADOW" if is_shadow_trade else "LIVE"
+    trade_mode_label = "🟡 SHADOW COIN" if is_shadow_trade else "🟢 LIVE COIN"
     if live_scalein_executed:
         live_scalein_label = "YES"
     elif is_shadow_trade:
@@ -4692,7 +4692,7 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
         flush=True
     )
 
-    upgrade_alert_title = "🚀 LIVE UPGRADE EXECUTED" if live_scalein_executed else "👻 SHADOW UPGRADE CONFIRMED"
+    upgrade_alert_title = "🚀 LIVE UPGRADE EXECUTED" if live_scalein_executed else "👻 SHADOW UPGRADE (NO REAL MONEY)"
     send_telegram_alert(
         f"{upgrade_alert_title} | {sym}\n"
         f"Mode: <b>{trade_mode_label}</b> | Row: <b>{lifecycle_row}</b>\n"
@@ -8730,6 +8730,47 @@ def build_telegram_regime_message(cur, hours=3):
         return f"🧠 <b>Regime</b> unavailable: {e}"
 
 
+
+
+def build_telegram_coins_message(cur):
+    try:
+        cur.execute("""
+            SELECT symbol, tier, coin_health_mode, promotion_score, demotion_score
+            FROM coin_scores
+            ORDER BY
+                CASE tier
+                    WHEN 'A' THEN 1
+                    WHEN 'B' THEN 2
+                    WHEN 'C' THEN 3
+                    WHEN 'D' THEN 4
+                    ELSE 5
+                END,
+                symbol
+        """)
+        rows = cur.fetchall()
+
+        groups = {"A":[],"B":[],"C":[],"D":[],"DISCOVERY":[]}
+
+        for symbol,tier,mode,promo,demo in rows:
+            move = ""
+            if (promo or 0) >= 5:
+                move = " ⬆️"
+            elif (demo or 0) >= 3:
+                move = " ⬇️"
+
+            status = "🟢" if mode == "LIVE" else ("🔴" if mode == "DISABLED" else "🟡")
+            groups.setdefault(tier, []).append(f"{status} {symbol}{move}")
+
+        msg = "🪙 <b>Coin Universe</b>\n\n"
+        msg += "🏆 <b>A Tier LIVE</b>\n" + ("\n".join(groups["A"]) or "None") + "\n\n"
+        msg += "🥈 <b>B Tier LIVE</b>\n" + ("\n".join(groups["B"]) or "None") + "\n\n"
+        msg += "🥉 <b>C Tier SHADOW</b>\n" + ("\n".join(groups["C"]) or "None") + "\n\n"
+        msg += "🚫 <b>D Tier DISABLED</b>\n" + ("\n".join(groups["D"]) or "None") + "\n\n"
+        msg += "🔬 <b>Discovery</b>\n" + ("\n".join(groups["DISCOVERY"]) or "None")
+        return msg
+    except Exception as e:
+        return f"Coin report error: {e}"
+
 def handle_telegram_command(text):
     cmd = (text or "").strip().lower().split()[0] if text else "/help"
     conn = get_db()
@@ -8745,6 +8786,9 @@ def handle_telegram_command(text):
 
         if cmd in ["/leaders", "/leadership"]:
             return "🧠 <b>Top Leadership States</b>\n" + get_top_leaders_text(cur, 10)
+
+        if cmd in ["/coins", "/tiers"]:
+            return build_telegram_coins_message(cur)
 
         if cmd in ["/lifecycle", "/phases"]:
             return "🧬 <b>Leadership Lifecycle</b>\n" + get_lifecycle_dashboard_text(cur, 12)
