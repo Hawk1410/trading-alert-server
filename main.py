@@ -1745,7 +1745,12 @@ def telegram_send_message(chat_id, message):
         print(f"⚠️ TELEGRAM SEND ERROR | {e}", flush=True)
         return False
 
-def send_telegram_alert(message):
+def try:
+            if cqe_upgraded:
+                update_coin_score(conn, sym if 'sym' in locals() else symbol, peak_pnl_percent, pnl_percent, pnl_gbp)
+        except Exception as e:
+            print(f'coin telemetry error: {e}', flush=True)
+        send_telegram_alert(message):
     return telegram_send_message(TELEGRAM_CHAT_ID, message)
 
 
@@ -8883,3 +8888,36 @@ except Exception as e:
 #     control panel
 #     exits
 #     sizing
+
+# =========================
+# 🏆 COIN INTELLIGENCE V1
+# =========================
+def update_coin_score(conn, symbol, peak_pnl_percent, pnl_percent, pnl_gbp):
+    try:
+        cur = conn.cursor()
+        hero_points = 3 if peak_pnl_percent >= 20 else 2 if peak_pnl_percent >= 10 else 1 if peak_pnl_percent >= 5 else 0
+        win = 1 if pnl_percent > 0 else 0
+        loss = 0 if win else 1
+
+        cur.execute("""
+        INSERT INTO coin_scores
+        (symbol,total_upgrades,winning_upgrades,losing_upgrades,
+         avg_peak,avg_final,total_pnl_gbp,
+         consecutive_failed_upgrades,hero_points,last_updated)
+        VALUES (%s,1,%s,%s,%s,%s,%s,%s,%s,NOW())
+        ON CONFLICT (symbol)
+        DO UPDATE SET
+          total_upgrades = coin_scores.total_upgrades + 1,
+          winning_upgrades = coin_scores.winning_upgrades + EXCLUDED.winning_upgrades,
+          losing_upgrades = coin_scores.losing_upgrades + EXCLUDED.losing_upgrades,
+          avg_peak = ((coin_scores.avg_peak * coin_scores.total_upgrades) + EXCLUDED.avg_peak)/(coin_scores.total_upgrades + 1),
+          avg_final = ((coin_scores.avg_final * coin_scores.total_upgrades) + EXCLUDED.avg_final)/(coin_scores.total_upgrades + 1),
+          total_pnl_gbp = coin_scores.total_pnl_gbp + EXCLUDED.total_pnl_gbp,
+          consecutive_failed_upgrades = CASE WHEN EXCLUDED.winning_upgrades > 0 THEN 0 ELSE coin_scores.consecutive_failed_upgrades + 1 END,
+          hero_points = coin_scores.hero_points + EXCLUDED.hero_points,
+          last_updated = NOW()
+        """, (symbol, win, loss, peak_pnl_percent or 0, pnl_percent or 0, pnl_gbp or 0, 0 if win else 1, hero_points))
+        conn.commit()
+    except Exception as e:
+        print(f"⚠️ coin score update failed: {e}", flush=True)
+
