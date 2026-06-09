@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v9.1
-# TITLE: MIN ORDER PROTECTION + TELEGRAM EXIT CLARITY
+# VERSION: v9.2
+# TITLE: FORM HOT/GOOD OVERRIDES + COINS DASHBOARD
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v9.1 MIN ORDER PROTECTION RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v9.2 FORM OVERRIDES + COINS DASHBOARD RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -393,7 +393,7 @@ MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 3
 
 
 
-DATA_VERSION = "v9.1_MIN_ORDER_TELEGRAM_FIX"
+DATA_VERSION = "v9.2_FORM_OVERRIDE_COINS_DASH"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -649,6 +649,11 @@ COIN_FORM_ALLOWED_LIVE_MODES = {
 COIN_FORM_FAIL_OPEN = env_bool("COIN_FORM_FAIL_OPEN", False)
 COIN_FORM_SHADOW_ENTRY_QUALITY = os.environ.get("COIN_FORM_SHADOW_ENTRY_QUALITY", "COIN_FORM_BLOCK_SHADOW")
 COIN_FORM_SHADOW_SIZE_GBP = float(os.environ.get("COIN_FORM_SHADOW_SIZE_GBP", "5") or 5)
+# v9.2: HOT/GOOD Coin Form can override slow historical shadow-only layers.
+# DISABLED coins still remain disabled. NORMAL/THROTTLE/SHADOW still do not get fresh live capital.
+ENABLE_COIN_FORM_OVERRIDE_HEALTH_SHADOW = env_bool("ENABLE_COIN_FORM_OVERRIDE_HEALTH_SHADOW", True)
+ENABLE_COIN_FORM_OVERRIDE_ADAPTIVE_DEAD_MARKET_SHADOW = env_bool("ENABLE_COIN_FORM_OVERRIDE_ADAPTIVE_DEAD_MARKET_SHADOW", True)
+
 
 # =========================
 # 🧠 LEADERSHIP ENGINE
@@ -4962,12 +4967,24 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
     coin_allows_live_upgrade = (coin_profile_for_scalein.get("coin_health_mode") == "LIVE")
     coin_form_for_scalein = get_coin_form_snapshot(cur, sym) if ENABLE_COIN_FORM_ENGINE else {"coin_form_mode": "GOOD", "coin_form_reason": "coin_form_disabled"}
     coin_form_allows_scalein = coin_form_allows_live_entry(coin_form_for_scalein)
+    adaptive_dead_market_form_override = bool(
+        adaptive_dead_market_shadow_only
+        and ENABLE_COIN_FORM_OVERRIDE_ADAPTIVE_DEAD_MARKET_SHADOW
+        and coin_form_allows_scalein
+    )
+    coin_health_form_override = bool(
+        (not coin_allows_live_upgrade)
+        and ENABLE_COIN_FORM_OVERRIDE_HEALTH_SHADOW
+        and coin_form_allows_scalein
+        and coin_profile_for_scalein.get("coin_health_mode") == "SHADOW"
+    )
+    coin_allows_live_upgrade_or_form_override = bool(coin_allows_live_upgrade or coin_health_form_override or adaptive_dead_market_form_override)
 
     scalein_allowed = (
         ENABLE_CQE_REAL_SCALEINS
         and not is_shadow_trade
-        and not adaptive_dead_market_shadow_only
-        and coin_allows_live_upgrade
+        and (not adaptive_dead_market_shadow_only or adaptive_dead_market_form_override)
+        and coin_allows_live_upgrade_or_form_override
         and coin_form_allows_scalein
         and row_allows_scalein
         and confirmation_allows_scalein
@@ -4979,11 +4996,11 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
     # This keeps behaviour unchanged but makes the reason explicit.
     if not ENABLE_BPT_CQE_LIVE_UPGRADES:
         scalein_block_reason = "live_upgrade_toggle_off"
-    elif adaptive_dead_market_shadow_only:
+    elif adaptive_dead_market_shadow_only and not adaptive_dead_market_form_override:
         scalein_block_reason = "adaptive_dead_market_leader_shadow_only"
     elif not ENABLE_CQE_REAL_SCALEINS:
         scalein_block_reason = "real_scaleins_toggle_off"
-    elif not coin_allows_live_upgrade:
+    elif not coin_allows_live_upgrade_or_form_override:
         scalein_block_reason = f"coin_profile_{coin_profile_for_scalein.get('tier')}_{coin_profile_for_scalein.get('coin_health_mode')}_no_live_upgrade"
     elif not coin_form_allows_scalein:
         scalein_block_reason = f"coin_form_{coin_form_for_scalein.get('coin_form_mode')}_{coin_form_for_scalein.get('coin_form_reason')}"
@@ -5076,7 +5093,12 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
                 **accounting_entry_telemetry(new_trade_size_usdt),
                 "upgrade_size_gbp": actual_upgrade_size,
                 "probe_lifecycle_state": "FAST_TRACK_UPGRADED" if fast_track_active else "STANDARD_UPGRADED",
-                "size_scaling_reason": "ghost_probe_upgraded_live_capital_only" if ghost_probe_active else "bpt_live_scalein_executed",
+                "size_scaling_reason": (
+                    "adaptive_dead_market_coin_form_live_override"
+                    if adaptive_dead_market_form_override else
+                    ("coin_health_coin_form_live_override" if coin_health_form_override else
+                     ("ghost_probe_upgraded_live_capital_only" if ghost_probe_active else "bpt_live_scalein_executed"))
+                ),
             })
         else:
             safe_update_trade_telemetry(cur, tid, {
@@ -5088,7 +5110,7 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
         extra_shadow_tags = {
             "shadow_reason": "ADAPTIVE_DEAD_MARKET_LEADER_SHADOW",
             "size_scaling_reason": "adaptive_dead_market_leader_shadow_only",
-        } if adaptive_dead_market_shadow_only else {
+        } if adaptive_dead_market_shadow_only and not adaptive_dead_market_form_override else {
             "size_scaling_reason": f"bpt_scalein_disabled_or_not_allowed:{scalein_block_reason}",
         }
 
@@ -8175,19 +8197,36 @@ def webhook():
                     print(f"🚫 COIN DISABLED | {symbol} | reason={coin_health_snapshot.get('coin_health_reason')}", flush=True)
 
                 elif ENABLE_COIN_HEALTH_ENGINE and coin_health_snapshot.get("coin_health_mode") == "SHADOW":
-                    entry_allowed = False
-                    block_reason = f"coin_health_{coin_health_snapshot.get('coin_health_reason')}"
-                    print(
-                        f"🩺 COIN HEALTH ROUTE TO SHADOW | {symbol} | "
-                        f"dead={coin_health_snapshot.get('coin_dead_streak')}/{COIN_HEALTH_DEAD_WINDOW} | "
-                        f"avg_peak={coin_health_snapshot.get('coin_health_avg_peak')} | "
-                        f"reason={coin_health_snapshot.get('coin_health_reason')}",
-                        flush=True
+                    coin_form_health_override = bool(
+                        ENABLE_COIN_FORM_ENGINE
+                        and ENABLE_COIN_FORM_OVERRIDE_HEALTH_SHADOW
+                        and coin_form_allows_live_entry(coin_form_snapshot)
                     )
-                    open_coin_health_shadow_trade(
-                        cur, symbol, "LONG", price, momentum, trend,
-                        signal_id, signal_time, leadership_context, coin_health_snapshot
-                    )
+
+                    if coin_form_health_override:
+                        print(
+                            f"🔥 COIN FORM OVERRIDE | {symbol} | "
+                            f"health={coin_health_snapshot.get('coin_health_mode')} | "
+                            f"form={coin_form_snapshot.get('coin_form_mode')} score={coin_form_snapshot.get('coin_form_score')} | "
+                            "allowing live entry despite slow health shadow status",
+                            flush=True
+                        )
+                        leadership_context["coin_health_form_override"] = True
+                        leadership_context["coin_health_form_override_reason"] = "coin_form_hot_good_overrode_health_shadow"
+                    else:
+                        entry_allowed = False
+                        block_reason = f"coin_health_{coin_health_snapshot.get('coin_health_reason')}"
+                        print(
+                            f"🩺 COIN HEALTH ROUTE TO SHADOW | {symbol} | "
+                            f"dead={coin_health_snapshot.get('coin_dead_streak')}/{COIN_HEALTH_DEAD_WINDOW} | "
+                            f"avg_peak={coin_health_snapshot.get('coin_health_avg_peak')} | "
+                            f"reason={coin_health_snapshot.get('coin_health_reason')}",
+                            flush=True
+                        )
+                        open_coin_health_shadow_trade(
+                            cur, symbol, "LONG", price, momentum, trend,
+                            signal_id, signal_time, leadership_context, coin_health_snapshot
+                        )
 
                 # v6.6.12 EMERGENCY EXCHANGE RECONCILIATION GUARD:
                 # OKX exchange truth overrides Supabase state. If OKX already holds
@@ -9205,43 +9244,119 @@ def build_telegram_regime_message(cur, hours=3):
 def build_telegram_coins_message(cur):
     try:
         ensure_coin_scores_v84_columns(cur)
+        ensure_archetype_state_columns(cur)
+
         cur.execute("""
-            SELECT symbol, tier, coin_health_mode, promotion_score, demotion_score,
-                   coin_form_mode, coin_form_score
-            FROM coin_scores
+            WITH recent AS (
+                SELECT
+                    symbol,
+                    COUNT(*) FILTER (WHERE opened_at >= NOW() - INTERVAL '12 hours') AS trades_12h,
+                    ROUND(AVG(pnl_percent) FILTER (WHERE opened_at >= NOW() - INTERVAL '12 hours')::numeric, 2) AS avg_12h,
+                    ROUND(SUM(pnl_percent) FILTER (WHERE opened_at >= NOW() - INTERVAL '12 hours')::numeric, 2) AS pnl_12h,
+                    COUNT(*) FILTER (WHERE opened_at >= NOW() - INTERVAL '24 hours') AS trades_24h,
+                    ROUND(SUM(pnl_percent) FILTER (WHERE opened_at >= NOW() - INTERVAL '24 hours')::numeric, 2) AS pnl_24h,
+                    COUNT(*) FILTER (WHERE opened_at >= NOW() - INTERVAL '7 days') AS trades_7d,
+                    ROUND(SUM(pnl_percent) FILTER (WHERE opened_at >= NOW() - INTERVAL '7 days')::numeric, 2) AS pnl_7d,
+                    COUNT(*) FILTER (WHERE status='OPEN') AS open_trades
+                FROM bot_trades_v4
+                WHERE opened_at >= NOW() - INTERVAL '7 days'
+                GROUP BY symbol
+            )
+            SELECT
+                cs.symbol,
+                cs.tier,
+                cs.coin_health_mode,
+                cs.coin_form_mode,
+                ROUND(cs.coin_form_score::numeric, 2) AS coin_form_score,
+                COALESCE(r.open_trades,0) AS open_trades,
+                COALESCE(r.trades_12h,0) AS trades_12h,
+                r.avg_12h,
+                r.pnl_12h,
+                COALESCE(r.trades_24h,0) AS trades_24h,
+                r.pnl_24h,
+                COALESCE(r.trades_7d,0) AS trades_7d,
+                r.pnl_7d
+            FROM coin_scores cs
+            LEFT JOIN recent r ON r.symbol = cs.symbol
             ORDER BY
-                CASE tier
+                CASE cs.coin_form_mode
+                    WHEN 'HOT' THEN 1
+                    WHEN 'GOOD' THEN 2
+                    WHEN 'NORMAL' THEN 3
+                    WHEN 'THROTTLE' THEN 4
+                    WHEN 'SHADOW' THEN 5
+                    ELSE 6
+                END,
+                cs.coin_form_score DESC NULLS LAST,
+                CASE cs.tier
                     WHEN 'A' THEN 1
                     WHEN 'B' THEN 2
                     WHEN 'C' THEN 3
-                    WHEN 'D' THEN 4
-                    ELSE 5
+                    WHEN 'DISCOVERY' THEN 4
+                    WHEN 'D' THEN 5
+                    ELSE 6
                 END,
-                symbol
+                cs.symbol
         """)
         rows = cur.fetchall()
 
-        groups = {"A":[],"B":[],"C":[],"D":[],"DISCOVERY":[]}
+        def signed(x):
+            if x is None:
+                return "—"
+            try:
+                xf = float(x)
+                return f"{xf:+.2f}"
+            except Exception:
+                return str(x)
 
-        for symbol,tier,mode,promo,demo,form_mode,form_score in rows:
-            move = ""
-            if (promo or 0) >= 5:
-                move = " ⬆️"
-            elif (demo or 0) >= 3:
-                move = " ⬇️"
+        def short_symbol(symbol):
+            return str(symbol or "?").replace("USDT", "")
 
-            status = "🟢" if mode == "LIVE" else ("🔴" if mode == "DISABLED" else "🟡")
-            form_txt = f" | {coin_form_emoji(form_mode)} {form_mode or '?'} {fmt_num(form_score)}" if form_mode or form_score is not None else ""
-            groups.setdefault(tier, []).append(f"{status} {symbol}{move}{form_txt}")
+        lines = [
+            "🪙 <b>V9 Coin Dashboard</b>",
+            "Format: coin | tier/health | form score | 12h avg/pnl | 24h pnl | 7d pnl | open",
+            "",
+        ]
 
-        msg = "🪙 <b>Coin Universe</b>\n\n"
-        msg += "🏆 <b>A Tier LIVE</b>\n" + ("\n".join(groups["A"]) or "None") + "\n\n"
-        msg += "🥈 <b>B Tier LIVE</b>\n" + ("\n".join(groups["B"]) or "None") + "\n\n"
-        msg += "🥉 <b>C Tier SHADOW</b>\n" + ("\n".join(groups["C"]) or "None") + "\n\n"
-        msg += "🚫 <b>D Tier DISABLED</b>\n" + ("\n".join(groups["D"]) or "None") + "\n\n"
-        msg += "🔬 <b>Discovery</b>\n" + ("\n".join(groups["DISCOVERY"]) or "None")
+        current_group = None
+        for row in rows:
+            symbol, tier, health_mode, form_mode, form_score, open_trades, trades_12h, avg_12h, pnl_12h, trades_24h, pnl_24h, trades_7d, pnl_7d = row
+            form_mode = form_mode or "NOFORM"
+            group = f"{coin_form_emoji(form_mode)} {form_mode}"
+            if group != current_group:
+                if current_group is not None:
+                    lines.append("")
+                lines.append(f"<b>{group}</b>")
+                current_group = group
+
+            health_icon = "🟢" if health_mode == "LIVE" else ("🔴" if health_mode == "DISABLED" else "🟡")
+            live_rule = "LIVE" if form_mode in COIN_FORM_ALLOWED_LIVE_MODES else "BLOCK"
+            open_txt = f" | open {open_trades}" if int(open_trades or 0) > 0 else ""
+            lines.append(
+                f"{short_symbol(symbol)} | {tier}/{health_icon}{health_mode or '?'} | "
+                f"{fmt_num(form_score)} | {live_rule} | "
+                f"12h {trades_12h}x avg {signed(avg_12h)} pnl {signed(pnl_12h)} | "
+                f"24h {trades_24h}x {signed(pnl_24h)} | "
+                f"7d {trades_7d}x {signed(pnl_7d)}{open_txt}"
+            )
+
+        msg = "\n".join(lines)
+        if len(msg) > 3900:
+            # Telegram-safe compact fallback: prioritize active/hot coins.
+            compact = lines[:3]
+            count = 0
+            for line in lines[3:]:
+                if len("\n".join(compact + [line])) > 3850:
+                    break
+                compact.append(line)
+                if " | " in line:
+                    count += 1
+            compact.append("\n…truncated. Use SQL dashboard for full table.")
+            msg = "\n".join(compact)
         return msg
     except Exception as e:
+        print(f"⚠️ coin dashboard message failed: {e}", flush=True)
+        safe_telemetry_rollback(cur)
         return f"Coin report error: {e}"
 
 def handle_telegram_command(text):
