@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v9.2
-# TITLE: FORM HOT/GOOD OVERRIDES + COINS DASHBOARD
+# VERSION: v9.3
+# TITLE: CONFIRMED GHOST PROBES ENTER LIVE
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v9.2 FORM OVERRIDES + COINS DASHBOARD RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v9.3 CONFIRMED LIVE ENTRY FIX RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -393,7 +393,7 @@ MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 3
 
 
 
-DATA_VERSION = "v9.2_FORM_OVERRIDE_COINS_DASH"
+DATA_VERSION = "v9.3_CONFIRMED_LIVE_ENTRY_FIX"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -821,6 +821,9 @@ ENABLE_BPT_CQE_GHOST_PROBES = os.environ.get(
     "ENABLE_BPT_CQE_GHOST_PROBES", "true"
 ).lower() == "true"
 GHOST_PROBE_LABEL = "GHOST_PROBE_NO_CAPITAL"
+# v9.3: keep raw probes ghost, but allow confirmed HOT/GOOD ghost probes to enter live capital.
+ENABLE_BPT_CQE_CONFIRMED_GHOST_LIVE_ENTRY = os.environ.get("ENABLE_BPT_CQE_CONFIRMED_GHOST_LIVE_ENTRY", "true").lower() == "true"
+
 
 # v6.6.19/v6.6.20: real capital only added AFTER CQE confirmation.
 ENABLE_CQE_REAL_SCALEINS = os.environ.get(
@@ -4980,9 +4983,23 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
     )
     coin_allows_live_upgrade_or_form_override = bool(coin_allows_live_upgrade or coin_health_form_override or adaptive_dead_market_form_override)
 
+    # v9.3 EXECUTION FIX:
+    # Raw BPT probes remain ghost/no-capital because recent data shows RAW_PROBE is strongly negative.
+    # But once a ghost probe is CQE-confirmed, HOT/GOOD Coin Form is allowed to place the first real OKX entry.
+    # Previously this was blocked by `not is_shadow_trade`, leaving confirmed winners as paper-only.
+    confirmed_ghost_live_entry_allowed = bool(
+        ENABLE_BPT_CQE_CONFIRMED_GHOST_LIVE_ENTRY
+        and ghost_probe_active
+        and coin_form_allows_scalein
+        and (not adaptive_dead_market_shadow_only or adaptive_dead_market_form_override)
+        and coin_allows_live_upgrade_or_form_override
+        and row_allows_scalein
+        and confirmation_allows_scalein
+    )
+
     scalein_allowed = (
         ENABLE_CQE_REAL_SCALEINS
-        and not is_shadow_trade
+        and (not is_shadow_trade or confirmed_ghost_live_entry_allowed)
         and (not adaptive_dead_market_shadow_only or adaptive_dead_market_form_override)
         and coin_allows_live_upgrade_or_form_override
         and coin_form_allows_scalein
@@ -5004,7 +5021,7 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
         scalein_block_reason = f"coin_profile_{coin_profile_for_scalein.get('tier')}_{coin_profile_for_scalein.get('coin_health_mode')}_no_live_upgrade"
     elif not coin_form_allows_scalein:
         scalein_block_reason = f"coin_form_{coin_form_for_scalein.get('coin_form_mode')}_{coin_form_for_scalein.get('coin_form_reason')}"
-    elif is_shadow_trade:
+    elif is_shadow_trade and not confirmed_ghost_live_entry_allowed:
         scalein_block_reason = "shadow_trade_no_live_scalein"
     elif not row_allows_scalein:
         scalein_block_reason = f"row_not_scalein_allowed:{lifecycle_row}"
@@ -5082,7 +5099,8 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
             ghost_upgrade_reset = {
                 "entry_price": current_price or entry_price,
                 "peak_pnl_percent": 0,
-                "size_scaling_reason": "ghost_probe_upgraded_live_capital_only",
+                "is_shadow": False,
+                "size_scaling_reason": "confirmed_ghost_probe_entered_live_capital",
                 "shadow_reason": None,
             } if ghost_probe_active else {}
 
@@ -5097,7 +5115,7 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
                     "adaptive_dead_market_coin_form_live_override"
                     if adaptive_dead_market_form_override else
                     ("coin_health_coin_form_live_override" if coin_health_form_override else
-                     ("ghost_probe_upgraded_live_capital_only" if ghost_probe_active else "bpt_live_scalein_executed"))
+                     ("confirmed_ghost_probe_entered_live_capital" if ghost_probe_active else "bpt_live_scalein_executed"))
                 ),
             })
         else:
@@ -5119,9 +5137,9 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
             **extra_shadow_tags,
         })
 
-    trade_mode_label = "🟡 SHADOW COIN" if is_shadow_trade else "🟢 LIVE COIN"
+    trade_mode_label = "🟢 LIVE COIN" if live_scalein_executed else ("🟡 SHADOW COIN" if is_shadow_trade else "🟢 LIVE COIN")
     if live_scalein_executed:
-        live_scalein_label = "YES"
+        live_scalein_label = "YES - CONFIRMED GHOST ENTERED LIVE" if ghost_probe_active else "YES"
     elif is_shadow_trade:
         live_scalein_label = "N/A - SHADOW"
     else:
@@ -5135,7 +5153,10 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
         flush=True
     )
 
-    upgrade_alert_title = "🚀 LIVE UPGRADE EXECUTED" if live_scalein_executed else "👻 SHADOW UPGRADE (NO REAL MONEY)"
+    if live_scalein_executed and ghost_probe_active:
+        upgrade_alert_title = "🟢 LIVE ENTRY AFTER CONFIRMATION"
+    else:
+        upgrade_alert_title = "🚀 LIVE UPGRADE EXECUTED" if live_scalein_executed else "👻 SHADOW CONFIRMATION (NO REAL MONEY)"
     send_telegram_alert(
         f"{upgrade_alert_title} | {sym}\n"
         f"Mode: <b>{trade_mode_label}</b> | Row: <b>{lifecycle_row}</b>\n"
@@ -9528,6 +9549,7 @@ def bool_status():
         "ENABLE_FIXED_TIME_EXITS_REAL": ENABLE_FIXED_TIME_EXITS_REAL,
         "DENSITY_NULL_IS_VALID": DENSITY_NULL_IS_VALID,
         "ENABLE_BPT_CQE_LIVE_UPGRADES": ENABLE_BPT_CQE_LIVE_UPGRADES,
+        "ENABLE_BPT_CQE_CONFIRMED_GHOST_LIVE_ENTRY": ENABLE_BPT_CQE_CONFIRMED_GHOST_LIVE_ENTRY,
         "BPT_CQE_PROBE_SIZE_GBP": BPT_CQE_PROBE_SIZE_GBP,
         "ENABLE_BPT_PROBE_LIFECYCLE_ENGINE": ENABLE_BPT_PROBE_LIFECYCLE_ENGINE,
         "BPT_MONSTER_FASTTRACK_MIN_AGE_MINUTES": BPT_MONSTER_FASTTRACK_MIN_AGE_MINUTES,
