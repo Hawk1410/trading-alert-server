@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v9.0
-# TITLE: COIN FORM SELECTION + TELEGRAM EXIT MODE CLARITY
+# VERSION: v9.1
+# TITLE: MIN ORDER PROTECTION + TELEGRAM EXIT CLARITY
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v9.0 COIN FORM SELECTION RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v9.1 MIN ORDER PROTECTION RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -393,7 +393,7 @@ MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 3
 
 
 
-DATA_VERSION = "v9.0_COIN_FORM_SELECTION"
+DATA_VERSION = "v9.1_MIN_ORDER_TELEGRAM_FIX"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -813,7 +813,7 @@ ENABLE_BPT_CQE_LIVE_UPGRADES = os.environ.get(
 # but they do NOT place real OKX capital. They are labelled as GHOST_PROBE.
 # Real capital is only added if/when the lifecycle confirms and a live upgrade scale-in succeeds.
 ENABLE_BPT_CQE_GHOST_PROBES = os.environ.get(
-    "ENABLE_BPT_CQE_GHOST_PROBES", "false"
+    "ENABLE_BPT_CQE_GHOST_PROBES", "true"
 ).lower() == "true"
 GHOST_PROBE_LABEL = "GHOST_PROBE_NO_CAPITAL"
 
@@ -839,6 +839,8 @@ MIN_OKX_ORDER_NOTIONAL_GBP = float(os.environ.get("MIN_OKX_ORDER_NOTIONAL_GBP", 
 # v6.9.2 capital utilisation: use available quote balance instead of skipping near-full-size entries.
 ALLOW_PARTIAL_POSITION_FILL = os.environ.get("ALLOW_PARTIAL_POSITION_FILL", "true").lower() == "true"
 MIN_POSITION_SIZE_GBP = float(os.environ.get("MIN_POSITION_SIZE_GBP", "10") or 10)
+ENABLE_OKX_MIN_ORDER_AUTOBUMP = os.environ.get("ENABLE_OKX_MIN_ORDER_AUTOBUMP", "true").lower() == "true"
+OKX_MIN_ORDER_BUFFER_MULTIPLIER = float(os.environ.get("OKX_MIN_ORDER_BUFFER_MULTIPLIER", "1.08") or 1.08)
 
 
 BPT_CQE_ENTRY_QUALITY = "BPT_CQE_LIFECYCLE_V1"
@@ -2889,69 +2891,182 @@ def okx_inst_id_to_quote_ccy(okx_inst_id):
         return None
     return okx_inst_id.split("-")[-1].upper()
 
+def okx_get_spot_instrument_details(okx_inst_id):
+    """Fetch OKX spot instrument sizing metadata for min-order protection."""
+    try:
+        response = requests.get(
+            f"{OKX_BASE_URL}/api/v5/public/instruments",
+            params={"instType": "SPOT", "instId": okx_inst_id},
+            timeout=10,
+        )
+        payload = response.json()
+        if response.status_code != 200 or str(payload.get("code")) != "0":
+            return {"success": False, "error": f"instrument_lookup_failed: {payload}", "response": payload}
+        data = payload.get("data") or []
+        if not data:
+            return {"success": False, "error": "instrument_lookup_no_data", "response": payload}
+        return {"success": True, "data": data[0], "error": None, "response": payload}
+    except Exception as e:
+        return {"success": False, "error": str(e), "response": None}
+
+
+def okx_min_entry_quote_required(okx_inst_id, fallback_price=None):
+    """Return minimum quote size needed for a market BUY using tgtCcy=quote_ccy.
+
+    OKX spot instruments expose minSz in base units. For quote-currency market buys,
+    convert min base size to quote notional using the live OKX ticker where possible,
+    then add a small safety buffer.
+    """
+    if not ENABLE_OKX_MIN_ORDER_AUTOBUMP:
+        return {"success": True, "required_quote": 0.0, "reason": "autobump_disabled"}
+
+    inst_result = okx_get_spot_instrument_details(okx_inst_id)
+    if not inst_result.get("success"):
+        return {
+            "success": False,
+            "required_quote": 0.0,
+            "reason": "instrument_metadata_failed",
+            "error": inst_result.get("error"),
+        }
+
+    data = inst_result.get("data") or {}
+    min_sz = float(data.get("minSz") or 0)
+    lot_sz = float(data.get("lotSz") or 0)
+    min_base = max(min_sz, lot_sz, 0.0)
+    if min_base <= 0:
+        return {"success": True, "required_quote": 0.0, "reason": "no_min_base_from_instrument", "instrument": data}
+
+    ticker_result = okx_get_instrument_last_price(okx_inst_id)
+    ref_price = float(ticker_result.get("price") or fallback_price or 0)
+    if ref_price <= 0:
+        return {
+            "success": False,
+            "required_quote": 0.0,
+            "reason": "no_reference_price_for_min_order",
+            "instrument": data,
+            "ticker_error": ticker_result.get("error"),
+        }
+
+    required_quote = min_base * ref_price * float(OKX_MIN_ORDER_BUFFER_MULTIPLIER)
+    return {
+        "success": True,
+        "required_quote": required_quote,
+        "reason": "okx_min_order_autobump_calculated",
+        "min_base": min_base,
+        "minSz": min_sz,
+        "lotSz": lot_sz,
+        "reference_price": ref_price,
+        "buffer_multiplier": float(OKX_MIN_ORDER_BUFFER_MULTIPLIER),
+        "instrument": data,
+    }
+
+
 def resolve_live_entry_quote_size(cur, symbol, okx_inst_id, requested_quote_size):
     """
-    v6.9.2: If available quote balance is slightly below requested size,
-    use what is available instead of skipping a valid signal.
-    Below MIN_POSITION_SIZE_GBP, fail closed and do not place the live entry.
+    v9.1 HOTFIX:
+    - Existing partial-fill protection remains unchanged.
+    - Adds OKX minimum-order auto-bump for live market BUY entries/probes.
+    - If requested probe size is below OKX minimum but balance is sufficient,
+      lift the order to the minimum valid quote amount.
+    - If balance is insufficient for the minimum valid order, fail closed.
     """
     requested = float(requested_quote_size or 0)
     if requested <= 0:
         return 0.0, {"adjusted": False, "reason": "invalid_requested_size"}
 
-    if not ALLOW_PARTIAL_POSITION_FILL:
-        return requested, {"adjusted": False, "reason": "partial_fill_disabled"}
-
     quote_ccy = okx_inst_id_to_quote_ccy(okx_inst_id) or "USDT"
+    available = None
 
-    try:
-        balance_result = okx_get_available_balance(quote_ccy)
-        if not balance_result.get("success"):
+    if ALLOW_PARTIAL_POSITION_FILL:
+        try:
+            balance_result = okx_get_available_balance(quote_ccy)
+            if balance_result.get("success"):
+                available = float(balance_result.get("available") or 0)
+            else:
+                return requested, {
+                    "adjusted": False,
+                    "reason": "quote_balance_lookup_failed_use_requested",
+                    "quote_ccy": quote_ccy,
+                    "error": balance_result.get("error"),
+                }
+        except Exception as e:
             return requested, {
                 "adjusted": False,
-                "reason": "quote_balance_lookup_failed_use_requested",
+                "reason": "partial_fill_exception_use_requested",
                 "quote_ccy": quote_ccy,
-                "error": balance_result.get("error"),
+                "error": str(e),
             }
 
-        available = float(balance_result.get("available") or 0)
-        actual = min(requested, available)
+    min_result = okx_min_entry_quote_required(okx_inst_id)
+    min_required = float(min_result.get("required_quote") or 0)
 
-        if actual < float(MIN_POSITION_SIZE_GBP):
-            return 0.0, {
-                "adjusted": True,
-                "reason": "available_below_min_position_size",
-                "quote_ccy": quote_ccy,
-                "requested_quote_size": requested,
-                "available_quote_size": available,
-                "min_position_size": float(MIN_POSITION_SIZE_GBP),
-            }
+    target = requested
+    min_autobumped = False
+    if min_result.get("success") and min_required > 0 and target < min_required:
+        target = min_required
+        min_autobumped = True
 
-        if actual < requested:
-            return actual, {
-                "adjusted": True,
-                "reason": "partial_position_fill",
-                "quote_ccy": quote_ccy,
-                "requested_quote_size": requested,
-                "available_quote_size": available,
-                "actual_quote_size": actual,
-            }
+    if available is not None:
+        actual = min(target, available)
+    else:
+        actual = target
 
-        return requested, {
-            "adjusted": False,
-            "reason": "sufficient_quote_balance",
+    if actual < float(MIN_POSITION_SIZE_GBP):
+        return 0.0, {
+            "adjusted": True,
+            "reason": "available_below_min_position_size",
+            "quote_ccy": quote_ccy,
+            "requested_quote_size": requested,
+            "target_quote_size": target,
+            "available_quote_size": available,
+            "min_position_size": float(MIN_POSITION_SIZE_GBP),
+            "okx_min_order": min_result,
+        }
+
+    if min_result.get("success") and min_required > 0 and actual < min_required:
+        return 0.0, {
+            "adjusted": True,
+            "reason": "available_below_okx_min_order_size",
+            "quote_ccy": quote_ccy,
+            "requested_quote_size": requested,
+            "target_quote_size": target,
+            "actual_quote_size": actual,
+            "available_quote_size": available,
+            "okx_min_required_quote": min_required,
+            "okx_min_order": min_result,
+        }
+
+    if min_autobumped:
+        return actual, {
+            "adjusted": True,
+            "reason": "okx_min_order_autobump",
+            "quote_ccy": quote_ccy,
+            "requested_quote_size": requested,
+            "actual_quote_size": actual,
+            "available_quote_size": available,
+            "okx_min_required_quote": min_required,
+            "okx_min_order": min_result,
+        }
+
+    if available is not None and actual < requested:
+        return actual, {
+            "adjusted": True,
+            "reason": "partial_position_fill",
             "quote_ccy": quote_ccy,
             "requested_quote_size": requested,
             "available_quote_size": available,
+            "actual_quote_size": actual,
+            "okx_min_order": min_result,
         }
 
-    except Exception as e:
-        return requested, {
-            "adjusted": False,
-            "reason": "partial_fill_exception_use_requested",
-            "quote_ccy": quote_ccy,
-            "error": str(e),
-        }
+    return requested, {
+        "adjusted": False,
+        "reason": "sufficient_quote_balance_and_min_order",
+        "quote_ccy": quote_ccy,
+        "requested_quote_size": requested,
+        "available_quote_size": available,
+        "okx_min_order": min_result,
+    }
 
 def get_okx_timestamp():
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
