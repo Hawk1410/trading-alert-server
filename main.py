@@ -813,7 +813,7 @@ ENABLE_BPT_CQE_LIVE_UPGRADES = os.environ.get(
 # but they do NOT place real OKX capital. They are labelled as GHOST_PROBE.
 # Real capital is only added if/when the lifecycle confirms and a live upgrade scale-in succeeds.
 ENABLE_BPT_CQE_GHOST_PROBES = os.environ.get(
-    "ENABLE_BPT_CQE_GHOST_PROBES", "true"
+    "ENABLE_BPT_CQE_GHOST_PROBES", "false"
 ).lower() == "true"
 GHOST_PROBE_LABEL = "GHOST_PROBE_NO_CAPITAL"
 
