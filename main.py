@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v8.4.1
-# TITLE: AUTO-DISCOVERY SHADOW COINS + COIN HEALTH + PERSONALITY LEARNING
+# VERSION: v9.0
+# TITLE: COIN FORM SELECTION + TELEGRAM EXIT MODE CLARITY
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v8.4.1 AUTO-DISCOVERY SHADOW COINS RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v9.0 COIN FORM SELECTION RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -393,7 +393,7 @@ MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 3
 
 
 
-DATA_VERSION = "v8.4_COIN_HEALTH_PERSONALITY_LEARNING"
+DATA_VERSION = "v9.0_COIN_FORM_SELECTION"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -613,6 +613,42 @@ INITIAL_COIN_PERSONALITY = {
     "PHAUSDT": "RETIRED_FAILED_ALL_TESTS",
     "ADAUSDT": "RETIRED_LOW_OPPORTUNITY",
 }
+
+
+# =========================
+# 🔥 v9.0 COIN FORM SELECTION ENGINE
+# =========================
+# Purpose:
+# Fast intraday coin rotation layer.
+# Keeps trade management unchanged; only decides whether fresh live capital
+# is allowed for a symbol right now.
+#
+# Scoring:
+# 3h avg available peak = 50%
+# 6h avg available peak = 30%
+# 12h avg available peak = 20%
+#
+# Deployment rule:
+# Only HOT / GOOD receive fresh live entries by default.
+# NORMAL / THROTTLE / SHADOW are blocked from new live capital.
+ENABLE_COIN_FORM_ENGINE = env_bool("ENABLE_COIN_FORM_ENGINE", True)
+ENABLE_COIN_FORM_LIVE_ENTRY_FILTER = env_bool("ENABLE_COIN_FORM_LIVE_ENTRY_FILTER", True)
+ENABLE_COIN_FORM_TELEGRAM = env_bool("ENABLE_COIN_FORM_TELEGRAM", True)
+COIN_FORM_MIN_SIGNALS_6H = int(os.environ.get("COIN_FORM_MIN_SIGNALS_6H", "10") or 10)
+COIN_FORM_FORWARD_WINDOW_HOURS = float(os.environ.get("COIN_FORM_FORWARD_WINDOW_HOURS", "4") or 4)
+COIN_FORM_HOT_THRESHOLD = float(os.environ.get("COIN_FORM_HOT_THRESHOLD", "2.00") or 2.00)
+COIN_FORM_GOOD_THRESHOLD = float(os.environ.get("COIN_FORM_GOOD_THRESHOLD", "1.20") or 1.20)
+COIN_FORM_NORMAL_THRESHOLD = float(os.environ.get("COIN_FORM_NORMAL_THRESHOLD", "0.70") or 0.70)
+COIN_FORM_THROTTLE_THRESHOLD = float(os.environ.get("COIN_FORM_THROTTLE_THRESHOLD", "0.40") or 0.40)
+COIN_FORM_ALLOWED_LIVE_MODES = {
+    x.strip().upper()
+    for x in os.environ.get("COIN_FORM_ALLOWED_LIVE_MODES", "HOT,GOOD").split(",")
+    if x.strip()
+}
+# Conservative default: if form cannot be calculated, do not risk fresh live capital.
+COIN_FORM_FAIL_OPEN = env_bool("COIN_FORM_FAIL_OPEN", False)
+COIN_FORM_SHADOW_ENTRY_QUALITY = os.environ.get("COIN_FORM_SHADOW_ENTRY_QUALITY", "COIN_FORM_BLOCK_SHADOW")
+COIN_FORM_SHADOW_SIZE_GBP = float(os.environ.get("COIN_FORM_SHADOW_SIZE_GBP", "5") or 5)
 
 # =========================
 # 🧠 LEADERSHIP ENGINE
@@ -1286,7 +1322,16 @@ def ensure_coin_scores_v84_columns(cur):
             ADD COLUMN IF NOT EXISTS recent_upgrade_avg NUMERIC DEFAULT 0,
             ADD COLUMN IF NOT EXISTS promotion_score NUMERIC DEFAULT 0,
             ADD COLUMN IF NOT EXISTS demotion_score NUMERIC DEFAULT 0,
-            ADD COLUMN IF NOT EXISTS sample_size INTEGER DEFAULT 0
+            ADD COLUMN IF NOT EXISTS sample_size INTEGER DEFAULT 0,
+            ADD COLUMN IF NOT EXISTS coin_form_score NUMERIC,
+            ADD COLUMN IF NOT EXISTS coin_form_mode TEXT,
+            ADD COLUMN IF NOT EXISTS form_peak_3h NUMERIC,
+            ADD COLUMN IF NOT EXISTS form_peak_6h NUMERIC,
+            ADD COLUMN IF NOT EXISTS form_peak_12h NUMERIC,
+            ADD COLUMN IF NOT EXISTS form_signals_3h INTEGER DEFAULT 0,
+            ADD COLUMN IF NOT EXISTS form_signals_6h INTEGER DEFAULT 0,
+            ADD COLUMN IF NOT EXISTS form_signals_12h INTEGER DEFAULT 0,
+            ADD COLUMN IF NOT EXISTS form_updated_at TIMESTAMPTZ
         """)
     except Exception as e:
         print(f"⚠️ coin_scores v8.4 column ensure failed: {e}", flush=True)
@@ -1361,6 +1406,222 @@ def get_coin_score_profile(cur, symbol):
         print(f"⚠️ coin score profile lookup failed for {sym}: {e}", flush=True)
         safe_telemetry_rollback(cur)
         return {"symbol": sym, "tier": initial["tier"], "coin_health_mode": initial["mode"], "personality": initial["personality"], "source": "fallback_error"}
+
+
+
+def coin_form_mode_from_score(score, signals_6h=0):
+    try:
+        score_f = float(score or 0)
+    except Exception:
+        score_f = 0.0
+
+    try:
+        sig6 = int(signals_6h or 0)
+    except Exception:
+        sig6 = 0
+
+    if sig6 < COIN_FORM_MIN_SIGNALS_6H:
+        return "SHADOW", f"insufficient_form_signals_6h_{sig6}_lt_{COIN_FORM_MIN_SIGNALS_6H}"
+    if score_f >= COIN_FORM_HOT_THRESHOLD:
+        return "HOT", "coin_form_hot"
+    if score_f >= COIN_FORM_GOOD_THRESHOLD:
+        return "GOOD", "coin_form_good"
+    if score_f >= COIN_FORM_NORMAL_THRESHOLD:
+        return "NORMAL", "coin_form_normal_not_live"
+    if score_f >= COIN_FORM_THROTTLE_THRESHOLD:
+        return "THROTTLE", "coin_form_throttle"
+    return "SHADOW", "coin_form_shadow"
+
+
+def coin_form_emoji(mode):
+    mode = (mode or "UNKNOWN").upper()
+    return {
+        "HOT": "🔥",
+        "GOOD": "🟢",
+        "NORMAL": "🟡",
+        "THROTTLE": "🟠",
+        "SHADOW": "🔴",
+        "UNKNOWN": "⚪",
+    }.get(mode, "⚪")
+
+
+def coin_form_label(snapshot):
+    snap = snapshot or {}
+    mode = (snap.get("coin_form_mode") or "UNKNOWN").upper()
+    score = snap.get("coin_form_score")
+    return f"{coin_form_emoji(mode)} {mode} ({fmt_num(score)})"
+
+
+def coin_form_trade_telemetry(snapshot):
+    snap = snapshot or {}
+    return {
+        "coin_form_score": snap.get("coin_form_score"),
+        "coin_form_mode": snap.get("coin_form_mode"),
+        "coin_form_reason": snap.get("coin_form_reason"),
+        "form_peak_3h": snap.get("form_peak_3h"),
+        "form_peak_6h": snap.get("form_peak_6h"),
+        "form_peak_12h": snap.get("form_peak_12h"),
+        "form_signals_3h": snap.get("form_signals_3h"),
+        "form_signals_6h": snap.get("form_signals_6h"),
+        "form_signals_12h": snap.get("form_signals_12h"),
+        "form_updated_at": snap.get("form_updated_at"),
+    }
+
+
+def get_coin_form_snapshot(cur, symbol):
+    """Runtime coin form snapshot using only current signals_raw history.
+    This is intentionally fast-moving and separate from slow Coin Health.
+    """
+    sym = normalize_symbol(symbol)
+    fallback_mode = "GOOD" if COIN_FORM_FAIL_OPEN else "SHADOW"
+    fallback_score = COIN_FORM_GOOD_THRESHOLD if COIN_FORM_FAIL_OPEN else 0.0
+
+    try:
+        ensure_coin_scores_v84_columns(cur)
+        cur.execute("""
+            WITH form AS (
+                SELECT
+                    s1.symbol,
+
+                    AVG(
+                        CASE WHEN s1.timestamp >= NOW() - INTERVAL '3 hours'
+                        THEN (
+                            (
+                                SELECT MAX(s2.price)
+                                FROM signals_raw s2
+                                WHERE s2.symbol = s1.symbol
+                                  AND s2.timestamp > s1.timestamp
+                                  AND s2.timestamp <= s1.timestamp + (%s || ' hours')::INTERVAL
+                            ) / NULLIF(s1.price,0) - 1
+                        ) * 100 END
+                    ) AS peak_3h,
+
+                    AVG(
+                        CASE WHEN s1.timestamp >= NOW() - INTERVAL '6 hours'
+                        THEN (
+                            (
+                                SELECT MAX(s2.price)
+                                FROM signals_raw s2
+                                WHERE s2.symbol = s1.symbol
+                                  AND s2.timestamp > s1.timestamp
+                                  AND s2.timestamp <= s1.timestamp + (%s || ' hours')::INTERVAL
+                            ) / NULLIF(s1.price,0) - 1
+                        ) * 100 END
+                    ) AS peak_6h,
+
+                    AVG(
+                        CASE WHEN s1.timestamp >= NOW() - INTERVAL '12 hours'
+                        THEN (
+                            (
+                                SELECT MAX(s2.price)
+                                FROM signals_raw s2
+                                WHERE s2.symbol = s1.symbol
+                                  AND s2.timestamp > s1.timestamp
+                                  AND s2.timestamp <= s1.timestamp + (%s || ' hours')::INTERVAL
+                            ) / NULLIF(s1.price,0) - 1
+                        ) * 100 END
+                    ) AS peak_12h,
+
+                    COUNT(*) FILTER (WHERE s1.timestamp >= NOW() - INTERVAL '3 hours') AS signals_3h,
+                    COUNT(*) FILTER (WHERE s1.timestamp >= NOW() - INTERVAL '6 hours') AS signals_6h,
+                    COUNT(*) FILTER (WHERE s1.timestamp >= NOW() - INTERVAL '12 hours') AS signals_12h
+
+                FROM signals_raw s1
+                WHERE s1.symbol = %s
+                  AND s1.timestamp >= NOW() - INTERVAL '12 hours'
+                GROUP BY s1.symbol
+            )
+            SELECT
+                COALESCE(peak_3h,0),
+                COALESCE(peak_6h,0),
+                COALESCE(peak_12h,0),
+                COALESCE(signals_3h,0),
+                COALESCE(signals_6h,0),
+                COALESCE(signals_12h,0),
+                ROUND((
+                    COALESCE(peak_3h,0) * 0.50 +
+                    COALESCE(peak_6h,0) * 0.30 +
+                    COALESCE(peak_12h,0) * 0.20
+                )::numeric,3)
+            FROM form
+        """, (COIN_FORM_FORWARD_WINDOW_HOURS, COIN_FORM_FORWARD_WINDOW_HOURS, COIN_FORM_FORWARD_WINDOW_HOURS, sym))
+
+        row = cur.fetchone()
+        if not row:
+            snapshot = {
+                "symbol": sym,
+                "coin_form_score": fallback_score,
+                "coin_form_mode": fallback_mode,
+                "coin_form_reason": "no_form_history_fail_open" if COIN_FORM_FAIL_OPEN else "no_form_history_fail_closed",
+                "form_peak_3h": 0,
+                "form_peak_6h": 0,
+                "form_peak_12h": 0,
+                "form_signals_3h": 0,
+                "form_signals_6h": 0,
+                "form_signals_12h": 0,
+                "form_updated_at": datetime.now(timezone.utc),
+            }
+        else:
+            peak3, peak6, peak12, sig3, sig6, sig12, score = row
+            mode, reason = coin_form_mode_from_score(score, sig6)
+            snapshot = {
+                "symbol": sym,
+                "coin_form_score": float(score or 0),
+                "coin_form_mode": mode,
+                "coin_form_reason": reason,
+                "form_peak_3h": float(peak3 or 0),
+                "form_peak_6h": float(peak6 or 0),
+                "form_peak_12h": float(peak12 or 0),
+                "form_signals_3h": int(sig3 or 0),
+                "form_signals_6h": int(sig6 or 0),
+                "form_signals_12h": int(sig12 or 0),
+                "form_updated_at": datetime.now(timezone.utc),
+            }
+
+        cur.execute("""
+            UPDATE coin_scores
+            SET coin_form_score=%s,
+                coin_form_mode=%s,
+                form_peak_3h=%s,
+                form_peak_6h=%s,
+                form_peak_12h=%s,
+                form_signals_3h=%s,
+                form_signals_6h=%s,
+                form_signals_12h=%s,
+                form_updated_at=NOW(),
+                last_updated=NOW()
+            WHERE symbol=%s
+        """, (
+            snapshot.get("coin_form_score"), snapshot.get("coin_form_mode"),
+            snapshot.get("form_peak_3h"), snapshot.get("form_peak_6h"), snapshot.get("form_peak_12h"),
+            snapshot.get("form_signals_3h"), snapshot.get("form_signals_6h"), snapshot.get("form_signals_12h"),
+            sym,
+        ))
+        return snapshot
+
+    except Exception as e:
+        print(f"⚠️ coin form snapshot failed for {sym}: {e}", flush=True)
+        safe_telemetry_rollback(cur)
+        return {
+            "symbol": sym,
+            "coin_form_score": fallback_score,
+            "coin_form_mode": fallback_mode,
+            "coin_form_reason": f"coin_form_error_{str(e)[:80]}",
+            "form_peak_3h": None,
+            "form_peak_6h": None,
+            "form_peak_12h": None,
+            "form_signals_3h": None,
+            "form_signals_6h": None,
+            "form_signals_12h": None,
+            "form_updated_at": datetime.now(timezone.utc),
+        }
+
+
+def coin_form_allows_live_entry(snapshot):
+    if not ENABLE_COIN_FORM_ENGINE or not ENABLE_COIN_FORM_LIVE_ENTRY_FILTER:
+        return True
+    mode = ((snapshot or {}).get("coin_form_mode") or "UNKNOWN").upper()
+    return mode in COIN_FORM_ALLOWED_LIVE_MODES
 
 
 def classify_personality_from_lifts(momentum_lift, trend_lift, leadership_lift, heat_lift, current_personality="UNKNOWN"):
@@ -2152,6 +2413,15 @@ def engine_emoji(entry_quality, is_shadow=False):
 def live_shadow_label(is_shadow=False):
     return "🧪 SHADOW" if bool(is_shadow) else "🟢 LIVE"
 
+
+def trade_close_title(is_shadow=False, closed_word="TRADE CLOSED"):
+    return f"👻 SHADOW {closed_word}" if bool(is_shadow) else f"🟢 LIVE {closed_word}"
+
+
+def trade_mode_line(is_shadow=False):
+    return "Mode: 👻 SHADOW / PAPER" if bool(is_shadow) else "Mode: 🟢 LIVE / REAL CAPITAL"
+
+
 def trend_persistence_exit_reason(entry_quality):
     if entry_quality in [CQE_CONTINUATION_ENTRY_QUALITY, LEGACY_CQE_ENTRY_QUALITY]:
         return "cqe_trend_fail_30m"
@@ -2305,7 +2575,17 @@ def ensure_archetype_state_columns(cur):
         ADD COLUMN IF NOT EXISTS pnl_usdt FLOAT,
         ADD COLUMN IF NOT EXISTS usd_gbp_rate FLOAT,
         ADD COLUMN IF NOT EXISTS market_os_engine TEXT,
-        ADD COLUMN IF NOT EXISTS size_scaling_reason TEXT
+        ADD COLUMN IF NOT EXISTS size_scaling_reason TEXT,
+        ADD COLUMN IF NOT EXISTS coin_form_score NUMERIC,
+        ADD COLUMN IF NOT EXISTS coin_form_mode TEXT,
+        ADD COLUMN IF NOT EXISTS coin_form_reason TEXT,
+        ADD COLUMN IF NOT EXISTS form_peak_3h NUMERIC,
+        ADD COLUMN IF NOT EXISTS form_peak_6h NUMERIC,
+        ADD COLUMN IF NOT EXISTS form_peak_12h NUMERIC,
+        ADD COLUMN IF NOT EXISTS form_signals_3h INTEGER,
+        ADD COLUMN IF NOT EXISTS form_signals_6h INTEGER,
+        ADD COLUMN IF NOT EXISTS form_signals_12h INTEGER,
+        ADD COLUMN IF NOT EXISTS form_updated_at TIMESTAMPTZ
     """)
 
 
@@ -3733,6 +4013,7 @@ def open_shadow_cqe_trade(cur, symbol, price, momentum, trend, signal_id, signal
         "leadership_score": (leadership_context or {}).get("prior_avg_peak"),
         "leadership_delta_30m_at_entry": (leadership_context or {}).get("leadership_delta_30m") or (leadership_context or {}).get("delta_30m"),
         **lifecycle_trade_telemetry_from_context(leadership_context),
+        **coin_form_trade_telemetry((leadership_context or {}).get("coin_form_snapshot") or {}),
     })
 
     try:
@@ -3924,7 +4205,7 @@ def process_shadow_cqe_trades(cur, symbol, price, momentum, trend, now):
 
             if ENABLE_SHADOW_CQE_TELEGRAM_ALERTS:
                 send_telegram_alert(
-                    f"🔴 <b>LIVE EXIT</b>\n🧠 <b>CQE_CONTINUATION_V1</b> | {sym}\n"
+                    f"{trade_close_title(True)}\n{trade_mode_line(True)}\n🧠 <b>CQE_CONTINUATION_V1</b> | {sym}\n"
                     + format_trade_pnl_lines(pnl_percent, pnl_gbp, 0) + "\n"
                     + f"Peak {fmt_num(current_peak)}% | DD {fmt_num(current_peak - pnl_percent)}%\n"
                     f"Age {fmt_num(mins,1)}m | Reason {close_reason}\n"
@@ -3981,7 +4262,17 @@ def ensure_bpt_cqe_lifecycle_columns(cur):
         ADD COLUMN IF NOT EXISTS live_probe_exited_at TIMESTAMPTZ,
         ADD COLUMN IF NOT EXISTS live_probe_exit_reason TEXT,
         ADD COLUMN IF NOT EXISTS telegram_close_alert_sent BOOLEAN DEFAULT FALSE,
-        ADD COLUMN IF NOT EXISTS telegram_close_alert_sent_at TIMESTAMPTZ
+        ADD COLUMN IF NOT EXISTS telegram_close_alert_sent_at TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS coin_form_score NUMERIC,
+        ADD COLUMN IF NOT EXISTS coin_form_mode TEXT,
+        ADD COLUMN IF NOT EXISTS coin_form_reason TEXT,
+        ADD COLUMN IF NOT EXISTS form_peak_3h NUMERIC,
+        ADD COLUMN IF NOT EXISTS form_peak_6h NUMERIC,
+        ADD COLUMN IF NOT EXISTS form_peak_12h NUMERIC,
+        ADD COLUMN IF NOT EXISTS form_signals_3h INTEGER,
+        ADD COLUMN IF NOT EXISTS form_signals_6h INTEGER,
+        ADD COLUMN IF NOT EXISTS form_signals_12h INTEGER,
+        ADD COLUMN IF NOT EXISTS form_updated_at TIMESTAMPTZ
     """)
 
 
@@ -4218,7 +4509,7 @@ def open_bpt_cqe_probe_trade(cur, symbol, price, momentum, trend, signal_id, sig
     apply_market_heat_to_trade(cur, trade_id)
 
     ghost_probe_active = bool(ENABLE_BPT_CQE_GHOST_PROBES)
-    live_probe_enabled = bool(ENABLE_BPT_CQE_LIVE_PROBES and not ghost_probe_active)
+    live_probe_enabled = bool(ENABLE_BPT_CQE_LIVE_PROBES and not ghost_probe_active and not (leadership_context or {}).get("coin_form_live_blocked"))
     model_probe_size_gbp = 0.0 if ghost_probe_active else BPT_CQE_PROBE_SIZE_GBP
     model_probe_size_usdt = 0.0 if ghost_probe_active else gbp_to_usdt_quote(BPT_CQE_PROBE_SIZE_GBP)
 
@@ -4315,6 +4606,16 @@ def maybe_open_bpt_cqe_probe(cur, symbol, price, momentum, trend, signal_id, sig
             return None
     except Exception as e:
         print(f"⚠️ BPT coin profile check failed for {symbol}: {e}", flush=True)
+        safe_telemetry_rollback(cur)
+
+    leadership_context = leadership_context or {}
+    try:
+        if ENABLE_COIN_FORM_ENGINE:
+            bpt_form_snapshot = get_coin_form_snapshot(cur, symbol)
+            leadership_context["coin_form_snapshot"] = bpt_form_snapshot
+            leadership_context["coin_form_live_blocked"] = not coin_form_allows_live_entry(bpt_form_snapshot)
+    except Exception as e:
+        print(f"⚠️ BPT coin form check failed for {symbol}: {e}", flush=True)
         safe_telemetry_rollback(cur)
 
     allowed, reason = passes_bpt_cqe_probe_gate(cur, symbol, momentum, trend, leadership_context)
@@ -4544,12 +4845,15 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
 
     coin_profile_for_scalein = get_coin_score_profile(cur, sym)
     coin_allows_live_upgrade = (coin_profile_for_scalein.get("coin_health_mode") == "LIVE")
+    coin_form_for_scalein = get_coin_form_snapshot(cur, sym) if ENABLE_COIN_FORM_ENGINE else {"coin_form_mode": "GOOD", "coin_form_reason": "coin_form_disabled"}
+    coin_form_allows_scalein = coin_form_allows_live_entry(coin_form_for_scalein)
 
     scalein_allowed = (
         ENABLE_CQE_REAL_SCALEINS
         and not is_shadow_trade
         and not adaptive_dead_market_shadow_only
         and coin_allows_live_upgrade
+        and coin_form_allows_scalein
         and row_allows_scalein
         and confirmation_allows_scalein
     )
@@ -4566,6 +4870,8 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
         scalein_block_reason = "real_scaleins_toggle_off"
     elif not coin_allows_live_upgrade:
         scalein_block_reason = f"coin_profile_{coin_profile_for_scalein.get('tier')}_{coin_profile_for_scalein.get('coin_health_mode')}_no_live_upgrade"
+    elif not coin_form_allows_scalein:
+        scalein_block_reason = f"coin_form_{coin_form_for_scalein.get('coin_form_mode')}_{coin_form_for_scalein.get('coin_form_reason')}"
     elif is_shadow_trade:
         scalein_block_reason = "shadow_trade_no_live_scalein"
     elif not row_allows_scalein:
@@ -4981,7 +5287,7 @@ def process_bpt_cqe_lifecycle_trades(cur, symbol, price, momentum, trend, now):
             )
 
             send_telegram_alert(
-                f"{'👻 GHOST EXIT' if is_shadow else '💰 LIVE EXIT'}\n🧪 <b>BPT_CQE_LIFECYCLE_V1</b> | {sym}\n"
+                f"{trade_close_title(is_shadow, 'BPT TRADE CLOSED')}\n{trade_mode_line(is_shadow)}\n🧪 <b>BPT_CQE_LIFECYCLE_V1</b> | {sym}\n"
                 f"Row: {lifecycle_row} | " + format_trade_pnl_lines(pnl_percent, pnl_gbp, 0) + "\n"
                 + f"Peak {fmt_num(current_peak)}% | DD {fmt_num(drawdown_from_peak)}%\n"
                 f"Size model {fmt_money(dynamic_size)} | Reason {close_reason}\n"
@@ -5306,7 +5612,8 @@ def process_persistence_hunter_trades(cur, symbol, price, momentum, trend, now):
             if not is_shadow and has_successful_okx_live_entry(cur, tid):
                 okx_place_market_order(cur, tid, sym, direction, "exit", price=price, entry_price=entry_price, trade_size_quote=float(dynamic_size or PH_SHADOW_SIZE_GBP))
             send_telegram_alert(
-                f"💰 <b>PH CLOSED</b> | {sym}\n"
+                f"{trade_close_title(is_shadow, 'PH TRADE CLOSED')} | {sym}\n"
+                f"{trade_mode_line(is_shadow)}\n"
                 f"PnL <b>{fmt_num(pnl_percent)}%</b> | {fmt_money(pnl_gbp)} | Peak {fmt_num(current_peak)}%\n"
                 f"DD {fmt_num(drawdown)}% | Reason {close_reason}\nID {tid}"
             )
@@ -6795,6 +7102,7 @@ def open_trade(cur, symbol, direction, price, momentum, trend, quality,
         entry_optional_telemetry.update(lifecycle_trade_telemetry_from_context(leadership_context))
         entry_optional_telemetry.update(market_context_trade_telemetry(leadership_context))
         entry_optional_telemetry.update(coin_health_trade_telemetry((leadership_context or {}).get("coin_health_snapshot") or {"coin_health_mode": "LIVE", "coin_health_reason": "live_entry"}))
+        entry_optional_telemetry.update(coin_form_trade_telemetry((leadership_context or {}).get("coin_form_snapshot") or {}))
         safe_update_trade_telemetry(cur, trade_id, entry_optional_telemetry)
         cur.connection.commit()
     except Exception as e:
@@ -6895,6 +7203,7 @@ def open_shadow_market_os_trade(cur, symbol, direction, price, momentum, trend, 
         **lifecycle_trade_telemetry_from_context(leadership_context),
         **market_context_trade_telemetry(leadership_context),
         **coin_health_trade_telemetry((leadership_context or {}).get("coin_health_snapshot") or {}),
+        **coin_form_trade_telemetry((leadership_context or {}).get("coin_form_snapshot") or {}),
     })
 
     try:
@@ -6907,6 +7216,7 @@ def open_shadow_market_os_trade(cur, symbol, direction, price, momentum, trend, 
         f"🧪 <b>SHADOW ENTRY</b>\n"
         f"{engine_emoji(quality)} <b>{engine_display_name(quality)}</b> | {symbol} LONG\n"
         f"Model size {fmt_money(model_size_gbp)} | Reason: {shadow_reason}\n"
+        f"Coin Form: {coin_form_label((leadership_context or {}).get('coin_form_snapshot') or {})}\n"
         f"Entry {price} | T/M {fmt_num(trend)} / {fmt_num(momentum)}\n"
         f"Context {fmt_num((leadership_context or {}).get('market_median_peak_context'), 3)} | "
         f"Score {fmt_num((leadership_context or {}).get('prior_avg_peak'))}\n"
@@ -7328,6 +7638,7 @@ def webhook():
         ensure_signal_leadership_scores_table(cur)
         ensure_market_heat_columns(cur)
         ensure_coin_scores_v84_columns(cur)
+        ensure_archetype_state_columns(cur)
         if ENABLE_BPT_CQE_LIFECYCLE_SHADOW:
             ensure_bpt_cqe_lifecycle_columns(cur)
         if ENABLE_ARCHETYPE_STATE_ENGINE:
@@ -7695,6 +8006,47 @@ def webhook():
                 block_reason = "control_panel_entries_disabled"
 
             if entry_allowed:
+                # ================= COIN FORM LIVE SELECTION GATE v9.0 =================
+                # Coin Form has veto power over fresh live capital.
+                # HOT / GOOD are allowed; NORMAL / THROTTLE / SHADOW are blocked.
+                coin_form_snapshot = get_coin_form_snapshot(cur, symbol) if ENABLE_COIN_FORM_ENGINE else {
+                    "coin_form_mode": "GOOD",
+                    "coin_form_score": None,
+                    "coin_form_reason": "coin_form_disabled",
+                }
+                leadership_context = leadership_context or {}
+                leadership_context["coin_form_snapshot"] = coin_form_snapshot
+
+                if ENABLE_COIN_FORM_ENGINE and not coin_form_allows_live_entry(coin_form_snapshot):
+                    entry_allowed = False
+                    block_reason = f"coin_form_{coin_form_snapshot.get('coin_form_mode')}_{coin_form_snapshot.get('coin_form_reason')}"
+                    print(
+                        f"🔥 COIN FORM BLOCK | {symbol} | "
+                        f"mode={coin_form_snapshot.get('coin_form_mode')} | "
+                        f"score={coin_form_snapshot.get('coin_form_score')} | "
+                        f"3h={coin_form_snapshot.get('form_peak_3h')} "
+                        f"6h={coin_form_snapshot.get('form_peak_6h')} "
+                        f"12h={coin_form_snapshot.get('form_peak_12h')} | "
+                        f"reason={coin_form_snapshot.get('coin_form_reason')}",
+                        flush=True
+                    )
+                    if ENABLE_COIN_FORM_TELEGRAM:
+                        try:
+                            send_telegram_alert(
+                                f"🔥 <b>COIN FORM LIVE ENTRY BLOCKED</b> | {symbol}\n"
+                                f"Coin Form: {coin_form_label(coin_form_snapshot)}\n"
+                                f"Allowed live modes: {', '.join(sorted(COIN_FORM_ALLOWED_LIVE_MODES))}\n"
+                                f"3h/6h/12h peaks: {fmt_num(coin_form_snapshot.get('form_peak_3h'))} / "
+                                f"{fmt_num(coin_form_snapshot.get('form_peak_6h'))} / "
+                                f"{fmt_num(coin_form_snapshot.get('form_peak_12h'))}\n"
+                                f"Signals 3h/6h/12h: {coin_form_snapshot.get('form_signals_3h')} / "
+                                f"{coin_form_snapshot.get('form_signals_6h')} / "
+                                f"{coin_form_snapshot.get('form_signals_12h')}\n"
+                                "Fresh real capital blocked. No exit/sizing logic changed."
+                            )
+                        except Exception as e:
+                            print(f"⚠️ coin form block telegram failed: {e}", flush=True)
+
                 # ================= COIN HEALTH SELF-HEALING GATE v7.6 =================
                 # If a symbol has stopped producing expansion, do not risk capital.
                 # Open a same-setup shadow observation instead so the coin can prove recovery.
@@ -7785,6 +8137,7 @@ def webhook():
                         f"{engine_emoji(entry_quality)} <b>{engine_display_name(entry_quality)}</b> | {symbol} LONG\n"
                         f"Model size {fmt_money(entry_trade_size)} | OKX {fmt_money(entry_quote_size)}\n"
                         f"Entry {price} | T/M {fmt_num(trend)} / {fmt_num(momentum)}\n"
+                        f"Coin Form: {coin_form_label(leadership_context.get('coin_form_snapshot') or {})}\n"
                         f"{'🦄 Unicorn override: ' + str(leadership_context.get('unicorn_override_reason')) + ' | P ' + str(leadership_context.get('unicorn_pressure_score')) + chr(10) if leadership_context.get('unicorn_override_triggered') else ''}"
                         f"Phase: {short_phase(leadership_context.get('lifecycle_phase') or leadership_context.get('leadership_phase'))} "
                         f"({leadership_context.get('leadership_transition') or 'n/a'})\n"
@@ -8202,7 +8555,8 @@ def webhook():
                     latest_signal_state = get_latest_signal_state(cur, sym)
 
                     send_telegram_alert(
-                        f"🔴 <b>LIVE EXIT</b>\n"
+                        f"{trade_close_title(False)}\n"
+                        f"{trade_mode_line(False)}\n"
                         f"{engine_emoji(entry_quality)} <b>{engine_display_name(entry_quality)}</b> | {sym} LONG\n"
                         f"{format_trade_pnl_lines(pnl_percent, pnl_gbp, 0)} | Peak {fmt_num(current_peak)}%\n"
                         f"DD {fmt_num(drawdown_from_peak)}% | Reason: {close_reason}\n"
@@ -8319,6 +8673,7 @@ def build_telegram_health_message(cur):
         f"Archetype engine: {ENABLE_ARCHETYPE_STATE_ENGINE} | adaptive BPT max hold {ENABLE_ADAPTIVE_BPT_MAX_HOLD} | tg dedupe {ENABLE_TELEGRAM_DEDUPE}\n"
         f"Market OS v6.6: {ENABLE_MARKET_OS_V66} | partial bank {ENABLE_PARTIAL_PROFIT_BANK_V66} @ {PARTIAL_BANK_TRIGGER_PCT}% x {int(PARTIAL_BANK_FRACTION*100)}% | rot live {ENABLE_ROT_MICRO_LIVE} shadow {ENABLE_ROT_MICRO_SHADOW} ctx>={ROT_MICRO_MIN_CONTEXT}\n"
         f"Leadership scaling: {ENABLE_LEADERSHIP_SIZE_SCALING_V66} | >= {LEADERSHIP_SCALE_THRESHOLD} → {fmt_money(LEADERSHIP_SCALED_TRADE_SIZE_GBP)} | core live {ENABLE_LEADERSHIP_CORE_LIVE} shadow {ENABLE_LEADERSHIP_CORE_SHADOW}\n"
+        f"Coin Form: {ENABLE_COIN_FORM_ENGINE} | live filter {ENABLE_COIN_FORM_LIVE_ENTRY_FILTER} | allowed {','.join(sorted(COIN_FORM_ALLOWED_LIVE_MODES))} | min6h {COIN_FORM_MIN_SIGNALS_6H}\n"
         f"Trend persistence exit: {ENABLE_TREND_PERSISTENCE_EXIT} | {TREND_PERSISTENCE_CHECK_MINUTES}m trend < {TREND_PERSISTENCE_MIN_TREND}"
     )
 
@@ -8734,8 +9089,10 @@ def build_telegram_regime_message(cur, hours=3):
 
 def build_telegram_coins_message(cur):
     try:
+        ensure_coin_scores_v84_columns(cur)
         cur.execute("""
-            SELECT symbol, tier, coin_health_mode, promotion_score, demotion_score
+            SELECT symbol, tier, coin_health_mode, promotion_score, demotion_score,
+                   coin_form_mode, coin_form_score
             FROM coin_scores
             ORDER BY
                 CASE tier
@@ -8751,7 +9108,7 @@ def build_telegram_coins_message(cur):
 
         groups = {"A":[],"B":[],"C":[],"D":[],"DISCOVERY":[]}
 
-        for symbol,tier,mode,promo,demo in rows:
+        for symbol,tier,mode,promo,demo,form_mode,form_score in rows:
             move = ""
             if (promo or 0) >= 5:
                 move = " ⬆️"
@@ -8759,7 +9116,8 @@ def build_telegram_coins_message(cur):
                 move = " ⬇️"
 
             status = "🟢" if mode == "LIVE" else ("🔴" if mode == "DISABLED" else "🟡")
-            groups.setdefault(tier, []).append(f"{status} {symbol}{move}")
+            form_txt = f" | {coin_form_emoji(form_mode)} {form_mode or '?'} {fmt_num(form_score)}" if form_mode or form_score is not None else ""
+            groups.setdefault(tier, []).append(f"{status} {symbol}{move}{form_txt}")
 
         msg = "🪙 <b>Coin Universe</b>\n\n"
         msg += "🏆 <b>A Tier LIVE</b>\n" + ("\n".join(groups["A"]) or "None") + "\n\n"
