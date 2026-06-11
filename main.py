@@ -1,7 +1,7 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v9.4
+# VERSION: v9.5
 # TITLE: CONFIRMED GHOST PROBES ENTER LIVE
 # =========================
 
@@ -824,6 +824,7 @@ GHOST_PROBE_LABEL = "GHOST_PROBE_NO_CAPITAL"
 # v9.3: keep raw probes ghost, but allow confirmed HOT/GOOD ghost probes to enter live capital.
 ENABLE_BPT_CQE_CONFIRMED_GHOST_LIVE_ENTRY = os.environ.get("ENABLE_BPT_CQE_CONFIRMED_GHOST_LIVE_ENTRY", "true").lower() == "true"
 ENABLE_NEUTRAL_MARKET_SHADOW_FILTER = os.environ.get("ENABLE_NEUTRAL_MARKET_SHADOW_FILTER", "true").lower() == "true"
+ENABLE_ADAPTIVE_DEAD_MARKET_CONFIRMED_LIVE_UPGRADES = os.environ.get("ENABLE_ADAPTIVE_DEAD_MARKET_CONFIRMED_LIVE_UPGRADES", "true").lower() == "true"
 
 
 # v6.6.19/v6.6.20: real capital only added AFTER CQE confirmation.
@@ -4943,7 +4944,15 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
         market_os_engine == "ADAPTIVE_DEAD_MARKET_LEADER"
         and not ENABLE_ADAPTIVE_DEAD_MARKET_LIVE_UPGRADES
     )
-    ghost_probe_active = (probe_size_gbp == 0.0 and size_scaling_reason == GHOST_PROBE_LABEL)
+    
+if (
+    adaptive_dead_market_shadow_only
+    and ENABLE_ADAPTIVE_DEAD_MARKET_CONFIRMED_LIVE_UPGRADES
+    and cqe_confirmed
+):
+    adaptive_dead_market_shadow_only = False
+
+ghost_probe_active = (probe_size_gbp == 0.0 and size_scaling_reason == GHOST_PROBE_LABEL)
     current_trade_size_usdt = float(row[4] or 0) if row else 0.0
 
     # v6.6.20:
