@@ -4945,14 +4945,14 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
         and not ENABLE_ADAPTIVE_DEAD_MARKET_LIVE_UPGRADES
     )
     
-if (
-    adaptive_dead_market_shadow_only
-    and ENABLE_ADAPTIVE_DEAD_MARKET_CONFIRMED_LIVE_UPGRADES
-    and cqe_confirmed
-):
-    adaptive_dead_market_shadow_only = False
+    if (
+        adaptive_dead_market_shadow_only
+        and ENABLE_ADAPTIVE_DEAD_MARKET_CONFIRMED_LIVE_UPGRADES
+        and cqe_confirmed
+    ):
+        adaptive_dead_market_shadow_only = False
 
-ghost_probe_active = (probe_size_gbp == 0.0 and size_scaling_reason == GHOST_PROBE_LABEL)
+    ghost_probe_active = (probe_size_gbp == 0.0 and size_scaling_reason == GHOST_PROBE_LABEL)
     current_trade_size_usdt = float(row[4] or 0) if row else 0.0
 
     # v6.6.20:
