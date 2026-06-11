@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v9.3
+# VERSION: v9.4
 # TITLE: CONFIRMED GHOST PROBES ENTER LIVE
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v9.3 CONFIRMED LIVE ENTRY FIX RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v9.3 NEUTRAL MARKET SHADOW FILTER RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -763,7 +763,7 @@ QUIET_CONTINUATION_MAX_DELTA_30M = float(os.environ.get("QUIET_CONTINUATION_MAX_
 ENABLE_SHADOW_CQE = os.environ.get("ENABLE_SHADOW_CQE", "true").lower() == "true"
 ENABLE_SHADOW_CQE_TELEGRAM_ALERTS = os.environ.get(
     "ENABLE_SHADOW_CQE_TELEGRAM_ALERTS",
-    "true"
+    "false"
 ).lower() == "true"
 CQE_MIN_QUALITY_SCORE = int(os.environ.get("CQE_MIN_QUALITY_SCORE", "8") or 8)
 CQE_SHADOW_HOLD_MINUTES = float(os.environ.get("CQE_SHADOW_HOLD_MINUTES", "120") or 120)
@@ -823,6 +823,7 @@ ENABLE_BPT_CQE_GHOST_PROBES = os.environ.get(
 GHOST_PROBE_LABEL = "GHOST_PROBE_NO_CAPITAL"
 # v9.3: keep raw probes ghost, but allow confirmed HOT/GOOD ghost probes to enter live capital.
 ENABLE_BPT_CQE_CONFIRMED_GHOST_LIVE_ENTRY = os.environ.get("ENABLE_BPT_CQE_CONFIRMED_GHOST_LIVE_ENTRY", "true").lower() == "true"
+ENABLE_NEUTRAL_MARKET_SHADOW_FILTER = os.environ.get("ENABLE_NEUTRAL_MARKET_SHADOW_FILTER", "true").lower() == "true"
 
 
 # v6.6.19/v6.6.20: real capital only added AFTER CQE confirmation.
@@ -4995,6 +4996,7 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
         and coin_allows_live_upgrade_or_form_override
         and row_allows_scalein
         and confirmation_allows_scalein
+        and (not ENABLE_NEUTRAL_MARKET_SHADOW_FILTER or str(market_heat_regime).upper() != "NEUTRAL")
     )
 
     scalein_allowed = (
