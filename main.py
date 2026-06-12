@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v9.5
-# TITLE: CONFIRMED GHOST PROBES ENTER LIVE
+# VERSION: v9.6
+# TITLE: TELEGRAM OPS CLEANUP + LIVE DAILY + MIN ORDER GUARD
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v9.3 NEUTRAL MARKET SHADOW FILTER RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v9.6 TELEGRAM OPS CLEANUP RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -393,7 +393,17 @@ MAX_OPEN_SHADOW_TRADES = int(os.environ.get("MAX_OPEN_SHADOW_TRADES", "30") or 3
 
 
 
-DATA_VERSION = "v9.3_CONFIRMED_LIVE_ENTRY_FIX"
+
+# =========================
+# 📲 v9.6 TELEGRAM OPERATIONS MODE
+# =========================
+# Telegram is now treated as a real-money operations dashboard.
+# Shadow/research trades continue to be stored in Supabase, but are hidden from normal alerts.
+TELEGRAM_OPERATIONS_ONLY = os.environ.get("TELEGRAM_OPERATIONS_ONLY", "true").lower() == "true"
+TELEGRAM_SHOW_SHADOW_TRADES = os.environ.get("TELEGRAM_SHOW_SHADOW_TRADES", "false").lower() == "true"
+TELEGRAM_STARTING_ACCOUNT_GBP = float(os.environ.get("TELEGRAM_STARTING_ACCOUNT_GBP", "200"))
+
+DATA_VERSION = "v9.6"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -2427,7 +2437,8 @@ def live_shadow_label(is_shadow=False):
 
 
 def trade_close_title(is_shadow=False, closed_word="TRADE CLOSED"):
-    return f"👻 SHADOW {closed_word}" if bool(is_shadow) else f"🟢 LIVE {closed_word}"
+    # v9.6: real-money exits are labelled as LIVE EXIT for easy OKX reconciliation.
+    return f"👻 SHADOW {closed_word}" if bool(is_shadow) else "🟢 <b>LIVE EXIT</b>"
 
 
 def trade_mode_line(is_shadow=False):
@@ -2488,7 +2499,57 @@ def telegram_send_message(chat_id, message):
         print(f"⚠️ TELEGRAM SEND ERROR | {e}", flush=True)
         return False
 
+def is_operational_telegram_message(message):
+    """v9.6: keep Telegram clean for real-money operations.
+
+    Allowed automatic alerts:
+    - LIVE ENTRY
+    - LIVE UPGRADE / LIVE ENTRY AFTER CONFIRMATION
+    - LIVE EXIT / LIVE TRADE CLOSED variants
+    - LIVE ORDER FAILED / OKX API ERROR / critical live execution failures
+    - LIVE DAILY
+    Shadow/research noise is hidden unless TELEGRAM_SHOW_SHADOW_TRADES=True.
+    """
+    msg = str(message or "")
+
+    if TELEGRAM_SHOW_SHADOW_TRADES:
+        return True
+
+    shadow_markers = [
+        "👻", "SHADOW", "PAPER", "GHOST PROBE", "SHADOW ENTRY",
+        "SHADOW CONFIRMATION", "COIN HEALTH SHADOW", "PERSISTENCE HUNTER",
+        "CQE PEAK", "CQE RUNNER", "FORM LIVE ENTRY BLOCKED", "ORDER SKIPPED",
+    ]
+    if any(marker in msg for marker in shadow_markers):
+        return False
+
+    allowed_markers = [
+        "🟢 <b>LIVE ENTRY</b>",
+        "🟢 <b>LIVE UPGRADE</b>",
+        "🟢 LIVE UPGRADE",
+        "🚀 LIVE UPGRADE",
+        "🟢 LIVE ENTRY AFTER CONFIRMATION",
+        "🟢 <b>LIVE EXIT</b>",
+        "🟢 LIVE TRADE CLOSED",
+        "🟢 LIVE BPT TRADE CLOSED",
+        "🟢 LIVE PH TRADE CLOSED",
+        "❌ <b>LIVE ORDER FAILED</b>",
+        "❌ <b>OKX LIVE ORDER FAILED</b>",
+        "🚨 <b>OKX API ERROR</b>",
+        "🚨 <b>ENTRY FAILED AFTER DB CREATE</b>",
+        "🚨 <b>REAL EXIT ENGINE FAILURE</b>",
+        "🟢 <b>LIVE DAILY</b>",
+        "📲 <b>Telegram test successful</b>",
+        "🚨 <b>OKX TRADABILITY CACHE EMPTY</b>",
+    ]
+    return any(marker in msg for marker in allowed_markers)
+
+
 def send_telegram_alert(message):
+    if TELEGRAM_OPERATIONS_ONLY and not is_operational_telegram_message(message):
+        preview = str(message or "").replace("\n", " ")[:160]
+        print(f"🔕 TELEGRAM OPS FILTER SKIP | {preview}", flush=True)
+        return False
     return telegram_send_message(TELEGRAM_CHAT_ID, message)
 
 
@@ -3212,6 +3273,26 @@ def is_okx_symbol_live_tradable(symbol):
 
     return False, "not_in_account_tradable_spot_instruments"
 
+
+# =========================
+# STARTUP SCHEMA GUARD
+# =========================
+SCHEMA_CHECKS_DONE = False
+
+def ensure_schema_once(cur):
+    global SCHEMA_CHECKS_DONE
+    if SCHEMA_CHECKS_DONE:
+        return
+    if ENABLE_ORDER_LOGGING:
+        ensure_okx_order_log_table(cur)
+    ensure_signal_leadership_scores_table(cur)
+    ensure_market_heat_columns(cur)
+    ensure_coin_scores_v84_columns(cur)
+    ensure_archetype_state_columns(cur)
+    if ENABLE_BPT_CQE_LIFECYCLE_SHADOW:
+        ensure_bpt_cqe_lifecycle_columns(cur)
+    SCHEMA_CHECKS_DONE = True
+
 def log_okx_order(cur, trade_id, symbol, okx_inst_id, action, side, direction,
                   dry_run, request_payload, response_payload=None,
                   success=True, error_message=None):
@@ -3627,6 +3708,55 @@ def okx_place_market_order(cur, trade_id, symbol, direction, action, price=None,
             reference_price = entry_price or price or 0
             sell_size = calculate_exit_base_size(reference_price, quote_size)
 
+        # v9.6: OKX minimum-order/dust guard for exits.
+        # If a residual live balance is below OKX minimum order notional, do not spam failed sell orders.
+        if action == "exit" and live_exit_allowed_by_control_panel():
+            try:
+                min_result = okx_min_entry_quote_required(okx_inst_id, fallback_price=reference_price)
+                min_required_quote = float(min_result.get("required_quote") or 0)
+                sell_notional_quote = float(sell_size or 0) * float(reference_price or 0)
+                if min_result.get("success") and min_required_quote > 0 and sell_notional_quote < min_required_quote:
+                    request_payload = {
+                        "skipped": True,
+                        "reason": "exit_value_below_okx_min_order_size",
+                        "symbol": symbol,
+                        "okx_inst_id": okx_inst_id,
+                        "base_ccy": base_ccy,
+                        "available_balance": available_balance if 'available_balance' in locals() else None,
+                        "sell_size": sell_size,
+                        "reference_price": reference_price,
+                        "sell_notional_quote": sell_notional_quote,
+                        "okx_min_required_quote": min_required_quote,
+                        "action": action,
+                        "min_order": min_result,
+                    }
+                    response_payload = {
+                        "skipped": True,
+                        "message": "OKX exit skipped because remaining position is below minimum order size.",
+                        "sell_notional_quote": sell_notional_quote,
+                        "okx_min_required_quote": min_required_quote,
+                    }
+                    log_okx_order(
+                        cur, trade_id, symbol, okx_inst_id, action, side, direction,
+                        False, request_payload, response_payload, True,
+                        "okx_exit_skipped_below_min_order_size"
+                    )
+                    print(
+                        f"🧹 OKX EXIT DUST SKIPPED | {symbol}->{okx_inst_id} | "
+                        f"notional={sell_notional_quote} < min={min_required_quote}",
+                        flush=True
+                    )
+                    return {
+                        "success": True,
+                        "dry_run": False,
+                        "skipped": True,
+                        "reason": "exit_value_below_okx_min_order_size",
+                        "sell_notional_quote": sell_notional_quote,
+                        "okx_min_required_quote": min_required_quote,
+                    }
+            except Exception as e:
+                print(f"⚠️ OKX exit min-order guard failed open | {symbol}->{okx_inst_id} | {e}", flush=True)
+
         payload = {
             "instId": okx_inst_id,
             "tdMode": OKX_TD_MODE,
@@ -3744,15 +3874,15 @@ def okx_place_market_order(cur, trade_id, symbol, direction, action, price=None,
             print(f"✅ OKX LIVE ORDER SENT | {action.upper()} | {symbol}->{okx_inst_id} | size={payload.get('sz')}", flush=True)
             if ENABLE_OKX_SUCCESS_TELEGRAM:
                 send_telegram_alert(
-                    f"✅ <b>OKX LIVE ORDER SENT</b>\n"
-                    f"{action.upper()} | {symbol} → {okx_inst_id}\n"
+                    f"🟢 <b>LIVE {action.upper()}</b>\n"
+                    f"{symbol} → {okx_inst_id}\n"
                     f"Side: {side}\n"
                     f"Size: {payload.get('sz')}"
                 )
         else:
             print(f"❌ OKX LIVE ORDER FAILED | {action.upper()} | {symbol}->{okx_inst_id} | {response_payload}", flush=True)
             send_telegram_alert(
-                f"❌ <b>OKX LIVE ORDER FAILED</b>\n"
+                f"❌ <b>LIVE ORDER FAILED</b>\n"
                 f"{action.upper()} | {symbol} → {okx_inst_id}\n"
                 f"Response: {response_payload}"
             )
@@ -3773,7 +3903,7 @@ def okx_place_market_order(cur, trade_id, symbol, direction, action, price=None,
             False, payload, None, False, error_message
         )
         send_telegram_alert(
-            f"🚨 <b>OKX API ERROR</b>\n"
+            f"❌ <b>LIVE ORDER FAILED</b>\n"
             f"{action.upper()} | {symbol} → {okx_inst_id}\n"
             f"Error: {error_message[:300]}"
         )
@@ -7801,17 +7931,7 @@ def webhook():
         conn = get_db()
         cur = conn.cursor()
 
-        if ENABLE_ORDER_LOGGING:
-            ensure_okx_order_log_table(cur)
-
-        ensure_signal_leadership_scores_table(cur)
-        ensure_market_heat_columns(cur)
-        ensure_coin_scores_v84_columns(cur)
-        ensure_archetype_state_columns(cur)
-        if ENABLE_BPT_CQE_LIFECYCLE_SHADOW:
-            ensure_bpt_cqe_lifecycle_columns(cur)
-        if ENABLE_ARCHETYPE_STATE_ENGINE:
-            ensure_archetype_state_columns(cur)
+        ensure_schema_once(cur)
         sweep_stale_shadow_trades(cur)
 
         # ================= RAW SIGNAL — ALWAYS STORE =================
@@ -8863,7 +8983,124 @@ def build_telegram_health_message(cur):
         f"Trend persistence exit: {ENABLE_TREND_PERSISTENCE_EXIT} | {TREND_PERSISTENCE_CHECK_MINUTES}m trend < {TREND_PERSISTENCE_MIN_TREND}"
     )
 
+
 def build_telegram_summary_message(cur, hours=24):
+    """v9.6 /daily: LIVE capital only.
+
+    Purpose:
+    Make Telegram reconcile cleanly against OKX by excluding all shadow/paper trades
+    from the operational PnL report.
+    """
+    cur.execute("""
+        WITH live_closed AS (
+            SELECT
+                id,
+                symbol,
+                direction,
+                entry_quality,
+                COALESCE(pnl_percent, 0) AS pnl_percent,
+                COALESCE(pnl_gbp, 0) AS pnl_gbp,
+                COALESCE(fee_gbp, 0) AS fee_gbp,
+                COALESCE(peak_pnl_percent, 0) AS peak_pnl_percent,
+                close_reason,
+                closed_at
+            FROM bot_trades_v4
+            WHERE closed_at >= NOW() - (%s || ' hours')::INTERVAL
+              AND status = 'CLOSED'
+              AND COALESCE(is_shadow, FALSE) = FALSE
+        )
+        SELECT
+            COUNT(*) AS trades,
+            COUNT(*) FILTER (WHERE pnl_percent > 0) AS wins,
+            COUNT(*) FILTER (WHERE pnl_percent <= 0) AS losses,
+            COALESCE(ROUND(SUM(pnl_gbp - fee_gbp)::numeric, 3), 0) AS net_pnl_gbp,
+            COALESCE(ROUND(SUM(pnl_gbp)::numeric, 3), 0) AS gross_pnl_gbp,
+            COALESCE(ROUND(SUM(fee_gbp)::numeric, 3), 0) AS fees_gbp,
+            COALESCE(ROUND(AVG(pnl_percent)::numeric, 3), 0) AS avg_pnl_pct,
+            COALESCE(ROUND(AVG(peak_pnl_percent)::numeric, 3), 0) AS avg_peak_pct
+        FROM live_closed
+    """, (hours,))
+    row = cur.fetchone() or (0, 0, 0, 0, 0, 0, 0, 0)
+    trades, wins, losses, net_pnl, gross_pnl, fees_gbp, avg_pnl, avg_peak = row
+    trades = int(trades or 0)
+    wins = int(wins or 0)
+    losses = int(losses or 0)
+    win_rate = (wins / trades * 100) if trades else 0.0
+    net_pnl = float(net_pnl or 0)
+    expected_account = float(TELEGRAM_STARTING_ACCOUNT_GBP) + net_pnl
+
+    cur.execute("""
+        WITH latest_price AS (
+            SELECT DISTINCT ON (symbol)
+                symbol,
+                price,
+                timestamp AS latest_signal_time
+            FROM signals_raw
+            WHERE timestamp >= NOW() - INTERVAL '12 hours'
+            ORDER BY symbol, timestamp DESC
+        )
+        SELECT
+            b.symbol,
+            b.entry_price,
+            b.opened_at,
+            COALESCE(b.peak_pnl_percent, 0) AS peak_pnl_percent,
+            COALESCE(b.dynamic_trade_size_gbp, b.trade_size_gbp, 0) AS size_gbp,
+            b.entry_quality,
+            lp.price AS current_price
+        FROM bot_trades_v4 b
+        LEFT JOIN latest_price lp ON lp.symbol = b.symbol
+        WHERE b.status = 'OPEN'
+          AND COALESCE(b.is_shadow, FALSE) = FALSE
+        ORDER BY b.opened_at
+        LIMIT 10
+    """)
+    open_rows = cur.fetchall()
+    open_count = len(open_rows)
+
+    lines = []
+    lines.append(f"🟢 <b>LIVE DAILY</b>")
+    lines.append(f"Version: <b>{DATA_VERSION}</b>")
+    lines.append(f"Window: <b>{hours}h</b>")
+    lines.append("")
+    lines.append(f"Trades: <b>{trades}</b>")
+    lines.append(f"Wins: <b>{wins}</b>")
+    lines.append(f"Losses: <b>{losses}</b>")
+    lines.append(f"Win Rate: <b>{fmt_num(win_rate,1)}%</b>")
+    lines.append("")
+    lines.append("PnL:")
+    if float(fees_gbp or 0):
+        lines.append(f"<b>{fmt_money(net_pnl)}</b> net")
+        lines.append(f"Gross {fmt_money(gross_pnl)} | Fees {fmt_money(fees_gbp)}")
+    else:
+        lines.append(f"<b>{fmt_money(net_pnl)}</b>")
+    lines.append(f"Avg trade {fmt_num(avg_pnl)}% | Avg peak {fmt_num(avg_peak)}%")
+    lines.append("")
+    lines.append(f"Open Trades: <b>{open_count}</b>")
+
+    if open_rows:
+        lines.append("")
+        lines.append("<b>Open Positions:</b>")
+        for symbol, entry_price, opened_at, peak, size_gbp, quality, current_price in open_rows:
+            if current_price and entry_price:
+                current_pnl = ((float(current_price) - float(entry_price)) / float(entry_price)) * 100
+                pnl_text = f"{fmt_num(current_pnl)}%"
+            else:
+                pnl_text = "price n/a"
+            lines.append(
+                f"• <b>{symbol}</b> {pnl_text} | Peak {fmt_num(peak)}% | Size {fmt_money(size_gbp)}"
+            )
+
+    lines.append("")
+    lines.append("Expected Account:")
+    lines.append(f"<b>≈ {fmt_money(expected_account)}</b>")
+    lines.append(f"Start Balance: {fmt_money(TELEGRAM_STARTING_ACCOUNT_GBP)}")
+    lines.append("")
+    lines.append("Shadow trades excluded from this report. Use /daily_shadow for research.")
+
+    return "\n".join(lines)
+
+
+def build_telegram_shadow_summary_message(cur, hours=24):
     """Clean Telegram /daily summary.
     v6.7 separates LIVE and SHADOW engines and prioritises fee-adjusted Net PnL.
     Net uses recorded fee_gbp only; if fees are not populated, net equals pnl_gbp.
@@ -9401,6 +9638,9 @@ def handle_telegram_command(text):
         if cmd in ["/status", "/daily", "/summary", "/pnl"]:
             return build_telegram_summary_message(cur, 24)
 
+        if cmd in ["/daily_shadow", "/shadow_daily", "/research_daily"]:
+            return build_telegram_shadow_summary_message(cur, 24)
+
         if cmd in ["/open", "/trades", "/positions", "/pos"]:
             return build_telegram_open_trades_message(cur)
 
@@ -9448,6 +9688,7 @@ def handle_telegram_command(text):
                 "/leaders - current leadership leaderboard\n"
                 "/status - rolling 24h PnL summary\n"
                 "/telemetry - Telemetry V1 summary\n"
+                "/daily_shadow - research/shadow 24h summary\n"
                 "/shadows - CQE shadow watch\n"
                 "/hunter - Persistence Hunter shadow report\n"
                 "/lifecycle - leadership lifecycle dashboard\n"
