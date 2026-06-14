@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v9.6
-# TITLE: TELEGRAM OPS CLEANUP + LIVE DAILY + MIN ORDER GUARD
+# VERSION: v9.7
+# TITLE: NO RUNTIME DDL + ACCOUNTING AUDIT FIX + LIVE PNL TRUST PASS
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v9.6 TELEGRAM OPS CLEANUP RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v9.7 NO RUNTIME DDL + ACCOUNTING FIX RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -403,7 +403,9 @@ TELEGRAM_OPERATIONS_ONLY = os.environ.get("TELEGRAM_OPERATIONS_ONLY", "true").lo
 TELEGRAM_SHOW_SHADOW_TRADES = os.environ.get("TELEGRAM_SHOW_SHADOW_TRADES", "false").lower() == "true"
 TELEGRAM_STARTING_ACCOUNT_GBP = float(os.environ.get("TELEGRAM_STARTING_ACCOUNT_GBP", "200"))
 
-DATA_VERSION = "v9.6"
+RUNTIME_DDL_ENABLED = os.environ.get("RUNTIME_DDL_ENABLED", "false").lower() == "true"
+
+DATA_VERSION = "v9.7"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -1143,16 +1145,26 @@ BPT_UPGRADED_GIVEBACK_GUARD_MIN_KEEP = float(os.environ.get("BPT_UPGRADED_GIVEBA
 def get_db():
     return psycopg2.connect(DATABASE_URL)
 
+COLUMN_EXISTS_CACHE = {}
+
 def column_exists(cur, table_name, column_name):
+    # v9.7: cache schema lookups per worker. This removes hundreds/thousands
+    # of repeated information_schema reads during busy webhook bursts.
+    key = (str(table_name), str(column_name))
+    if key in COLUMN_EXISTS_CACHE:
+        return COLUMN_EXISTS_CACHE[key]
     cur.execute("""
         SELECT EXISTS (
             SELECT 1
             FROM information_schema.columns
-            WHERE table_name = %s
+            WHERE table_schema = 'public'
+              AND table_name = %s
               AND column_name = %s
         )
     """, (table_name, column_name))
-    return cur.fetchone()[0]
+    exists = bool(cur.fetchone()[0])
+    COLUMN_EXISTS_CACHE[key] = exists
+    return exists
 
 def safe_update_trade_telemetry(cur, tid, telemetry):
     allowed = {}
@@ -1219,6 +1231,9 @@ def classify_market_heat(avg_trend):
     return "DEAD", 0
 
 def ensure_market_heat_columns(cur):
+    if not RUNTIME_DDL_ENABLED:
+        return
+
     try:
         cur.execute("""
             ALTER TABLE bot_trades_v4
@@ -1330,6 +1345,9 @@ def get_initial_coin_profile(symbol):
 
 
 def ensure_coin_scores_v84_columns(cur):
+    if not RUNTIME_DDL_ENABLED:
+        return
+
     try:
         cur.execute("""
             ALTER TABLE coin_scores
@@ -1919,6 +1937,9 @@ def get_market_lifecycle_context(cur, leadership_context=None, signal_time=None)
 
 
 def ensure_market_lifecycle_alert_state_table(cur):
+    if not RUNTIME_DDL_ENABLED:
+        return
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS market_lifecycle_alert_state (
             id INTEGER PRIMARY KEY DEFAULT 1,
@@ -2066,6 +2087,9 @@ def build_entry_leadership_snapshot(quality, leadership_context=None):
 
 
 def ensure_okx_order_log_table(cur):
+    if not RUNTIME_DDL_ENABLED:
+        return
+
     if not ENABLE_ORDER_LOGGING:
         return
 
@@ -2089,6 +2113,9 @@ def ensure_okx_order_log_table(cur):
     """)
 
 def ensure_signal_leadership_scores_table(cur):
+    if not RUNTIME_DDL_ENABLED:
+        return
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS signal_leadership_scores (
             id BIGSERIAL PRIMARY KEY,
@@ -2113,6 +2140,9 @@ def ensure_signal_leadership_scores_table(cur):
 
 
 def ensure_leadership_state_history_table(cur):
+    if not RUNTIME_DDL_ENABLED:
+        return
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS leadership_state_history (
             id BIGSERIAL PRIMARY KEY,
@@ -2353,6 +2383,59 @@ def accounting_entry_telemetry(size_usdt):
         "usd_gbp_rate": rate,
     }
 
+def accounting_entry_telemetry_from_gbp(size_gbp):
+    """Telemetry payload when the model size is held in GBP."""
+    return accounting_entry_telemetry(gbp_to_usdt_quote(size_gbp))
+
+def real_capital_size_expr_sql():
+    """SQL expression used to decide if a row represents real capital, not a ghost/model row."""
+    return "COALESCE(NULLIF(trade_size_usdt, 0), NULLIF(entry_value_usdt, 0), 0)"
+
+def repair_trade_entry_accounting(cur, tid):
+    """
+    v9.7 accounting safety repair.
+    If an OKX live ENTRY succeeded but entry accounting remained zero/NULL, recover
+    the quote notional from okx_order_log.request_payload->>'sz'. This prevents
+    LIVE daily PnL from using phantom zero-entry rows.
+    """
+    if not tid:
+        return False
+    try:
+        cur.execute("""
+            SELECT COALESCE(SUM((request_payload->>'sz')::numeric), 0)
+            FROM okx_order_log
+            WHERE trade_id = %s
+              AND action = 'entry'
+              AND COALESCE(dry_run, FALSE) = FALSE
+              AND COALESCE(success, FALSE) = TRUE
+              AND error_message IS NULL
+              AND COALESCE(response_payload::text, '') NOT ILIKE '%%skipped%%'
+              AND COALESCE(response_payload::text, '') NOT ILIKE '%%dry_run%%'
+        """, (str(tid),))
+        quote = float((cur.fetchone() or [0])[0] or 0)
+        if quote <= 0:
+            return False
+        rate = get_usd_gbp_rate()
+        cur.execute("""
+            UPDATE bot_trades_v4
+            SET trade_size_usdt = CASE WHEN COALESCE(trade_size_usdt, 0) <= 0 THEN %s ELSE trade_size_usdt END,
+                entry_value_usdt = CASE WHEN COALESCE(entry_value_usdt, 0) <= 0 THEN %s ELSE entry_value_usdt END,
+                entry_value_gbp = CASE WHEN COALESCE(entry_value_gbp, 0) <= 0 THEN %s ELSE entry_value_gbp END,
+                trade_size_gbp = CASE WHEN COALESCE(trade_size_gbp, 0) <= 0 THEN %s ELSE trade_size_gbp END,
+                dynamic_trade_size_gbp = CASE WHEN COALESCE(dynamic_trade_size_gbp, 0) <= 0 THEN %s ELSE dynamic_trade_size_gbp END,
+                usd_gbp_rate = %s
+            WHERE id = %s
+        """, (quote, quote, quote * rate, quote * rate, quote * rate, rate, tid))
+        return True
+    except Exception as e:
+        print(f"⚠️ accounting repair failed | id={tid} | {e}", flush=True)
+        try:
+            cur.connection.rollback()
+        except Exception:
+            pass
+        return False
+
+
 def accounting_exit_values(size_usdt, pnl_percent, partial_bank_realized_gbp=0.0, remaining_fraction=1.0):
     """v7.1 exit accounting.
 
@@ -2558,6 +2641,9 @@ def send_telegram_alert(message):
 # =========================
 
 def ensure_telegram_alert_log_table(cur):
+    if not RUNTIME_DDL_ENABLED:
+        return
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS telegram_alert_log (
             id BIGSERIAL PRIMARY KEY,
@@ -2628,6 +2714,9 @@ def classify_runtime_archetype(lifecycle_row=None, mins=0, current_peak=0, pnl_p
 
 
 def ensure_archetype_state_columns(cur):
+    if not RUNTIME_DDL_ENABLED:
+        return
+
     cur.execute("""
         ALTER TABLE bot_trades_v4
         ADD COLUMN IF NOT EXISTS entry_archetype TEXT,
@@ -3281,6 +3370,9 @@ SCHEMA_CHECKS_DONE = False
 
 def ensure_schema_once(cur):
     global SCHEMA_CHECKS_DONE
+    if not RUNTIME_DDL_ENABLED:
+        SCHEMA_CHECKS_DONE = True
+        return
     if SCHEMA_CHECKS_DONE:
         return
     if ENABLE_ORDER_LOGGING:
@@ -3338,6 +3430,7 @@ def get_live_real_open_count(cur):
         FROM bot_trades_v4
         WHERE status = 'OPEN'
           AND COALESCE(is_shadow, FALSE) = FALSE
+          AND COALESCE(NULLIF(trade_size_usdt, 0), NULLIF(entry_value_usdt, 0), 0) > 0
     """)
     return cur.fetchone()[0] or 0
 
@@ -3348,6 +3441,7 @@ def get_open_same_symbol_real_count(cur, symbol):
         WHERE status = 'OPEN'
           AND COALESCE(is_shadow, FALSE) = FALSE
           AND symbol = %s
+          AND COALESCE(NULLIF(trade_size_usdt, 0), NULLIF(entry_value_usdt, 0), 0) > 0
     """, (symbol,))
     return cur.fetchone()[0] or 0
 
@@ -3488,8 +3582,6 @@ def okx_has_live_position(symbol, reference_price=None):
 def has_successful_okx_live_entry(cur, trade_id):
     if not ENABLE_ORDER_LOGGING:
         return False
-
-    ensure_okx_order_log_table(cur)
 
     cur.execute("""
         SELECT COUNT(*)
@@ -4473,6 +4565,9 @@ def process_shadow_cqe_trades(cur, symbol, price, momentum, trend, now):
 # =========================
 
 def ensure_bpt_cqe_lifecycle_columns(cur):
+    if not RUNTIME_DDL_ENABLED:
+        return
+
     """Adds optional telemetry columns used by BPT_CQE_LIFECYCLE_V1.
     Safe to run repeatedly. Existing deployments without these columns still
     work because safe_update_trade_telemetry skips missing fields, but these
@@ -4814,18 +4909,17 @@ def open_bpt_cqe_probe_trade(cur, symbol, price, momentum, trend, signal_id, sig
             entry_price=price,
             trade_size_quote=gbp_to_usdt_quote(BPT_CQE_PROBE_SIZE_GBP),
         )
-        if okx_probe_result.get("success"):
+        if okx_probe_result.get("success") and not okx_probe_result.get("skipped") and not okx_probe_result.get("blocked") and not okx_probe_result.get("dry_run"):
             requested_probe_quote = gbp_to_usdt_quote(BPT_CQE_PROBE_SIZE_GBP)
             actual_probe_quote = float(okx_probe_result.get("actual_quote_size") or requested_probe_quote)
             actual_probe_gbp = usdt_quote_to_gbp(actual_probe_quote)
-            if abs(actual_probe_quote - float(requested_probe_quote)) > 0.0001:
-                safe_update_trade_telemetry(cur, trade_id, {
-                    "trade_size_gbp": actual_probe_gbp,
-                    "dynamic_trade_size_gbp": actual_probe_gbp,
-                    "probe_size_gbp": actual_probe_gbp,
-                    **accounting_entry_telemetry(actual_probe_quote),
-                    "size_scaling_reason": "bpt_probe_partial_position_fill",
-                })
+            safe_update_trade_telemetry(cur, trade_id, {
+                "trade_size_gbp": actual_probe_gbp,
+                "dynamic_trade_size_gbp": actual_probe_gbp,
+                "probe_size_gbp": actual_probe_gbp,
+                **accounting_entry_telemetry(actual_probe_quote),
+                "size_scaling_reason": "bpt_probe_live_entry_executed" if abs(actual_probe_quote - float(requested_probe_quote)) <= 0.0001 else "bpt_probe_partial_position_fill",
+            })
         else:
             cur.execute("""
                 UPDATE bot_trades_v4
@@ -5507,7 +5601,19 @@ def process_bpt_cqe_lifecycle_trades(cur, symbol, price, momentum, trend, now):
                 exit_architecture = "BPT_CQE_SAFETY_BACKSTOP"
 
         if close_reason:
-            bpt_size_usdt_for_pnl = float(trade_size_usdt or gbp_to_usdt_quote(float(dynamic_size or BPT_CQE_PROBE_SIZE_GBP)))
+            has_live_entry = (not is_shadow) and has_successful_okx_live_entry(cur, tid)
+            if has_live_entry and not float(trade_size_usdt or 0):
+                repair_trade_entry_accounting(cur, tid)
+                cur.execute("SELECT trade_size_usdt FROM bot_trades_v4 WHERE id = %s", (tid,))
+                refreshed = cur.fetchone()
+                trade_size_usdt = refreshed[0] if refreshed else trade_size_usdt
+
+            # v9.7: never calculate LIVE PnL from model/dynamic size unless a real OKX entry exists.
+            # Ghost/model rows can still close for research, but LIVE daily excludes them.
+            if has_live_entry:
+                bpt_size_usdt_for_pnl = float(trade_size_usdt or gbp_to_usdt_quote(float(dynamic_size or 0)))
+            else:
+                bpt_size_usdt_for_pnl = 0.0
             accounting = accounting_exit_values(bpt_size_usdt_for_pnl, pnl_percent)
             pnl_gbp = accounting["pnl_gbp"]
 
@@ -5565,7 +5671,7 @@ def process_bpt_cqe_lifecycle_trades(cur, symbol, price, momentum, trend, now):
                 print(f"⚠️ coin learning refresh after BPT close failed: {e}", flush=True)
 
             # Only send OKX exit if this BPT trade actually had live BPT orders.
-            if not is_shadow and has_successful_okx_live_entry(cur, tid):
+            if has_live_entry:
                 okx_place_market_order(
                     cur=cur,
                     trade_id=tid,
@@ -6680,6 +6786,7 @@ def build_telegram_open_trades_message(cur):
           ON lp.symbol = b.symbol
         WHERE b.status = 'OPEN'
           AND COALESCE(b.is_shadow, FALSE) = FALSE
+          AND COALESCE(NULLIF(b.trade_size_usdt, 0), NULLIF(b.entry_value_usdt, 0), 0) > 0
         ORDER BY b.opened_at
         LIMIT 20
     """)
@@ -7495,7 +7602,7 @@ def open_shadow_market_os_trade(cur, symbol, direction, price, momentum, trend, 
         "entry_architecture": quality,
         "trade_size_gbp": model_size_gbp,
         "dynamic_trade_size_gbp": model_size_gbp,
-        **accounting_entry_telemetry(model_size_gbp),
+        **accounting_entry_telemetry_from_gbp(model_size_gbp),
         "market_os_engine": (leadership_context or {}).get("market_os_engine"),
         "size_scaling_reason": shadow_reason,
         "shadow_reason": shadow_reason,
@@ -8563,6 +8670,7 @@ def webhook():
             FROM bot_trades_v4
             WHERE status = 'OPEN'
               AND COALESCE(is_shadow, FALSE) = FALSE
+              AND COALESCE(NULLIF(trade_size_usdt, 0), NULLIF(entry_value_usdt, 0), 0) > 0
         """)
 
         open_trades = cur.fetchall()
@@ -9008,6 +9116,7 @@ def build_telegram_summary_message(cur, hours=24):
             WHERE closed_at >= NOW() - (%s || ' hours')::INTERVAL
               AND status = 'CLOSED'
               AND COALESCE(is_shadow, FALSE) = FALSE
+              AND COALESCE(NULLIF(trade_size_usdt, 0), NULLIF(entry_value_usdt, 0), 0) > 0
         )
         SELECT
             COUNT(*) AS trades,
@@ -9051,6 +9160,7 @@ def build_telegram_summary_message(cur, hours=24):
         LEFT JOIN latest_price lp ON lp.symbol = b.symbol
         WHERE b.status = 'OPEN'
           AND COALESCE(b.is_shadow, FALSE) = FALSE
+          AND COALESCE(NULLIF(b.trade_size_usdt, 0), NULLIF(b.entry_value_usdt, 0), 0) > 0
         ORDER BY b.opened_at
         LIMIT 10
     """)
@@ -9628,13 +9738,48 @@ def build_telegram_coins_message(cur):
         safe_telemetry_rollback(cur)
         return f"Coin report error: {e}"
 
+
+def build_telegram_audit_message(cur, hours=24):
+    cur.execute("""
+        WITH recent_trades AS (
+            SELECT *
+            FROM bot_trades_v4
+            WHERE opened_at >= NOW() - (%s * INTERVAL '1 hour')
+        ),
+        recent_orders AS (
+            SELECT *
+            FROM okx_order_log
+            WHERE created_at >= NOW() - (%s * INTERVAL '1 hour')
+        )
+        SELECT
+            (SELECT COUNT(*) FROM recent_trades WHERE COALESCE(is_shadow, FALSE) = FALSE) AS live_trade_rows,
+            (SELECT COUNT(*) FROM recent_trades WHERE COALESCE(is_shadow, FALSE) = FALSE AND COALESCE(NULLIF(trade_size_usdt, 0), NULLIF(entry_value_usdt, 0), 0) > 0) AS live_accounted_rows,
+            (SELECT COUNT(*) FROM recent_trades WHERE COALESCE(is_shadow, FALSE) = FALSE AND COALESCE(NULLIF(trade_size_usdt, 0), NULLIF(entry_value_usdt, 0), 0) <= 0) AS live_zero_accounting_rows,
+            (SELECT COUNT(*) FROM recent_orders WHERE action='entry' AND COALESCE(dry_run, FALSE)=FALSE) AS entry_attempts,
+            (SELECT COUNT(*) FROM recent_orders WHERE action='entry' AND COALESCE(dry_run, FALSE)=FALSE AND COALESCE(success, FALSE)=TRUE AND COALESCE(response_payload::text,'') NOT ILIKE '%%skipped%%') AS entry_successes,
+            (SELECT COUNT(*) FROM recent_orders WHERE action='exit' AND COALESCE(dry_run, FALSE)=FALSE) AS exit_attempts,
+            (SELECT COUNT(*) FROM recent_orders WHERE action='exit' AND COALESCE(dry_run, FALSE)=FALSE AND COALESCE(success, FALSE)=TRUE AND COALESCE(response_payload::text,'') NOT ILIKE '%%skipped%%') AS exit_successes,
+            (SELECT COUNT(*) FROM recent_orders WHERE COALESCE(success, FALSE)=FALSE) AS failed_orders
+    """, (hours, hours))
+    row = cur.fetchone() or (0,0,0,0,0,0,0,0)
+    return (
+        f"🧾 <b>LIVE AUDIT</b>\n"
+        f"Window: <b>{hours}h</b>\n\n"
+        f"Live trade rows: <b>{row[0]}</b>\n"
+        f"Accounted live rows: <b>{row[1]}</b>\n"
+        f"Zero-accounting live rows: <b>{row[2]}</b>\n\n"
+        f"Entries attempted: <b>{row[3]}</b>\n"
+        f"Entries filled: <b>{row[4]}</b>\n"
+        f"Exits attempted: <b>{row[5]}</b>\n"
+        f"Exits filled: <b>{row[6]}</b>\n"
+        f"Failed orders: <b>{row[7]}</b>"
+    )
+
 def handle_telegram_command(text):
     cmd = (text or "").strip().lower().split()[0] if text else "/help"
     conn = get_db()
     cur = conn.cursor()
     try:
-        ensure_signal_leadership_scores_table(cur)
-
         if cmd in ["/status", "/daily", "/summary", "/pnl"]:
             return build_telegram_summary_message(cur, 24)
 
@@ -9643,6 +9788,9 @@ def handle_telegram_command(text):
 
         if cmd in ["/open", "/trades", "/positions", "/pos"]:
             return build_telegram_open_trades_message(cur)
+
+        if cmd in ["/audit", "/orders", "/fills"]:
+            return build_telegram_audit_message(cur, 24)
 
         if cmd in ["/leaders", "/leadership"]:
             return "🧠 <b>Top Leadership States</b>\n" + get_top_leaders_text(cur, 10)
