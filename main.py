@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v9.7
-# TITLE: NO RUNTIME DDL + ACCOUNTING AUDIT FIX + LIVE PNL TRUST PASS
+# VERSION: v9.9.1
+# TITLE: HOT-ONLY LIVE CAPITAL GATE + £35 OPTION B SIZING
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v9.7 NO RUNTIME DDL + ACCOUNTING FIX RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v9.9.1 HOT-ONLY LIVE CAPITAL RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -414,7 +414,7 @@ def parse_symbol_set_env(name, default):
 OKX_BLOCKED_SYMBOLS = parse_symbol_set_env("OKX_BLOCKED_SYMBOLS", "TAOUSDT")
 OKX_EST_FEE_RATE_ROUND_TRIP = float(os.environ.get("OKX_EST_FEE_RATE_ROUND_TRIP", "0.002") or 0.002)
 
-DATA_VERSION = "v9.8"
+DATA_VERSION = "v9.9.1"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -845,6 +845,12 @@ GHOST_PROBE_LABEL = "GHOST_PROBE_NO_CAPITAL"
 # v9.3: keep raw probes ghost, but allow confirmed HOT/GOOD ghost probes to enter live capital.
 ENABLE_BPT_CQE_CONFIRMED_GHOST_LIVE_ENTRY = os.environ.get("ENABLE_BPT_CQE_CONFIRMED_GHOST_LIVE_ENTRY", "true").lower() == "true"
 ENABLE_NEUTRAL_MARKET_SHADOW_FILTER = os.environ.get("ENABLE_NEUTRAL_MARKET_SHADOW_FILTER", "true").lower() == "true"
+
+# v9.9: research-backed master live-capital gate.
+# Last-14d test showed market_heat_score=3 (HOT) was the only clearly profitable regime.
+# Ghost/shadow probes still log normally, but real OKX capital is only added while HOT.
+ENABLE_MARKET_HEAT_HOT_ONLY_LIVE = os.environ.get("ENABLE_MARKET_HEAT_HOT_ONLY_LIVE", "true").lower() == "true"
+MARKET_HEAT_MIN_LIVE_SCORE = int(os.environ.get("MARKET_HEAT_MIN_LIVE_SCORE", "3") or 3)
 ENABLE_ADAPTIVE_DEAD_MARKET_CONFIRMED_LIVE_UPGRADES = os.environ.get("ENABLE_ADAPTIVE_DEAD_MARKET_CONFIRMED_LIVE_UPGRADES", "true").lower() == "true"
 
 
@@ -960,7 +966,7 @@ BPT_HIGH_QUALITY_SCORE = float(os.environ.get("BPT_HIGH_QUALITY_SCORE", "1.2") o
 BPT_MEDIUM_QUALITY_SCORE = float(os.environ.get("BPT_MEDIUM_QUALITY_SCORE", "0.6") or 0.6)
 
 # Row-specific upgrade sizes and exits.
-BPT_EXTREME_UPGRADE_GBP = float(os.environ.get("BPT_EXTREME_UPGRADE_GBP", "25") or 25)
+BPT_EXTREME_UPGRADE_GBP = float(os.environ.get("BPT_EXTREME_UPGRADE_GBP", "35") or 35)
 BPT_EXTREME_TRAIL_ACTIVATION = float(os.environ.get("BPT_EXTREME_TRAIL_ACTIVATION", "2.0") or 2.0)
 BPT_EXTREME_TRAIL_DRAWDOWN = float(os.environ.get("BPT_EXTREME_TRAIL_DRAWDOWN", "0.75") or 0.75)
 
@@ -968,11 +974,11 @@ BPT_HIGH_UPGRADE_GBP = float(os.environ.get("BPT_HIGH_UPGRADE_GBP", "35") or 35)
 BPT_HIGH_TRAIL_ACTIVATION = float(os.environ.get("BPT_HIGH_TRAIL_ACTIVATION", "3.0") or 3.0)
 BPT_HIGH_TRAIL_DRAWDOWN = float(os.environ.get("BPT_HIGH_TRAIL_DRAWDOWN", "1.0") or 1.0)
 
-BPT_MEDIUM_UPGRADE_GBP = float(os.environ.get("BPT_MEDIUM_UPGRADE_GBP", "45") or 45)
+BPT_MEDIUM_UPGRADE_GBP = float(os.environ.get("BPT_MEDIUM_UPGRADE_GBP", "35") or 35)
 BPT_MEDIUM_TRAIL_ACTIVATION = float(os.environ.get("BPT_MEDIUM_TRAIL_ACTIVATION", "5.0") or 5.0)
 BPT_MEDIUM_TRAIL_DRAWDOWN = float(os.environ.get("BPT_MEDIUM_TRAIL_DRAWDOWN", "1.5") or 1.5)
 
-BPT_EARLY_UPGRADE_GBP = float(os.environ.get("BPT_EARLY_UPGRADE_GBP", "15") or 15)
+BPT_EARLY_UPGRADE_GBP = float(os.environ.get("BPT_EARLY_UPGRADE_GBP", "35") or 35)
 BPT_EARLY_TRAIL_ACTIVATION = float(os.environ.get("BPT_EARLY_TRAIL_ACTIVATION", "2.0") or 2.0)
 BPT_EARLY_TRAIL_DRAWDOWN = float(os.environ.get("BPT_EARLY_TRAIL_DRAWDOWN", "0.75") or 0.75)
 BPT_EARLY_FAILFAST_MINUTES = float(os.environ.get("BPT_EARLY_FAILFAST_MINUTES", "120") or 120)
@@ -2983,7 +2989,7 @@ def build_market_state_message(cur, hours=3):
             GROUP BY 1
             ORDER BY COUNT(*) DESC
             LIMIT 5
-        """, (OKX_EST_FEE_RATE_ROUND_TRIP, hours,))
+        """, (hours,))
         reasons = cur.fetchall() or []
 
         if core_candidates and core_candidates > 0:
@@ -4868,14 +4874,20 @@ def open_bpt_cqe_probe_trade(cur, symbol, price, momentum, trend, signal_id, sig
     apply_market_heat_to_trade(cur, trade_id)
 
     ghost_probe_active = bool(ENABLE_BPT_CQE_GHOST_PROBES)
-    live_probe_enabled = bool(ENABLE_BPT_CQE_LIVE_PROBES and not ghost_probe_active and not (leadership_context or {}).get("coin_form_live_blocked"))
+    market_heat_live_blocked = bool((leadership_context or {}).get("market_heat_live_blocked"))
+    live_probe_enabled = bool(
+        ENABLE_BPT_CQE_LIVE_PROBES
+        and not ghost_probe_active
+        and not (leadership_context or {}).get("coin_form_live_blocked")
+        and not market_heat_live_blocked
+    )
     model_probe_size_gbp = 0.0 if ghost_probe_active else BPT_CQE_PROBE_SIZE_GBP
     model_probe_size_usdt = 0.0 if ghost_probe_active else gbp_to_usdt_quote(BPT_CQE_PROBE_SIZE_GBP)
 
     safe_update_trade_telemetry(cur, trade_id, {
         # Ghost probes are not marked shadow because they are eligible for a future live upgrade.
         # They simply carry zero capital until confirmation.
-        "is_shadow": False if ghost_probe_active else not ENABLE_BPT_CQE_LIVE_PROBES,
+        "is_shadow": False if ghost_probe_active else not live_probe_enabled,
         "entry_architecture": BPT_CQE_ENTRY_QUALITY,
         "market_os_engine": (leadership_context or {}).get("market_os_engine"),
         "size_scaling_reason": GHOST_PROBE_LABEL if ghost_probe_active else (leadership_context or {}).get("size_scaling_reason"),
@@ -4948,7 +4960,8 @@ def open_bpt_cqe_probe_trade(cur, symbol, price, momentum, trend, signal_id, sig
     send_telegram_alert(
         f"👻 <b>GHOST PROBE OPENED</b>\n🧪 <b>BPT_CQE_LIFECYCLE_V1</b> | {symbol} LONG\n"
         f"Row: <b>{lifecycle_row}</b> | Q {fmt_num(q)}\n"
-        f"Probe size: {fmt_money(BPT_CQE_PROBE_SIZE_GBP)} | Live probe: {ENABLE_BPT_CQE_LIVE_PROBES}\n"
+        f"Probe size: {fmt_money(model_probe_size_gbp)} | Live probe: {live_probe_enabled}\n"
+        f"{'Market heat live block: ON' + chr(10) if market_heat_live_blocked else ''}"
         f"Entry {price} | T/M {fmt_num(trend)} / {fmt_num(momentum)}\n"
         f"Confirm target: +{BPT_CQE_CONFIRM_PEAK}% within {BPT_CQE_CONFIRM_WINDOW_MINUTES}m\n"
         f"ID {trade_id}"
@@ -4981,6 +4994,22 @@ def maybe_open_bpt_cqe_probe(cur, symbol, price, momentum, trend, signal_id, sig
     except Exception as e:
         print(f"⚠️ BPT coin form check failed for {symbol}: {e}", flush=True)
         safe_telemetry_rollback(cur)
+
+    try:
+        bpt_market_heat = get_market_heat_context(cur)
+        leadership_context["market_heat_context"] = bpt_market_heat
+        leadership_context["market_heat_live_blocked"] = bool(
+            ENABLE_MARKET_HEAT_HOT_ONLY_LIVE
+            and safe_int(bpt_market_heat.get("market_heat_score"), -1) < MARKET_HEAT_MIN_LIVE_SCORE
+        )
+    except Exception as e:
+        print(f"⚠️ BPT market heat check failed for {symbol}: {e}", flush=True)
+        safe_telemetry_rollback(cur)
+        leadership_context["market_heat_context"] = {
+            "market_heat_regime": "UNKNOWN",
+            "market_heat_score": None,
+        }
+        leadership_context["market_heat_live_blocked"] = bool(ENABLE_MARKET_HEAT_HOT_ONLY_LIVE)
 
     allowed, reason = passes_bpt_cqe_probe_gate(cur, symbol, momentum, trend, leadership_context)
     if not allowed:
@@ -5219,6 +5248,17 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
     coin_allows_live_upgrade = (coin_profile_for_scalein.get("coin_health_mode") == "LIVE")
     coin_form_for_scalein = get_coin_form_snapshot(cur, sym) if ENABLE_COIN_FORM_ENGINE else {"coin_form_mode": "GOOD", "coin_form_reason": "coin_form_disabled"}
     coin_form_allows_scalein = coin_form_allows_live_entry(coin_form_for_scalein)
+
+    market_heat_for_scalein = get_market_heat_context(cur)
+    market_heat_regime = str(market_heat_for_scalein.get("market_heat_regime") or "UNKNOWN").upper()
+    market_heat_score = safe_int(market_heat_for_scalein.get("market_heat_score"), -1)
+    market_heat_allows_live = bool(
+        (not ENABLE_MARKET_HEAT_HOT_ONLY_LIVE)
+        or market_heat_score >= MARKET_HEAT_MIN_LIVE_SCORE
+    )
+
+    safe_update_trade_telemetry(cur, tid, market_heat_for_scalein)
+
     adaptive_dead_market_form_override = bool(
         adaptive_dead_market_shadow_only
         and ENABLE_COIN_FORM_OVERRIDE_ADAPTIVE_DEAD_MARKET_SHADOW
@@ -5244,7 +5284,8 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
         and coin_allows_live_upgrade_or_form_override
         and row_allows_scalein
         and confirmation_allows_scalein
-        and (not ENABLE_NEUTRAL_MARKET_SHADOW_FILTER or str(market_heat_regime).upper() != "NEUTRAL")
+        and market_heat_allows_live
+        and (not ENABLE_NEUTRAL_MARKET_SHADOW_FILTER or market_heat_regime != "NEUTRAL")
     )
 
     scalein_allowed = (
@@ -5255,6 +5296,7 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
         and coin_form_allows_scalein
         and row_allows_scalein
         and confirmation_allows_scalein
+        and market_heat_allows_live
     )
 
     # v7.4 SCALE-IN VISIBILITY HOTFIX:
@@ -5267,6 +5309,8 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
         scalein_block_reason = "adaptive_dead_market_leader_shadow_only"
     elif not ENABLE_CQE_REAL_SCALEINS:
         scalein_block_reason = "real_scaleins_toggle_off"
+    elif not market_heat_allows_live:
+        scalein_block_reason = f"market_heat_not_hot:score={market_heat_score},regime={market_heat_regime},min={MARKET_HEAT_MIN_LIVE_SCORE}"
     elif not coin_allows_live_upgrade_or_form_override:
         scalein_block_reason = f"coin_profile_{coin_profile_for_scalein.get('tier')}_{coin_profile_for_scalein.get('coin_health_mode')}_no_live_upgrade"
     elif not coin_form_allows_scalein:
@@ -5706,8 +5750,10 @@ def process_bpt_cqe_lifecycle_trades(cur, symbol, price, momentum, trend, now):
                 flush=True
             )
 
+            telegram_is_shadow = bool(is_shadow) or float(dynamic_size or 0) <= 0
+
             send_telegram_alert(
-                f"{trade_close_title(is_shadow, 'BPT TRADE CLOSED')}\n{trade_mode_line(is_shadow)}\n🧪 <b>BPT_CQE_LIFECYCLE_V1</b> | {sym}\n"
+                f"{trade_close_title(telegram_is_shadow, 'BPT TRADE CLOSED')}\n{trade_mode_line(telegram_is_shadow)}\n🧪 <b>BPT_CQE_LIFECYCLE_V1</b> | {sym}\n"
                 f"Row: {lifecycle_row} | " + format_trade_pnl_lines(pnl_percent, pnl_gbp, 0) + "\n"
                 + f"Peak {fmt_num(current_peak)}% | DD {fmt_num(drawdown_from_peak)}%\n"
                 f"Size model {fmt_money(dynamic_size)} | Reason {close_reason}\n"
@@ -8293,6 +8339,54 @@ def webhook():
                         entry_allowed = False
                         block_reason = "dead_core_not_rising_shadow"
 
+                # v9.9.1 HOT-ONLY LIVE CAPITAL GATE:
+                # Research showed market_heat_score=3 (HOT) was the only clearly profitable
+                # master regime. Non-HOT live leadership entries are converted to shadow rows
+                # so we preserve learning without spending real OKX capital.
+                if entry_allowed and ENABLE_MARKET_HEAT_HOT_ONLY_LIVE:
+                    try:
+                        live_entry_market_heat = get_market_heat_context(cur)
+                        leadership_context = leadership_context or {}
+                        leadership_context["market_heat_context"] = live_entry_market_heat
+                        leadership_context.update(live_entry_market_heat)
+
+                        live_entry_heat_score = safe_int(live_entry_market_heat.get("market_heat_score"), -1)
+                        live_entry_heat_regime = str(live_entry_market_heat.get("market_heat_regime") or "UNKNOWN").upper()
+
+                        if live_entry_heat_score < MARKET_HEAT_MIN_LIVE_SCORE:
+                            shadow_ctx = dict(leadership_context or {})
+                            shadow_ctx["market_os_engine"] = (shadow_ctx.get("market_os_engine") or "HOT_ONLY_FILTER_SHADOW")
+                            shadow_ctx["size_scaling_reason"] = (
+                                f"market_heat_not_hot:score={live_entry_heat_score},"
+                                f"regime={live_entry_heat_regime},min={MARKET_HEAT_MIN_LIVE_SCORE}"
+                            )
+
+                            try:
+                                open_shadow_market_os_trade(
+                                    cur,
+                                    symbol,
+                                    "LONG",
+                                    price,
+                                    momentum,
+                                    trend,
+                                    entry_quality or "HOT_ONLY_FILTER",
+                                    signal_id,
+                                    signal_time,
+                                    shadow_ctx,
+                                    shadow_ctx["size_scaling_reason"],
+                                    model_size_gbp=float(get_trade_size_for_quality(entry_quality or "STANDARD"))
+                                )
+                            except Exception as e:
+                                print(f"⚠️ HOT-only shadow creation failed: {e}", flush=True)
+
+                            entry_allowed = False
+                            block_reason = shadow_ctx["size_scaling_reason"]
+                    except Exception as e:
+                        print(f"⚠️ HOT-only live gate failed; blocking live entry for safety | {symbol} | {e}", flush=True)
+                        safe_telemetry_rollback(cur)
+                        entry_allowed = False
+                        block_reason = "market_heat_hot_only_gate_error"
+
                 # v6.1.4: check OKX tradability BEFORE creating DB trade / consuming slot.
                 if entry_allowed:
                     okx_tradable, okx_tradability_reason = is_okx_symbol_live_tradable(symbol)
@@ -10074,6 +10168,8 @@ def bool_status():
         "DENSITY_NULL_IS_VALID": DENSITY_NULL_IS_VALID,
         "ENABLE_BPT_CQE_LIVE_UPGRADES": ENABLE_BPT_CQE_LIVE_UPGRADES,
         "ENABLE_BPT_CQE_CONFIRMED_GHOST_LIVE_ENTRY": ENABLE_BPT_CQE_CONFIRMED_GHOST_LIVE_ENTRY,
+        "ENABLE_MARKET_HEAT_HOT_ONLY_LIVE": ENABLE_MARKET_HEAT_HOT_ONLY_LIVE,
+        "MARKET_HEAT_MIN_LIVE_SCORE": MARKET_HEAT_MIN_LIVE_SCORE,
         "BPT_CQE_PROBE_SIZE_GBP": BPT_CQE_PROBE_SIZE_GBP,
         "ENABLE_BPT_PROBE_LIFECYCLE_ENGINE": ENABLE_BPT_PROBE_LIFECYCLE_ENGINE,
         "BPT_MONSTER_FASTTRACK_MIN_AGE_MINUTES": BPT_MONSTER_FASTTRACK_MIN_AGE_MINUTES,
