@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v9.9.1
-# TITLE: HOT-ONLY LIVE CAPITAL GATE + £35 OPTION B SIZING
+# VERSION: v9.9.3
+# TITLE: HOT-ONLY LIVE CAPITAL + TRUE OKX EXECUTION TELEGRAM HARDENING
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v9.9.1 HOT-ONLY LIVE CAPITAL RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v9.9.3 HOT-ONLY LIVE CAPITAL + TRUE EXECUTION HARDENING RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -414,7 +414,7 @@ def parse_symbol_set_env(name, default):
 OKX_BLOCKED_SYMBOLS = parse_symbol_set_env("OKX_BLOCKED_SYMBOLS", "TAOUSDT")
 OKX_EST_FEE_RATE_ROUND_TRIP = float(os.environ.get("OKX_EST_FEE_RATE_ROUND_TRIP", "0.002") or 0.002)
 
-DATA_VERSION = "v9.9.1"
+DATA_VERSION = "v9.9.3"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -5358,6 +5358,12 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
     displayed_dynamic_size = current_dynamic_size
 
     if ENABLE_BPT_CQE_LIVE_UPGRADES and scalein_allowed:
+        print(
+            f"🚦 BPT CQE OKX UPGRADE ATTEMPT | {sym} | id={tid} | "
+            f"model_upgrade={fmt_money(upgrade_size)} | heat_score={market_heat_score} | "
+            f"regime={market_heat_regime} | scalein_allowed={scalein_allowed}",
+            flush=True
+        )
         okx_upgrade_result = okx_place_market_order(
             cur=cur,
             trade_id=tid,
@@ -5413,9 +5419,22 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
                 ),
             })
         else:
+            # v9.9.3 TRUE-EXECUTION HARDENING:
+            # If OKX did not confirm a real live order, keep this trade classified as
+            # shadow/no-capital. Do not leave phantom upgrade/accounting values behind.
+            fail_reason = okx_upgrade_result.get('reason') or okx_upgrade_result.get('error') or 'unknown'
             safe_update_trade_telemetry(cur, tid, {
+                "is_shadow": True,
+                "dynamic_trade_size_gbp": 0.0,
+                "trade_size_gbp": 0.0,
+                "entry_value_gbp": 0.0,
+                "entry_value_usdt": 0.0,
+                "trade_size_usdt": 0.0,
+                "upgrade_size_gbp": 0.0,
+                "cqe_upgraded": False,
                 "probe_lifecycle_state": "FAST_TRACK_CONFIRMED_NO_LIVE_SCALEIN" if fast_track_active else "STANDARD_CONFIRMED_NO_LIVE_SCALEIN",
-                "size_scaling_reason": f"bpt_live_scalein_not_executed:{okx_upgrade_result.get('reason') or okx_upgrade_result.get('error') or 'unknown'}",
+                "shadow_reason": "CONFIRMED_BUT_NO_OKX_EXECUTION",
+                "size_scaling_reason": f"bpt_live_scalein_not_executed:{fail_reason}",
             })
             print(f"⚠️ BPT CQE LIVE UPGRADE ORDER FAILED/SKIPPED | {sym} | id={tid} | {okx_upgrade_result}", flush=True)
     else:
@@ -5426,31 +5445,45 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
             "size_scaling_reason": f"bpt_scalein_disabled_or_not_allowed:{scalein_block_reason}",
         }
 
+        # v9.9.3 TRUE-EXECUTION HARDENING:
+        # A confirmed ghost probe that does not pass the live gate is still paper.
+        # Keep accounting at zero and keep it shadow so exits cannot be labelled live.
         safe_update_trade_telemetry(cur, tid, {
+            "is_shadow": True,
+            "dynamic_trade_size_gbp": 0.0,
+            "trade_size_gbp": 0.0,
+            "entry_value_gbp": 0.0,
+            "entry_value_usdt": 0.0,
+            "trade_size_usdt": 0.0,
+            "upgrade_size_gbp": 0.0,
+            "cqe_upgraded": False,
             "probe_lifecycle_state": "FAST_TRACK_CONFIRMED_SCALEIN_DISABLED" if fast_track_active else "STANDARD_CONFIRMED_SCALEIN_DISABLED",
             **extra_shadow_tags,
         })
 
-    trade_mode_label = "🟢 LIVE COIN" if live_scalein_executed else ("🟡 SHADOW COIN" if is_shadow_trade else "🟢 LIVE COIN")
-    if live_scalein_executed:
-        live_scalein_label = "YES - CONFIRMED GHOST ENTERED LIVE" if ghost_probe_active else "YES"
-    elif is_shadow_trade:
-        live_scalein_label = "N/A - SHADOW"
+    # v9.9.3: Telegram/live classification must be based on confirmed capital,
+    # not the legacy is_shadow flag. A £0 confirmed probe is NOT live.
+    actual_live_capital_deployed = bool(live_scalein_executed and safe_float(actual_upgrade_size, 0) > 0)
+    trade_mode_label = "🟢 LIVE COIN" if actual_live_capital_deployed else "👻 SHADOW / NO CAPITAL"
+    if actual_live_capital_deployed:
+        live_scalein_label = "YES - OKX ORDER CONFIRMED" if ghost_probe_active else "YES - OKX ORDER CONFIRMED"
     else:
-        live_scalein_label = f"NO - {scalein_block_reason}"
+        live_scalein_label = f"NO REAL ORDER - {scalein_block_reason}"
 
     print(
         f"🚀 BPT CQE CONFIRMED | {sym} | id={tid} | mode={trade_mode_label} | row={lifecycle_row} | "
         f"scalein_allowed={scalein_allowed} | live_scalein={live_scalein_executed} | reason={scalein_block_reason} | "
-        f"upgrade={fmt_money(actual_upgrade_size or upgrade_size)} | dynamic={fmt_money(displayed_dynamic_size)} | "
+        f"model_upgrade={fmt_money(upgrade_size)} | actual_live_added={fmt_money(actual_upgrade_size)} | dynamic={fmt_money(displayed_dynamic_size)} | "
         f"peak={round(peak_for_confirmation,3)}%",
         flush=True
     )
 
-    if live_scalein_executed and ghost_probe_active:
+    if actual_live_capital_deployed and ghost_probe_active:
         upgrade_alert_title = "🟢 LIVE ENTRY AFTER CONFIRMATION"
+    elif actual_live_capital_deployed:
+        upgrade_alert_title = "🚀 LIVE UPGRADE EXECUTED"
     else:
-        upgrade_alert_title = "🚀 LIVE UPGRADE EXECUTED" if live_scalein_executed else "👻 SHADOW CONFIRMATION (NO REAL MONEY)"
+        upgrade_alert_title = "👻 SHADOW CONFIRMATION (NO REAL MONEY)"
     send_telegram_alert(
         f"{upgrade_alert_title} | {sym}\n"
         f"Mode: <b>{trade_mode_label}</b> | Row: <b>{lifecycle_row}</b>\n"
