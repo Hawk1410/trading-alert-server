@@ -405,7 +405,16 @@ TELEGRAM_STARTING_ACCOUNT_GBP = float(os.environ.get("TELEGRAM_STARTING_ACCOUNT_
 
 RUNTIME_DDL_ENABLED = os.environ.get("RUNTIME_DDL_ENABLED", "false").lower() == "true"
 
-DATA_VERSION = "v9.7"
+# v9.8: execution blocklist for symbols that may be useful for market/form
+# leadership analysis but are not tradable on this OKX account.
+def parse_symbol_set_env(name, default):
+    raw = os.environ.get(name, default) or ""
+    return {x.strip().upper().replace("-", "") for x in raw.split(",") if x.strip()}
+
+OKX_BLOCKED_SYMBOLS = parse_symbol_set_env("OKX_BLOCKED_SYMBOLS", "TAOUSDT")
+OKX_EST_FEE_RATE_ROUND_TRIP = float(os.environ.get("OKX_EST_FEE_RATE_ROUND_TRIP", "0.002") or 0.002)
+
+DATA_VERSION = "v9.8"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -2974,7 +2983,7 @@ def build_market_state_message(cur, hours=3):
             GROUP BY 1
             ORDER BY COUNT(*) DESC
             LIMIT 5
-        """, (hours,))
+        """, (OKX_EST_FEE_RATE_ROUND_TRIP, hours,))
         reasons = cur.fetchall() or []
 
         if core_candidates and core_candidates > 0:
@@ -4360,7 +4369,7 @@ def open_shadow_cqe_trade(cur, symbol, price, momentum, trend, signal_id, signal
         "leadership_score": (leadership_context or {}).get("prior_avg_peak"),
         "leadership_delta_30m_at_entry": (leadership_context or {}).get("leadership_delta_30m") or (leadership_context or {}).get("delta_30m"),
         **lifecycle_trade_telemetry_from_context(leadership_context),
-        **coin_form_trade_telemetry((leadership_context or {}).get("coin_form_snapshot") or {}),
+        **coin_selection_trade_telemetry(leadership_context),
     })
 
     try:
@@ -4891,6 +4900,7 @@ def open_bpt_cqe_probe_trade(cur, symbol, price, momentum, trend, signal_id, sig
         "leadership_score": (leadership_context or {}).get("prior_avg_peak"),
         "leadership_delta_30m_at_entry": (leadership_context or {}).get("leadership_delta_30m") or (leadership_context or {}).get("delta_30m"),
         **lifecycle_trade_telemetry_from_context(leadership_context),
+        **coin_selection_trade_telemetry(leadership_context),
     })
 
     try:
@@ -4948,6 +4958,12 @@ def open_bpt_cqe_probe_trade(cur, symbol, price, momentum, trend, signal_id, sig
 
 
 def maybe_open_bpt_cqe_probe(cur, symbol, price, momentum, trend, signal_id, signal_time, leadership_context=None):
+    if is_okx_blocked_symbol(symbol):
+        print(f"🚫 BPT probe skipped | {symbol} | blocked by OKX_BLOCKED_SYMBOLS", flush=True)
+        return None
+
+    leadership_context = enrich_coin_selection_context(cur, symbol, leadership_context or {})
+
     try:
         coin_profile = get_coin_score_profile(cur, symbol)
         if coin_profile.get("coin_health_mode") == "DISABLED":
@@ -4957,7 +4973,6 @@ def maybe_open_bpt_cqe_probe(cur, symbol, price, momentum, trend, signal_id, sig
         print(f"⚠️ BPT coin profile check failed for {symbol}: {e}", flush=True)
         safe_telemetry_rollback(cur)
 
-    leadership_context = leadership_context or {}
     try:
         if ENABLE_COIN_FORM_ENGINE:
             bpt_form_snapshot = get_coin_form_snapshot(cur, symbol)
@@ -5885,6 +5900,9 @@ def open_persistence_hunter_trade(cur, symbol, price, momentum, trend, signal_id
         "leadership_rank_at_entry": ctx.get("leadership_rank"),
         "lifecycle_trail_activation": PH_TRAIL_ACTIVATION,
         "lifecycle_trail_drawdown": PH_TRAIL_DRAWDOWN,
+        **accounting_entry_telemetry_from_gbp(PH_SHADOW_SIZE_GBP),
+        **coin_selection_trade_telemetry(ctx),
+        **market_context_trade_telemetry(ctx),
     })
 
     try:
@@ -5912,11 +5930,17 @@ def open_persistence_hunter_trade(cur, symbol, price, momentum, trend, signal_id
     return tid
 
 
-def maybe_open_persistence_hunter_trade(cur, symbol, price, momentum, trend, signal_id, signal_time):
+def maybe_open_persistence_hunter_trade(cur, symbol, price, momentum, trend, signal_id, signal_time, leadership_context=None):
+    if is_okx_blocked_symbol(symbol):
+        print(f"🚫 PH skipped | {symbol} | blocked by OKX_BLOCKED_SYMBOLS", flush=True)
+        return None
     allowed, reason, ctx = passes_persistence_hunter_gate(cur, symbol, momentum, trend, signal_time)
     if not allowed:
         return None
-    return open_persistence_hunter_trade(cur, symbol, price, momentum, trend, signal_id, signal_time, reason, ctx or {})
+    merged_ctx = dict(leadership_context or {})
+    merged_ctx.update(ctx or {})
+    merged_ctx = enrich_coin_selection_context(cur, symbol, merged_ctx)
+    return open_persistence_hunter_trade(cur, symbol, price, momentum, trend, signal_id, signal_time, reason, merged_ctx)
 
 
 def process_persistence_hunter_trades(cur, symbol, price, momentum, trend, now):
@@ -7343,6 +7367,73 @@ def coin_health_trade_telemetry(snapshot):
     }
 
 
+def enrich_coin_selection_context(cur, symbol, leadership_context=None):
+    """v9.8: attach Coin Form + Coin Health snapshots before ANY trade row is created.
+
+    Previous v9.x builds usually opened BPT/CQE/PH rows first and only calculated
+    Form/Health later in the live-entry path. That left almost all bot_trades_v4
+    rows with NULL coin_form_* / coin_health_* telemetry. This helper is called
+    early in the webhook and reused by every entry/probe/shadow path.
+    """
+    ctx = dict(leadership_context or {})
+
+    if ENABLE_COIN_FORM_ENGINE and not ctx.get("coin_form_snapshot"):
+        try:
+            ctx["coin_form_snapshot"] = get_coin_form_snapshot(cur, symbol)
+        except Exception as e:
+            print(f"⚠️ v9.8 coin form snapshot attach failed | {symbol} | {e}", flush=True)
+            safe_telemetry_rollback(cur)
+            ctx["coin_form_snapshot"] = {
+                "coin_form_mode": "SHADOW",
+                "coin_form_score": 0.0,
+                "coin_form_reason": "snapshot_error",
+                "form_updated_at": datetime.now(timezone.utc),
+            }
+    elif not ENABLE_COIN_FORM_ENGINE and not ctx.get("coin_form_snapshot"):
+        ctx["coin_form_snapshot"] = {
+            "coin_form_mode": "GOOD",
+            "coin_form_score": None,
+            "coin_form_reason": "coin_form_disabled",
+            "form_updated_at": datetime.now(timezone.utc),
+        }
+
+    if not ctx.get("coin_health_snapshot"):
+        try:
+            ctx["coin_health_snapshot"] = get_coin_health_snapshot(cur, symbol)
+        except Exception as e:
+            print(f"⚠️ v9.8 coin health snapshot attach failed | {symbol} | {e}", flush=True)
+            safe_telemetry_rollback(cur)
+            ctx["coin_health_snapshot"] = {
+                "coin_health_mode": "LIVE",
+                "coin_health_reason": "snapshot_error_fail_open",
+                "coin_dead_streak": 0,
+                "coin_recovery_streak": 0,
+            }
+
+    try:
+        ctx["coin_form_live_blocked"] = bool(
+            ENABLE_COIN_FORM_ENGINE
+            and not coin_form_allows_live_entry(ctx.get("coin_form_snapshot") or {})
+        )
+    except Exception:
+        ctx["coin_form_live_blocked"] = False
+
+    return ctx
+
+
+def coin_selection_trade_telemetry(ctx):
+    """v9.8: one payload for all trade paths so Form/Health never disappear."""
+    ctx = ctx or {}
+    payload = {}
+    payload.update(coin_health_trade_telemetry(ctx.get("coin_health_snapshot") or {}))
+    payload.update(coin_form_trade_telemetry(ctx.get("coin_form_snapshot") or {}))
+    return payload
+
+
+def is_okx_blocked_symbol(symbol):
+    return normalize_symbol(symbol).replace("-", "") in OKX_BLOCKED_SYMBOLS
+
+
 def market_context_trade_telemetry(ctx):
     """Best-effort v7.6 logging repair. Uses safe_update_trade_telemetry, so missing columns are harmless."""
     ctx = ctx or {}
@@ -7412,8 +7503,9 @@ def open_coin_health_shadow_trade(cur, symbol, direction, price, momentum, trend
     )
 
     if trade_id:
+        ctx["coin_health_snapshot"] = health_snapshot
         safe_update_trade_telemetry(cur, trade_id, {
-            **coin_health_trade_telemetry(health_snapshot),
+            **coin_selection_trade_telemetry(ctx),
             **market_context_trade_telemetry(ctx),
             "shadow_reason": f"COIN_HEALTH:{shadow_reason}",
             "entry_block_reason": f"coin_health_{shadow_reason}",
@@ -7507,8 +7599,7 @@ def open_trade(cur, symbol, direction, price, momentum, trend, quality,
         }
         entry_optional_telemetry.update(lifecycle_trade_telemetry_from_context(leadership_context))
         entry_optional_telemetry.update(market_context_trade_telemetry(leadership_context))
-        entry_optional_telemetry.update(coin_health_trade_telemetry((leadership_context or {}).get("coin_health_snapshot") or {"coin_health_mode": "LIVE", "coin_health_reason": "live_entry"}))
-        entry_optional_telemetry.update(coin_form_trade_telemetry((leadership_context or {}).get("coin_form_snapshot") or {}))
+        entry_optional_telemetry.update(coin_selection_trade_telemetry(leadership_context))
         safe_update_trade_telemetry(cur, trade_id, entry_optional_telemetry)
         cur.connection.commit()
     except Exception as e:
@@ -7608,8 +7699,7 @@ def open_shadow_market_os_trade(cur, symbol, direction, price, momentum, trend, 
         "shadow_reason": shadow_reason,
         **lifecycle_trade_telemetry_from_context(leadership_context),
         **market_context_trade_telemetry(leadership_context),
-        **coin_health_trade_telemetry((leadership_context or {}).get("coin_health_snapshot") or {}),
-        **coin_form_trade_telemetry((leadership_context or {}).get("coin_form_snapshot") or {}),
+        **coin_selection_trade_telemetry(leadership_context),
     })
 
     try:
@@ -8069,6 +8159,29 @@ def webhook():
             upsert_initial_coin_score(cur, symbol)
             refresh_coin_learning_from_history(cur, symbol, allow_mode_change=True)
 
+        # v9.8: keep untradeable leaders (e.g. TAO on this OKX account) in
+        # signals/leadership data, but do not create probes, lifecycle rows, or
+        # order attempts that generate noise and wasted workload.
+        if is_okx_blocked_symbol(symbol):
+            try:
+                cur.execute("""
+                    UPDATE signals_raw
+                    SET entry_allowed = FALSE,
+                        block_reason = %s
+                    WHERE id = %s
+                """, ("okx_symbol_blocked_not_tradable_on_account", signal_id))
+            except Exception as e:
+                print(f"⚠️ blocked symbol signal annotation failed | {symbol} | {e}", flush=True)
+                safe_telemetry_rollback(cur)
+            conn.commit()
+            print(f"🚫 SYMBOL BLOCKED FROM EXECUTION | {symbol} | OKX_BLOCKED_SYMBOLS", flush=True)
+            return jsonify({
+                "status": "blocked_symbol",
+                "symbol": symbol,
+                "reason": "okx_symbol_blocked_not_tradable_on_account",
+                "version": DATA_VERSION,
+            }), 200
+
         # ================= ENTRY ENGINE =================
         entry_allowed = False
         leadership_context = None
@@ -8345,6 +8458,16 @@ def webhook():
             print(f"⚠️ market lifecycle v6.9 logging skipped: {e}", flush=True)
             safe_telemetry_rollback(cur)
 
+        # ================= COIN SELECTION SNAPSHOT v9.8 =================
+        # Must happen BEFORE shadow/probe/live trade creation so every trade row
+        # receives Coin Form + Coin Health telemetry for later SQL analysis.
+        try:
+            leadership_context = enrich_coin_selection_context(cur, symbol, leadership_context or {})
+        except Exception as e:
+            print(f"⚠️ v9.8 coin selection context enrichment skipped | {symbol} | {e}", flush=True)
+            safe_telemetry_rollback(cur)
+            leadership_context = leadership_context or {}
+
         # ================= SHADOW CQE ENTRY ENGINE =================
         try:
             if decision == "LONG" and leadership_context:
@@ -8391,6 +8514,7 @@ def webhook():
                     trend,
                     signal_id,
                     signal_time,
+                    leadership_context,
                 )
         except Exception as e:
             print(f"⚠️ Persistence Hunter entry skipped: {e}", flush=True)
@@ -8405,13 +8529,12 @@ def webhook():
                 # ================= COIN FORM LIVE SELECTION GATE v9.0 =================
                 # Coin Form has veto power over fresh live capital.
                 # HOT / GOOD are allowed; NORMAL / THROTTLE / SHADOW are blocked.
-                coin_form_snapshot = get_coin_form_snapshot(cur, symbol) if ENABLE_COIN_FORM_ENGINE else {
+                leadership_context = enrich_coin_selection_context(cur, symbol, leadership_context or {})
+                coin_form_snapshot = leadership_context.get("coin_form_snapshot") or {
                     "coin_form_mode": "GOOD",
                     "coin_form_score": None,
                     "coin_form_reason": "coin_form_disabled",
                 }
-                leadership_context = leadership_context or {}
-                leadership_context["coin_form_snapshot"] = coin_form_snapshot
 
                 if ENABLE_COIN_FORM_ENGINE and not coin_form_allows_live_entry(coin_form_snapshot):
                     entry_allowed = False
@@ -8446,8 +8569,8 @@ def webhook():
                 # ================= COIN HEALTH SELF-HEALING GATE v7.6 =================
                 # If a symbol has stopped producing expansion, do not risk capital.
                 # Open a same-setup shadow observation instead so the coin can prove recovery.
-                coin_health_snapshot = get_coin_health_snapshot(cur, symbol)
-                leadership_context = leadership_context or {}
+                leadership_context = enrich_coin_selection_context(cur, symbol, leadership_context or {})
+                coin_health_snapshot = leadership_context.get("coin_health_snapshot") or get_coin_health_snapshot(cur, symbol)
                 leadership_context["coin_health_snapshot"] = coin_health_snapshot
 
                 if ENABLE_COIN_HEALTH_ENGINE and coin_health_snapshot.get("coin_health_mode") == "DISABLED":
@@ -9108,7 +9231,10 @@ def build_telegram_summary_message(cur, hours=24):
                 entry_quality,
                 COALESCE(pnl_percent, 0) AS pnl_percent,
                 COALESCE(pnl_gbp, 0) AS pnl_gbp,
-                COALESCE(fee_gbp, 0) AS fee_gbp,
+                CASE
+                    WHEN COALESCE(fee_gbp, 0) > 0 THEN COALESCE(fee_gbp, 0)
+                    ELSE COALESCE(entry_value_gbp, trade_size_gbp, 0) * %s
+                END AS fee_gbp,
                 COALESCE(peak_pnl_percent, 0) AS peak_pnl_percent,
                 close_reason,
                 closed_at
@@ -9128,7 +9254,7 @@ def build_telegram_summary_message(cur, hours=24):
             COALESCE(ROUND(AVG(pnl_percent)::numeric, 3), 0) AS avg_pnl_pct,
             COALESCE(ROUND(AVG(peak_pnl_percent)::numeric, 3), 0) AS avg_peak_pct
         FROM live_closed
-    """, (hours,))
+    """, (OKX_EST_FEE_RATE_ROUND_TRIP, hours,))
     row = cur.fetchone() or (0, 0, 0, 0, 0, 0, 0, 0)
     trades, wins, losses, net_pnl, gross_pnl, fees_gbp, avg_pnl, avg_peak = row
     trades = int(trades or 0)
@@ -9178,11 +9304,9 @@ def build_telegram_summary_message(cur, hours=24):
     lines.append(f"Win Rate: <b>{fmt_num(win_rate,1)}%</b>")
     lines.append("")
     lines.append("PnL:")
-    if float(fees_gbp or 0):
-        lines.append(f"<b>{fmt_money(net_pnl)}</b> net")
-        lines.append(f"Gross {fmt_money(gross_pnl)} | Fees {fmt_money(fees_gbp)}")
-    else:
-        lines.append(f"<b>{fmt_money(net_pnl)}</b>")
+    lines.append(f"Gross PnL: <b>{fmt_money(gross_pnl)}</b>")
+    lines.append(f"Estimated Fees: <b>-{fmt_money(abs(float(fees_gbp or 0)))}</b>")
+    lines.append(f"Net PnL: <b>{fmt_money(net_pnl)}</b>")
     lines.append(f"Avg trade {fmt_num(avg_pnl)}% | Avg peak {fmt_num(avg_peak)}%")
     lines.append("")
     lines.append(f"Open Trades: <b>{open_count}</b>")
