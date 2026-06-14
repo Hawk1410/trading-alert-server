@@ -1,7 +1,7 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v9.9.3
+# VERSION: v9.9.4
 # TITLE: HOT-ONLY LIVE CAPITAL + TRUE OKX EXECUTION TELEGRAM HARDENING
 # =========================
 
@@ -414,7 +414,7 @@ def parse_symbol_set_env(name, default):
 OKX_BLOCKED_SYMBOLS = parse_symbol_set_env("OKX_BLOCKED_SYMBOLS", "TAOUSDT")
 OKX_EST_FEE_RATE_ROUND_TRIP = float(os.environ.get("OKX_EST_FEE_RATE_ROUND_TRIP", "0.002") or 0.002)
 
-DATA_VERSION = "v9.9.3"
+DATA_VERSION = "v9.9.4"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -473,7 +473,7 @@ LEADERSHIP_CORE_SHADOW_HARD_STOP = float(os.environ.get("LEADERSHIP_CORE_SHADOW_
 
 # Partial profit bank: v8.2 lowers the default because recent data showed +2% peaks fading to ~0%.
 # This banks half the live position after a meaningful +1.5% expansion, while leaving a runner alive.
-ENABLE_PARTIAL_PROFIT_BANK_V66 = os.environ.get("ENABLE_PARTIAL_PROFIT_BANK_V66", "true").lower() == "true"
+ENABLE_PARTIAL_PROFIT_BANK_V66 = os.environ.get("ENABLE_PARTIAL_PROFIT_BANK_V66", "false").lower() == "true"  # v9.9.4 safety: disabled by default; old helper can flatten full OKX balance
 PARTIAL_BANK_TRIGGER_PCT = float(os.environ.get("PARTIAL_BANK_TRIGGER_PCT", "1.50") or 1.50)
 PARTIAL_BANK_FRACTION = float(os.environ.get("PARTIAL_BANK_FRACTION", "0.50") or 0.50)
 
@@ -2874,11 +2874,29 @@ def sweep_stale_shadow_trades(cur):
 
 
 def maybe_partial_profit_bank(cur, tid, sym, direction, entry_price, price, entry_quality, current_peak, pnl_percent, opened_at, mins, leadership_context=None):
-    """Bank PARTIAL_BANK_FRACTION at +PARTIAL_BANK_TRIGGER_PCT once, keep the runner open."""
+    """Bank PARTIAL_BANK_FRACTION at +PARTIAL_BANK_TRIGGER_PCT once, keep the runner open.
+
+    v9.9.4 SAFETY FIX:
+    The legacy OKX exit helper sells the available OKX balance for a symbol.
+    That is correct for full exits, but unsafe for partial banking because a
+    partial-bank call can immediately flatten a newly confirmed live upgrade.
+    Until we add a dedicated partial-exit order path, partial banking must not
+    place live OKX sell orders.
+    """
     if not ENABLE_PARTIAL_PROFIT_BANK_V66:
         return False
     if direction != "LONG":
         return False
+
+    # Hard safety: do not partial-bank live OKX trades with the full-exit helper.
+    try:
+        if has_successful_okx_live_entry(cur, tid):
+            print(f"🛡️ PARTIAL BANK DISABLED FOR LIVE OKX TRADE | {sym} | id={tid} | avoiding full-balance sell helper", flush=True)
+            return False
+    except Exception as e:
+        print(f"⚠️ partial bank live-entry safety check failed closed for {sym}/{tid}: {e}", flush=True)
+        return False
+
     try:
         ensure_archetype_state_columns(cur)
         cur.execute("SELECT COALESCE(partial_bank_4_done, FALSE) FROM bot_trades_v4 WHERE id = %s", (tid,))
@@ -2919,6 +2937,13 @@ def maybe_partial_profit_bank(cur, tid, sym, direction, entry_price, price, entr
             log_trade_event(cur, tid, sym, "partial_bank_4pct", price, pnl_percent, current_peak, mins, 0, 0, False)
         except Exception:
             pass
+        try:
+            cur.execute("SELECT COALESCE(is_shadow, TRUE) FROM bot_trades_v4 WHERE id = %s", (tid,))
+            _shadow_row = cur.fetchone()
+            is_shadow_trade = bool(_shadow_row[0]) if _shadow_row else True
+        except Exception:
+            is_shadow_trade = True
+
         send_trade_telegram_once(
             cur,
             tid,
@@ -3942,8 +3967,8 @@ def okx_place_market_order(cur, trade_id, symbol, direction, action, price=None,
 
     if action == "entry":
         live_open_count = get_live_real_open_count(cur)
-        if live_open_count > MAX_LIVE_OPEN_TRADES:
-            error_message = f"MAX_LIVE_OPEN_TRADES exceeded: {live_open_count} > {MAX_LIVE_OPEN_TRADES}"
+        if live_open_count >= MAX_LIVE_OPEN_TRADES:
+            error_message = f"MAX_LIVE_OPEN_TRADES reached: {live_open_count} >= {MAX_LIVE_OPEN_TRADES}"
             log_okx_order(
                 cur, trade_id, symbol, okx_inst_id, action, side, direction,
                 False, payload, None, False, error_message
