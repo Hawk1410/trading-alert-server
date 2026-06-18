@@ -414,7 +414,7 @@ def parse_symbol_set_env(name, default):
 OKX_BLOCKED_SYMBOLS = parse_symbol_set_env("OKX_BLOCKED_SYMBOLS", "TAOUSDT")
 OKX_EST_FEE_RATE_ROUND_TRIP = float(os.environ.get("OKX_EST_FEE_RATE_ROUND_TRIP", "0.002") or 0.002)
 
-DATA_VERSION = "v10.0_HABITAT_V0_1"
+DATA_VERSION = "v10.0.1_HABITAT_CQE_HOTFIX"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -5358,7 +5358,7 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
     if (
         adaptive_dead_market_shadow_only
         and ENABLE_ADAPTIVE_DEAD_MARKET_CONFIRMED_LIVE_UPGRADES
-        and cqe_confirmed
+        and confirmed
     ):
         adaptive_dead_market_shadow_only = False
 
