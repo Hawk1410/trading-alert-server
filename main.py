@@ -414,7 +414,7 @@ def parse_symbol_set_env(name, default):
 OKX_BLOCKED_SYMBOLS = parse_symbol_set_env("OKX_BLOCKED_SYMBOLS", "TAOUSDT")
 OKX_EST_FEE_RATE_ROUND_TRIP = float(os.environ.get("OKX_EST_FEE_RATE_ROUND_TRIP", "0.002") or 0.002)
 
-DATA_VERSION = "v9.9.4"
+DATA_VERSION = "v10.0_HABITAT_V0_1"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -852,6 +852,123 @@ ENABLE_NEUTRAL_MARKET_SHADOW_FILTER = os.environ.get("ENABLE_NEUTRAL_MARKET_SHAD
 ENABLE_MARKET_HEAT_HOT_ONLY_LIVE = os.environ.get("ENABLE_MARKET_HEAT_HOT_ONLY_LIVE", "true").lower() == "true"
 MARKET_HEAT_MIN_LIVE_SCORE = int(os.environ.get("MARKET_HEAT_MIN_LIVE_SCORE", "3") or 3)
 ENABLE_ADAPTIVE_DEAD_MARKET_CONFIRMED_LIVE_UPGRADES = os.environ.get("ENABLE_ADAPTIVE_DEAD_MARKET_CONFIRMED_LIVE_UPGRADES", "true").lower() == "true"
+
+# =========================
+# 🧠 v10.0 HABITAT ENGINE V0.1
+# =========================
+# Research summary:
+# - Coin + market habitat is now a stronger unit of edge than coin alone.
+# - Habitat MATCH trades strongly outperformed MISMATCH trades in the 30d study.
+# - V0.1 only applies the highest-confidence rules and keeps all other coins unchanged.
+# - Habitat rules affect LIVE CAPITAL only. Ghost/shadow learning still continues.
+ENABLE_HABITAT_ENGINE = os.environ.get("ENABLE_HABITAT_ENGINE", "true").lower() == "true"
+ENABLE_HABITAT_RENDER_LOGS = os.environ.get("ENABLE_HABITAT_RENDER_LOGS", "true").lower() == "true"
+
+# Proven current block: NEAR has been negative across 7d/14d/30d and every heat regime.
+HABITAT_SHADOW_ONLY_COINS = {
+    x.strip().upper()
+    for x in os.environ.get("HABITAT_SHADOW_ONLY_COINS", "NEARUSDT").split(",")
+    if x.strip()
+}
+
+# High-confidence habitats from multi-window analysis.
+# Scores: 0=DEAD, 1=NEUTRAL, 2=HEALTHY, 3=HOT.
+# These rules are intentionally small and reversible.
+HIGH_CONFIDENCE_HABITATS = {
+    "WLDUSDT": 2,      # HEALTHY only
+    "PENDLEUSDT": 3,   # HOT only
+    "OPUSDT": 3,       # HOT only
+    "FETUSDT": 1,      # NEUTRAL only
+}
+
+HABITAT_HEAT_NAMES = {
+    0: "DEAD",
+    1: "NEUTRAL",
+    2: "HEALTHY",
+    3: "HOT",
+}
+
+
+def evaluate_habitat_live_permission(symbol, market_heat_score, market_heat_regime=None):
+    """Return habitat permission for real live capital.
+
+    V0.1 applies only high-confidence rules:
+    - NEARUSDT is shadow-only.
+    - WLD/PENDLE/OP/FET require their proven habitat.
+    - All other coins are unchanged.
+
+    This is deliberately separate from Coin Form / Coin Health / BPT logic.
+    """
+    sym = str(symbol or "").upper()
+    try:
+        heat_score = int(market_heat_score)
+    except Exception:
+        heat_score = -1
+
+    current_name = str(market_heat_regime or HABITAT_HEAT_NAMES.get(heat_score, "UNKNOWN")).upper()
+
+    result = {
+        "allows_live": True,
+        "reason": "habitat_no_rule",
+        "has_rule": False,
+        "shadow_only": False,
+        "required_heat": None,
+        "required_habitat": None,
+        "current_heat": heat_score,
+        "current_habitat": current_name,
+        "hot_only_override": False,
+    }
+
+    if not ENABLE_HABITAT_ENGINE:
+        result["reason"] = "habitat_engine_disabled"
+        return result
+
+    if sym in HABITAT_SHADOW_ONLY_COINS:
+        result.update({
+            "allows_live": False,
+            "reason": "habitat_shadow_only_coin",
+            "has_rule": True,
+            "shadow_only": True,
+        })
+        return result
+
+    if sym in HIGH_CONFIDENCE_HABITATS:
+        required_heat = int(HIGH_CONFIDENCE_HABITATS[sym])
+        required_name = HABITAT_HEAT_NAMES.get(required_heat, str(required_heat))
+        is_match = (heat_score == required_heat)
+        result.update({
+            "allows_live": bool(is_match),
+            "reason": "habitat_match" if is_match else f"habitat_mismatch:required={required_name},current={current_name}",
+            "has_rule": True,
+            "required_heat": required_heat,
+            "required_habitat": required_name,
+            # This lets high-confidence non-HOT habitats (WLD HEALTHY, FET NEUTRAL)
+            # receive live capital even while the global HOT-only gate remains active
+            # for the rest of the universe.
+            "hot_only_override": bool(is_match and required_heat < MARKET_HEAT_MIN_LIVE_SCORE),
+        })
+        return result
+
+    return result
+
+
+def log_habitat_decision(symbol, habitat_result, decision_context=""):
+    if not ENABLE_HABITAT_RENDER_LOGS:
+        return
+    try:
+        status = "ALLOW" if habitat_result.get("allows_live") else "SHADOW"
+        required = habitat_result.get("required_habitat") or "NONE"
+        current = habitat_result.get("current_habitat") or "UNKNOWN"
+        reason = habitat_result.get("reason") or "unknown"
+        override = habitat_result.get("hot_only_override")
+        print(
+            f"🧠 HABITAT {status} | {symbol} | "
+            f"ctx={decision_context or 'live'} | required={required} | current={current} | "
+            f"reason={reason} | hot_only_override={override}",
+            flush=True,
+        )
+    except Exception as e:
+        print(f"⚠️ habitat log failed | {symbol} | {e}", flush=True)
 
 
 # v6.6.19/v6.6.20: real capital only added AFTER CQE confirmation.
@@ -5282,6 +5399,12 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
         or market_heat_score >= MARKET_HEAT_MIN_LIVE_SCORE
     )
 
+    habitat_for_scalein = evaluate_habitat_live_permission(sym, market_heat_score, market_heat_regime)
+    habitat_allows_live = bool(habitat_for_scalein.get("allows_live", True))
+    habitat_hot_only_override = bool(habitat_for_scalein.get("hot_only_override", False))
+    effective_market_heat_allows_live = bool(market_heat_allows_live or habitat_hot_only_override)
+    log_habitat_decision(sym, habitat_for_scalein, "bpt_scalein")
+
     safe_update_trade_telemetry(cur, tid, market_heat_for_scalein)
 
     adaptive_dead_market_form_override = bool(
@@ -5309,8 +5432,12 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
         and coin_allows_live_upgrade_or_form_override
         and row_allows_scalein
         and confirmation_allows_scalein
-        and market_heat_allows_live
-        and (not ENABLE_NEUTRAL_MARKET_SHADOW_FILTER or market_heat_regime != "NEUTRAL")
+        and effective_market_heat_allows_live
+        and habitat_allows_live
+        and (
+            habitat_hot_only_override
+            or (not ENABLE_NEUTRAL_MARKET_SHADOW_FILTER or market_heat_regime != "NEUTRAL")
+        )
     )
 
     scalein_allowed = (
@@ -5321,7 +5448,8 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
         and coin_form_allows_scalein
         and row_allows_scalein
         and confirmation_allows_scalein
-        and market_heat_allows_live
+        and effective_market_heat_allows_live
+        and habitat_allows_live
     )
 
     # v7.4 SCALE-IN VISIBILITY HOTFIX:
@@ -5334,8 +5462,10 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
         scalein_block_reason = "adaptive_dead_market_leader_shadow_only"
     elif not ENABLE_CQE_REAL_SCALEINS:
         scalein_block_reason = "real_scaleins_toggle_off"
-    elif not market_heat_allows_live:
+    elif not effective_market_heat_allows_live:
         scalein_block_reason = f"market_heat_not_hot:score={market_heat_score},regime={market_heat_regime},min={MARKET_HEAT_MIN_LIVE_SCORE}"
+    elif not habitat_allows_live:
+        scalein_block_reason = f"habitat_live_block:{habitat_for_scalein.get('reason')}"
     elif not coin_allows_live_upgrade_or_form_override:
         scalein_block_reason = f"coin_profile_{coin_profile_for_scalein.get('tier')}_{coin_profile_for_scalein.get('coin_health_mode')}_no_live_upgrade"
     elif not coin_form_allows_scalein:
@@ -8410,14 +8540,21 @@ def webhook():
 
                         live_entry_heat_score = safe_int(live_entry_market_heat.get("market_heat_score"), -1)
                         live_entry_heat_regime = str(live_entry_market_heat.get("market_heat_regime") or "UNKNOWN").upper()
+                        habitat_for_entry = evaluate_habitat_live_permission(symbol, live_entry_heat_score, live_entry_heat_regime)
+                        habitat_entry_allows_live = bool(habitat_for_entry.get("allows_live", True))
+                        habitat_entry_override = bool(habitat_for_entry.get("hot_only_override", False))
+                        log_habitat_decision(symbol, habitat_for_entry, "main_entry")
 
-                        if live_entry_heat_score < MARKET_HEAT_MIN_LIVE_SCORE:
+                        if (not habitat_entry_allows_live) or (live_entry_heat_score < MARKET_HEAT_MIN_LIVE_SCORE and not habitat_entry_override):
                             shadow_ctx = dict(leadership_context or {})
-                            shadow_ctx["market_os_engine"] = (shadow_ctx.get("market_os_engine") or "HOT_ONLY_FILTER_SHADOW")
-                            shadow_ctx["size_scaling_reason"] = (
-                                f"market_heat_not_hot:score={live_entry_heat_score},"
-                                f"regime={live_entry_heat_regime},min={MARKET_HEAT_MIN_LIVE_SCORE}"
-                            )
+                            shadow_ctx["market_os_engine"] = (shadow_ctx.get("market_os_engine") or "HABITAT_FILTER_SHADOW")
+                            if not habitat_entry_allows_live:
+                                shadow_ctx["size_scaling_reason"] = f"habitat_live_block:{habitat_for_entry.get('reason')}"
+                            else:
+                                shadow_ctx["size_scaling_reason"] = (
+                                    f"market_heat_not_hot:score={live_entry_heat_score},"
+                                    f"regime={live_entry_heat_regime},min={MARKET_HEAT_MIN_LIVE_SCORE}"
+                                )
 
                             try:
                                 open_shadow_market_os_trade(
@@ -10228,6 +10365,9 @@ def bool_status():
         "ENABLE_BPT_CQE_CONFIRMED_GHOST_LIVE_ENTRY": ENABLE_BPT_CQE_CONFIRMED_GHOST_LIVE_ENTRY,
         "ENABLE_MARKET_HEAT_HOT_ONLY_LIVE": ENABLE_MARKET_HEAT_HOT_ONLY_LIVE,
         "MARKET_HEAT_MIN_LIVE_SCORE": MARKET_HEAT_MIN_LIVE_SCORE,
+        "ENABLE_HABITAT_ENGINE": ENABLE_HABITAT_ENGINE,
+        "HABITAT_SHADOW_ONLY_COINS": sorted(HABITAT_SHADOW_ONLY_COINS),
+        "HIGH_CONFIDENCE_HABITATS": HIGH_CONFIDENCE_HABITATS,
         "BPT_CQE_PROBE_SIZE_GBP": BPT_CQE_PROBE_SIZE_GBP,
         "ENABLE_BPT_PROBE_LIFECYCLE_ENGINE": ENABLE_BPT_PROBE_LIFECYCLE_ENGINE,
         "BPT_MONSTER_FASTTRACK_MIN_AGE_MINUTES": BPT_MONSTER_FASTTRACK_MIN_AGE_MINUTES,
