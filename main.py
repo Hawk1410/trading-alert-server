@@ -414,7 +414,7 @@ def parse_symbol_set_env(name, default):
 OKX_BLOCKED_SYMBOLS = parse_symbol_set_env("OKX_BLOCKED_SYMBOLS", "TAOUSDT")
 OKX_EST_FEE_RATE_ROUND_TRIP = float(os.environ.get("OKX_EST_FEE_RATE_ROUND_TRIP", "0.002") or 0.002)
 
-DATA_VERSION = "v10.1_FAST_REALITY_OVERRIDE"
+DATA_VERSION = "v10.1.1_DASHBOARD_CLARITY"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -10397,11 +10397,11 @@ def build_telegram_coins_message(cur):
                 current_group = group
 
             health_icon = "🟢" if health_mode == "LIVE" else ("🔴" if health_mode == "DISABLED" else "🟡")
-            live_rule = "LIVE" if form_mode in COIN_FORM_ALLOWED_LIVE_MODES else "BLOCK"
+            form_gate = "✅FORM" if form_mode in COIN_FORM_ALLOWED_LIVE_MODES else "🚫FORM"
             open_txt = f" | open {open_trades}" if int(open_trades or 0) > 0 else ""
             lines.append(
                 f"{short_symbol(symbol)} | {tier}/{health_icon}{health_mode or '?'} | "
-                f"{fmt_num(form_score)} | {live_rule} | "
+                f"{fmt_num(form_score)} | {form_gate} | "
                 f"12h {trades_12h}x avg {signed(avg_12h)} pnl {signed(pnl_12h)} | "
                 f"24h {trades_24h}x {signed(pnl_24h)} | "
                 f"7d {trades_7d}x {signed(pnl_7d)}{open_txt}"
