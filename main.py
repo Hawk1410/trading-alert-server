@@ -6183,8 +6183,21 @@ def get_persistence_hunter_context(cur, symbol, signal_time):
         score, rank, core_hits, top3_hits, first_core_time, first_top3_time = row
         core_age = None
         top3_age = None
+
+        from datetime import timezone
+
+        if signal_time and getattr(signal_time, "tzinfo", None) is None:
+            signal_time = signal_time.replace(tzinfo=timezone.utc)
+
+        if first_core_time and getattr(first_core_time, "tzinfo", None) is None:
+            first_core_time = first_core_time.replace(tzinfo=timezone.utc)
+
+        if first_top3_time and getattr(first_top3_time, "tzinfo", None) is None:
+            first_top3_time = first_top3_time.replace(tzinfo=timezone.utc)
+
         if first_core_time:
             core_age = (signal_time - first_core_time).total_seconds() / 60
+
         if first_top3_time:
             top3_age = (signal_time - first_top3_time).total_seconds() / 60
         return {
