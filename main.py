@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v9.9.4
-# TITLE: HOT-ONLY LIVE CAPITAL + TRUE OKX EXECUTION TELEGRAM HARDENING
+# VERSION: v10.0.2
+# TITLE: HABITAT + SHADOW CLIMAX EXCEPTIONS
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v9.9.3 HOT-ONLY LIVE CAPITAL + TRUE EXECUTION HARDENING RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v10.0.2 SHADOW CLIMAX EXCEPTIONS RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -414,7 +414,7 @@ def parse_symbol_set_env(name, default):
 OKX_BLOCKED_SYMBOLS = parse_symbol_set_env("OKX_BLOCKED_SYMBOLS", "TAOUSDT")
 OKX_EST_FEE_RATE_ROUND_TRIP = float(os.environ.get("OKX_EST_FEE_RATE_ROUND_TRIP", "0.002") or 0.002)
 
-DATA_VERSION = "v10.0.1_HABITAT_CQE_HOTFIX"
+DATA_VERSION = "v10.0.2_SHADOW_CLIMAX_EXCEPTIONS"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -725,6 +725,30 @@ UNICORN_MAX_SAME_SYMBOL_OPEN = int(os.environ.get("UNICORN_MAX_SAME_SYMBOL_OPEN"
 UNICORN_OVERRIDE_REASONS = {
     "leadership_climax_delta_blocked",
     "max_same_symbol_open",
+}
+
+
+# =========================
+# 🧪 v10.0.2 SHADOW CLIMAX EXCEPTIONS
+# =========================
+# Research-only layer. Does NOT allow live capital.
+# Purpose: create shadow lifecycle trades for habitat-aligned climax signals that
+# were previously blocked by leadership_climax_delta_blocked.
+ENABLE_SHADOW_CLIMAX_EXCEPTIONS = os.environ.get(
+    "ENABLE_SHADOW_CLIMAX_EXCEPTIONS", "true"
+).lower() == "true"
+
+SHADOW_CLIMAX_EXCEPTION_MODEL_SIZE_GBP = float(
+    os.environ.get("SHADOW_CLIMAX_EXCEPTION_MODEL_SIZE_GBP", "10") or 10
+)
+
+# Only these coin+habitat combinations passed the first opportunity simulation.
+# Keep this deliberately small until shadow lifecycle data validates capture.
+SHADOW_CLIMAX_EXCEPTION_RULES = {
+    ("WLDUSDT", "HEALTHY"),
+    ("JUPUSDT", "HOT"),
+    ("SEIUSDT", "HOT"),
+    ("SEIUSDT", "HEALTHY"),
 }
 
 
@@ -6412,6 +6436,84 @@ def is_unicorn_entry_candidate(leadership_context, momentum, trend):
     return True, pressure_score, "unicorn_candidate"
 
 
+def evaluate_shadow_climax_exception(symbol, market_heat_regime=None, market_heat_score=None):
+    """Return (allowed, reason, habitat_name) for research-only climax exception shadows.
+
+    This never approves live capital. It only decides whether to create an
+    additional shadow trade for lifecycle validation.
+    """
+    if not ENABLE_SHADOW_CLIMAX_EXCEPTIONS:
+        return False, "shadow_climax_exceptions_disabled", None
+
+    sym = str(symbol or "").upper()
+
+    # Prefer explicit regime text, fallback to score mapping.
+    habitat_name = str(market_heat_regime or "").upper()
+    if not habitat_name or habitat_name == "UNKNOWN":
+        try:
+            habitat_name = HABITAT_HEAT_NAMES.get(int(market_heat_score), "UNKNOWN")
+        except Exception:
+            habitat_name = "UNKNOWN"
+
+    if (sym, habitat_name) in SHADOW_CLIMAX_EXCEPTION_RULES:
+        return True, f"leadership_climax_exception:{sym}:{habitat_name}", habitat_name
+
+    return False, f"leadership_climax_exception_no_rule:{sym}:{habitat_name}", habitat_name
+
+
+def open_shadow_climax_exception_trade(cur, symbol, price, momentum, trend, signal_id, signal_time, leadership_context):
+    """Open a shadow-only lifecycle row for habitat-aligned climax signals."""
+    ctx = dict(leadership_context or {})
+
+    try:
+        heat_ctx = get_market_heat_context(cur)
+        ctx["market_heat_context"] = heat_ctx
+        ctx.update(heat_ctx)
+    except Exception as e:
+        print(f"⚠️ shadow climax heat context failed | {symbol} | {e}", flush=True)
+        safe_telemetry_rollback(cur)
+        heat_ctx = {"market_heat_regime": "UNKNOWN", "market_heat_score": None}
+
+    ok, reason, habitat_name = evaluate_shadow_climax_exception(
+        symbol,
+        heat_ctx.get("market_heat_regime"),
+        heat_ctx.get("market_heat_score"),
+    )
+
+    if not ok:
+        return False, reason, None
+
+    ctx["market_os_engine"] = "SHADOW_CLIMAX_EXCEPTION"
+    ctx["size_scaling_reason"] = reason
+    ctx["shadow_reason"] = reason
+    ctx["leadership_climax_exception"] = True
+    ctx["leadership_climax_exception_habitat"] = habitat_name
+    ctx["leadership_climax_exception_original_block"] = "leadership_climax_delta_blocked"
+
+    trade_id = open_shadow_market_os_trade(
+        cur,
+        symbol,
+        "LONG",
+        price,
+        momentum,
+        trend,
+        "LEADERSHIP_CLIMAX_EXCEPTION",
+        signal_id,
+        signal_time,
+        ctx,
+        reason,
+        model_size_gbp=SHADOW_CLIMAX_EXCEPTION_MODEL_SIZE_GBP,
+    )
+
+    print(
+        f"🧪 SHADOW CLIMAX EXCEPTION OPENED | {symbol} | habitat={habitat_name} | "
+        f"reason={reason} | id={trade_id}",
+        flush=True,
+    )
+
+    return True, reason, trade_id
+
+
 def apply_unicorn_entry_override(leadership_context, momentum, trend, original_block_reason):
     """
     Medium-risk live version:
@@ -8466,6 +8568,31 @@ def webhook():
                             flush=True
                         )
 
+                # v10.0.2 SHADOW CLIMAX EXCEPTIONS:
+                # If the climax block remains blocked after any existing Unicorn logic,
+                # create a research-only shadow row for validated coin+habitat combinations.
+                if not entry_allowed and block_reason == "leadership_climax_delta_blocked":
+                    try:
+                        shadow_created, shadow_reason, shadow_trade_id = open_shadow_climax_exception_trade(
+                            cur,
+                            symbol,
+                            price,
+                            momentum,
+                            trend,
+                            signal_id,
+                            signal_time,
+                            leadership_context,
+                        )
+                        if shadow_created:
+                            leadership_context = leadership_context or {}
+                            leadership_context["shadow_climax_exception_created"] = True
+                            leadership_context["shadow_climax_exception_reason"] = shadow_reason
+                            leadership_context["shadow_climax_exception_trade_id"] = str(shadow_trade_id)
+                            block_reason = "leadership_climax_exception_shadowed"
+                    except Exception as e:
+                        print(f"⚠️ shadow climax exception creation failed | {symbol} | {e}", flush=True)
+                        safe_telemetry_rollback(cur)
+
             if entry_allowed:
                 entry_quality = classify_leadership_tier(leadership_context["prior_avg_peak"])
                 leadership_context["leadership_max_60m"] = max(
@@ -8625,7 +8752,7 @@ def webhook():
 
             # v6.6 ROT_MICRO: independent tiny continuation harvester.
             # Only considered if core leadership entry did not already allow a trade.
-            if not entry_allowed and ENABLE_ROT_MICRO_LIVE:
+            if not entry_allowed and block_reason != "leadership_climax_exception_shadowed" and ENABLE_ROT_MICRO_LIVE:
                 rot_ok, rot_reason, rot_ctx = is_rot_micro_candidate(cur, symbol, momentum, trend, leadership_context, shadow_mode=False)
                 if rot_ok:
                     okx_tradable, okx_tradability_reason = is_okx_symbol_live_tradable(symbol)
@@ -8650,7 +8777,7 @@ def webhook():
 
             # v6.9.2 ROT_MICRO_V2_SHADOW: live ROT is disabled, but filtered shadow entries are still logged.
             try:
-                if not entry_allowed and ENABLE_ROT_MICRO_SHADOW:
+                if not entry_allowed and block_reason != "leadership_climax_exception_shadowed" and ENABLE_ROT_MICRO_SHADOW:
                     rot_shadow_ok, rot_shadow_reason, rot_shadow_ctx = is_rot_micro_candidate(
                         cur, symbol, momentum, trend, leadership_context, shadow_mode=True
                     )
@@ -10368,6 +10495,9 @@ def bool_status():
         "ENABLE_HABITAT_ENGINE": ENABLE_HABITAT_ENGINE,
         "HABITAT_SHADOW_ONLY_COINS": sorted(HABITAT_SHADOW_ONLY_COINS),
         "HIGH_CONFIDENCE_HABITATS": HIGH_CONFIDENCE_HABITATS,
+        "ENABLE_SHADOW_CLIMAX_EXCEPTIONS": ENABLE_SHADOW_CLIMAX_EXCEPTIONS,
+        "SHADOW_CLIMAX_EXCEPTION_RULES": sorted([f"{s}:{h}" for s, h in SHADOW_CLIMAX_EXCEPTION_RULES]),
+        "SHADOW_CLIMAX_EXCEPTION_MODEL_SIZE_GBP": SHADOW_CLIMAX_EXCEPTION_MODEL_SIZE_GBP,
         "BPT_CQE_PROBE_SIZE_GBP": BPT_CQE_PROBE_SIZE_GBP,
         "ENABLE_BPT_PROBE_LIFECYCLE_ENGINE": ENABLE_BPT_PROBE_LIFECYCLE_ENGINE,
         "BPT_MONSTER_FASTTRACK_MIN_AGE_MINUTES": BPT_MONSTER_FASTTRACK_MIN_AGE_MINUTES,
