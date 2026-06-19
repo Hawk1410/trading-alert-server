@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v10.0.2
-# TITLE: HABITAT + SHADOW CLIMAX EXCEPTIONS
+# VERSION: v10.1
+# TITLE: FAST REALITY OVERRIDE + HABITAT + SHADOW CLIMAX EXCEPTIONS
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v10.0.2 SHADOW CLIMAX EXCEPTIONS RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v10.1 FAST REALITY OVERRIDE RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -414,7 +414,7 @@ def parse_symbol_set_env(name, default):
 OKX_BLOCKED_SYMBOLS = parse_symbol_set_env("OKX_BLOCKED_SYMBOLS", "TAOUSDT")
 OKX_EST_FEE_RATE_ROUND_TRIP = float(os.environ.get("OKX_EST_FEE_RATE_ROUND_TRIP", "0.002") or 0.002)
 
-DATA_VERSION = "v10.0.2_SHADOW_CLIMAX_EXCEPTIONS"
+DATA_VERSION = "v10.1_FAST_REALITY_OVERRIDE"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -600,6 +600,29 @@ COIN_PROMOTION_MIN_IMPROVEMENT = float(os.environ.get("COIN_PROMOTION_MIN_IMPROV
 COIN_DEMOTION_FAILED_UPGRADES = int(os.environ.get("COIN_DEMOTION_FAILED_UPGRADES", "3") or 3)
 COIN_DEMOTION_RECENT_UPGRADE_AVG = float(os.environ.get("COIN_DEMOTION_RECENT_UPGRADE_AVG", "-0.20") or -0.20)
 COIN_RECENT_WINDOW = int(os.environ.get("COIN_RECENT_WINDOW", "10") or 10)
+
+# =========================
+# ⚡ v10.1 FAST REALITY OVERRIDE
+# =========================
+# Research-backed 2026-06-19:
+# Slow Coin Health was lagging current reality. A-tier/live coins such as INJ/NEAR/AR/OP
+# were underperforming while Discovery/Shadow leaders such as AVAX/JUP/XRP were outperforming.
+# This layer does not replace Coin Health. It gives recent realised performance authority
+# when the evidence is strong enough.
+ENABLE_FAST_REALITY_OVERRIDE = env_bool("ENABLE_FAST_REALITY_OVERRIDE", True)
+
+# Demotion: catches stale historical winners currently drawing down.
+REALITY_DEMOTE_MIN_TRADES_7D = int(os.environ.get("REALITY_DEMOTE_MIN_TRADES_7D", "15") or 15)
+REALITY_DEMOTE_MAX_PNL_7D = float(os.environ.get("REALITY_DEMOTE_MAX_PNL_7D", "-5.0") or -5.0)
+REALITY_DEMOTE_MODE = os.environ.get("REALITY_DEMOTE_MODE", "SHADOW").upper()
+
+# Promotion: catches current leaders once they have enough recent proof.
+REALITY_PROMOTE_MIN_TRADES_7D = int(os.environ.get("REALITY_PROMOTE_MIN_TRADES_7D", "8") or 8)
+REALITY_PROMOTE_MIN_AVG_7D = float(os.environ.get("REALITY_PROMOTE_MIN_AVG_7D", "0.10") or 0.10)
+REALITY_PROMOTE_MIN_PEAK_7D = float(os.environ.get("REALITY_PROMOTE_MIN_PEAK_7D", "0.70") or 0.70)
+REALITY_PROMOTE_MODE = os.environ.get("REALITY_PROMOTE_MODE", "LIVE").upper()
+REALITY_PROMOTE_TARGET_TIER = os.environ.get("REALITY_PROMOTE_TARGET_TIER", "B").upper()
+
 
 COIN_TIER_A = {"HBARUSDT", "INJUSDT", "OPUSDT", "ARUSDT", "TIAUSDT", "FETUSDT", "NEARUSDT"}
 COIN_TIER_B = {"ETCUSDT", "ARBUSDT", "SUIUSDT"}
@@ -1859,6 +1882,92 @@ def maybe_send_coin_mode_alert(symbol, old_mode, new_mode, old_tier, new_tier, r
         print(f"⚠️ coin mode telegram failed for {symbol}: {e}", flush=True)
 
 
+
+def get_coin_reality_override(cur, symbol):
+    """Fast recent-performance override for Coin Health.
+
+    Uses only closed trades from the last 7 days.
+    Returns action HOLD / DEMOTE / PROMOTE plus stats.
+    """
+    sym = normalize_symbol(symbol)
+    result = {
+        "action": "HOLD",
+        "reason": "reality_hold",
+        "trades_7d": 0,
+        "avg_7d": 0.0,
+        "pnl_7d": 0.0,
+        "peak_7d": 0.0,
+    }
+
+    if not ENABLE_FAST_REALITY_OVERRIDE:
+        result["reason"] = "reality_override_disabled"
+        return result
+
+    try:
+        cur.execute("""
+            SELECT
+                COUNT(*) AS trades_7d,
+                COALESCE(AVG(pnl_percent),0) AS avg_7d,
+                COALESCE(SUM(pnl_percent),0) AS pnl_7d,
+                COALESCE(AVG(peak_pnl_percent),0) AS peak_7d
+            FROM bot_trades_v4
+            WHERE symbol = %s
+              AND status = 'CLOSED'
+              AND pnl_percent IS NOT NULL
+              AND opened_at >= NOW() - INTERVAL '7 days'
+        """, (sym,))
+        row = cur.fetchone()
+        if not row:
+            return result
+
+        trades_7d = int(row[0] or 0)
+        avg_7d = float(row[1] or 0)
+        pnl_7d = float(row[2] or 0)
+        peak_7d = float(row[3] or 0)
+
+        result.update({
+            "trades_7d": trades_7d,
+            "avg_7d": avg_7d,
+            "pnl_7d": pnl_7d,
+            "peak_7d": peak_7d,
+        })
+
+        if trades_7d >= REALITY_DEMOTE_MIN_TRADES_7D and pnl_7d <= REALITY_DEMOTE_MAX_PNL_7D:
+            result["action"] = "DEMOTE"
+            result["reason"] = (
+                f"fast_reality_demote:"
+                f"trades_7d={trades_7d},pnl_7d={round(pnl_7d,3)},"
+                f"threshold={REALITY_DEMOTE_MAX_PNL_7D}"
+            )
+            return result
+
+        if (
+            trades_7d >= REALITY_PROMOTE_MIN_TRADES_7D
+            and avg_7d > REALITY_PROMOTE_MIN_AVG_7D
+            and peak_7d > REALITY_PROMOTE_MIN_PEAK_7D
+        ):
+            result["action"] = "PROMOTE"
+            result["reason"] = (
+                f"fast_reality_promote:"
+                f"trades_7d={trades_7d},avg_7d={round(avg_7d,3)},"
+                f"peak_7d={round(peak_7d,3)}"
+            )
+            return result
+
+        result["reason"] = (
+            f"reality_hold:"
+            f"trades_7d={trades_7d},pnl_7d={round(pnl_7d,3)},"
+            f"avg_7d={round(avg_7d,3)},peak_7d={round(peak_7d,3)}"
+        )
+        return result
+
+    except Exception as e:
+        print(f"⚠️ reality override lookup failed for {sym}: {e}", flush=True)
+        safe_telemetry_rollback(cur)
+        result["reason"] = f"reality_error_{str(e)[:80]}"
+        return result
+
+
 def refresh_coin_learning_from_history(cur, symbol, allow_mode_change=True):
     if not ENABLE_COIN_PERSONALITY_LEARNING:
         return None
@@ -1923,6 +2032,7 @@ def refresh_coin_learning_from_history(cur, symbol, allow_mode_change=True):
         old_mode = profile.get("coin_health_mode")
         old_tier = profile.get("tier")
         static = get_initial_coin_profile(sym)
+        reality = get_coin_reality_override(cur, sym)
         personality, best_metric = classify_personality_from_lifts(momentum_lift, trend_lift, leadership_lift, heat_lift, profile.get("personality") or static.get("personality"))
         improvement = float(upgrade_avg or 0) - float(probe_avg or 0)
         promotion_score = 0.0
@@ -1945,8 +2055,33 @@ def refresh_coin_learning_from_history(cur, symbol, allow_mode_change=True):
                 new_mode, new_tier, reason = "LIVE", ("B" if static["tier"] == "C" else static["tier"]), f"promotion_score_{round(promotion_score,2)}_upgrade_edge_confirmed"
             elif (old_mode or static["mode"]) == "LIVE" and demotion_score >= 3:
                 new_mode, reason = "SHADOW", f"demotion_score_{round(demotion_score,2)}_edge_deterioration"
+
+            # v10.1 FAST REALITY OVERRIDE:
+            # If recent realised performance strongly disagrees with slow Coin Health,
+            # recent reality wins. This is deliberately after the classic health score
+            # but before the DB update.
+            if ENABLE_FAST_REALITY_OVERRIDE:
+                if reality.get("action") == "DEMOTE":
+                    new_mode = REALITY_DEMOTE_MODE
+                    reason = reality.get("reason") or "fast_reality_demote"
+                elif reality.get("action") == "PROMOTE":
+                    new_mode = REALITY_PROMOTE_MODE
+                    if (new_tier or static["tier"] or "DISCOVERY") in {"DISCOVERY", "C", "D", "UNKNOWN"}:
+                        new_tier = REALITY_PROMOTE_TARGET_TIER
+                    reason = reality.get("reason") or "fast_reality_promote"
+
         if not old_mode:
             new_mode, new_tier, reason = static["mode"], static["tier"], "initial_profile"
+            # Still allow reality override to promote/demote initialized rows once enough evidence exists.
+            if ENABLE_FAST_REALITY_OVERRIDE and allow_mode_change and sym not in COIN_RETIRED and sym not in COIN_TIER_D:
+                if reality.get("action") == "DEMOTE":
+                    new_mode = REALITY_DEMOTE_MODE
+                    reason = reality.get("reason") or "fast_reality_demote"
+                elif reality.get("action") == "PROMOTE":
+                    new_mode = REALITY_PROMOTE_MODE
+                    if (new_tier or static["tier"] or "DISCOVERY") in {"DISCOVERY", "C", "D", "UNKNOWN"}:
+                        new_tier = REALITY_PROMOTE_TARGET_TIER
+                    reason = reality.get("reason") or "fast_reality_promote"
         sample_size = int(probe_trades or 0) + int(upgrade_trades or 0)
         hero_points = 3 if float(upgrade_peak or 0) >= 20 else 2 if float(upgrade_peak or 0) >= 10 else 1 if float(upgrade_peak or 0) >= 5 else 0
         cur.execute("""
@@ -1968,7 +2103,20 @@ def refresh_coin_learning_from_history(cur, symbol, allow_mode_change=True):
             float(recent_probe_avg or 0), float(recent_upgrade_avg or 0), float(promotion_score), float(demotion_score),
             sample_size, sym
         ))
-        stats = {"probe_trades": int(probe_trades or 0), "probe_avg": float(probe_avg or 0), "upgrade_trades": int(upgrade_trades or 0), "upgrade_avg": float(upgrade_avg or 0), "best_metric": best_metric, "personality": personality}
+        stats = {
+            "probe_trades": int(probe_trades or 0),
+            "probe_avg": float(probe_avg or 0),
+            "upgrade_trades": int(upgrade_trades or 0),
+            "upgrade_avg": float(upgrade_avg or 0),
+            "best_metric": best_metric,
+            "personality": personality,
+            "reality_action": reality.get("action"),
+            "reality_reason": reality.get("reason"),
+            "reality_trades_7d": reality.get("trades_7d"),
+            "reality_pnl_7d": reality.get("pnl_7d"),
+            "reality_avg_7d": reality.get("avg_7d"),
+            "reality_peak_7d": reality.get("peak_7d"),
+        }
         maybe_send_coin_mode_alert(sym, old_mode, new_mode, old_tier, new_tier, reason, stats)
         return stats
     except Exception as e:
@@ -10495,6 +10643,12 @@ def bool_status():
         "ENABLE_HABITAT_ENGINE": ENABLE_HABITAT_ENGINE,
         "HABITAT_SHADOW_ONLY_COINS": sorted(HABITAT_SHADOW_ONLY_COINS),
         "HIGH_CONFIDENCE_HABITATS": HIGH_CONFIDENCE_HABITATS,
+        "ENABLE_FAST_REALITY_OVERRIDE": ENABLE_FAST_REALITY_OVERRIDE,
+        "REALITY_DEMOTE_MIN_TRADES_7D": REALITY_DEMOTE_MIN_TRADES_7D,
+        "REALITY_DEMOTE_MAX_PNL_7D": REALITY_DEMOTE_MAX_PNL_7D,
+        "REALITY_PROMOTE_MIN_TRADES_7D": REALITY_PROMOTE_MIN_TRADES_7D,
+        "REALITY_PROMOTE_MIN_AVG_7D": REALITY_PROMOTE_MIN_AVG_7D,
+        "REALITY_PROMOTE_MIN_PEAK_7D": REALITY_PROMOTE_MIN_PEAK_7D,
         "ENABLE_SHADOW_CLIMAX_EXCEPTIONS": ENABLE_SHADOW_CLIMAX_EXCEPTIONS,
         "SHADOW_CLIMAX_EXCEPTION_RULES": sorted([f"{s}:{h}" for s, h in SHADOW_CLIMAX_EXCEPTION_RULES]),
         "SHADOW_CLIMAX_EXCEPTION_MODEL_SIZE_GBP": SHADOW_CLIMAX_EXCEPTION_MODEL_SIZE_GBP,
