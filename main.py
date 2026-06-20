@@ -414,7 +414,7 @@ def parse_symbol_set_env(name, default):
 OKX_BLOCKED_SYMBOLS = parse_symbol_set_env("OKX_BLOCKED_SYMBOLS", "TAOUSDT")
 OKX_EST_FEE_RATE_ROUND_TRIP = float(os.environ.get("OKX_EST_FEE_RATE_ROUND_TRIP", "0.002") or 0.002)
 
-DATA_VERSION = "v10.1.3_CQE_SHADOW_CAPITAL_GATE"
+DATA_VERSION = "v10.1.4_CQE_TIMEZONE_FIX"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -4782,7 +4782,7 @@ def process_shadow_cqe_trades(cur, symbol, price, momentum, trend, now):
             continue
 
         pnl_percent = ((price - entry_price) / entry_price) * 100
-        mins = (now - opened_at).total_seconds() / 60
+        mins = (ensure_utc(now) - ensure_utc(opened_at)).total_seconds() / 60
         current_peak = peak_pnl or 0
         old_peak = current_peak
 
@@ -6394,7 +6394,7 @@ def process_persistence_hunter_trades(cur, symbol, price, momentum, trend, now):
         if direction != "LONG" or not entry_price:
             continue
         pnl_percent = ((price - entry_price) / entry_price) * 100
-        mins = (now - opened_at).total_seconds() / 60
+        mins = (ensure_utc(now) - ensure_utc(opened_at)).total_seconds() / 60
         current_peak = float(peak_pnl or 0)
         if pnl_percent > current_peak:
             current_peak = pnl_percent
