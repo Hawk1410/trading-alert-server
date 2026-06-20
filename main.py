@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v10.1
-# TITLE: FAST REALITY OVERRIDE + HABITAT + SHADOW CLIMAX EXCEPTIONS
+# VERSION: v10.1.3
+# TITLE: CQE SHADOW CAPITAL SAFETY GATE + FAST REALITY OVERRIDE
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v10.1 FAST REALITY OVERRIDE RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v10.1.3 CQE SHADOW CAPITAL SAFETY GATE RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -414,7 +414,7 @@ def parse_symbol_set_env(name, default):
 OKX_BLOCKED_SYMBOLS = parse_symbol_set_env("OKX_BLOCKED_SYMBOLS", "TAOUSDT")
 OKX_EST_FEE_RATE_ROUND_TRIP = float(os.environ.get("OKX_EST_FEE_RATE_ROUND_TRIP", "0.002") or 0.002)
 
-DATA_VERSION = "v10.1.1_DASHBOARD_CLARITY"
+DATA_VERSION = "v10.1.3_CQE_SHADOW_CAPITAL_GATE"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -4600,7 +4600,7 @@ def get_open_shadow_cqe_count(cur):
         SELECT COUNT(*)
         FROM bot_trades_v4
         WHERE status = 'OPEN'
-          AND COALESCE(is_shadow, FALSE) = FALSE
+          AND COALESCE(is_shadow, FALSE) = TRUE
           AND entry_quality IN (%s, %s)
     """, (LEGACY_CQE_ENTRY_QUALITY, CQE_CONTINUATION_ENTRY_QUALITY))
     return cur.fetchone()[0] or 0
@@ -4611,7 +4611,7 @@ def get_open_same_symbol_shadow_cqe_count(cur, symbol):
         SELECT COUNT(*)
         FROM bot_trades_v4
         WHERE status = 'OPEN'
-          AND COALESCE(is_shadow, FALSE) = FALSE
+          AND COALESCE(is_shadow, FALSE) = TRUE
           AND entry_quality IN (%s, %s)
           AND symbol = %s
     """, (LEGACY_CQE_ENTRY_QUALITY, CQE_CONTINUATION_ENTRY_QUALITY, symbol))
@@ -4652,7 +4652,7 @@ def open_shadow_cqe_trade(cur, symbol, price, momentum, trend, signal_id, signal
     apply_market_heat_to_trade(cur, trade_id)
 
     try:
-        safe_update_trade_telemetry(cur, trade_id, accounting_entry_telemetry(CQE_SHADOW_TRADE_SIZE_GBP))
+        safe_update_trade_telemetry(cur, trade_id, accounting_entry_telemetry(0.0))
     except Exception as e:
         print(f"⚠️ v7.1 shadow CQE entry accounting telemetry failed | {symbol} | id={trade_id} | {e}", flush=True)
         safe_telemetry_rollback(cur)
@@ -4670,10 +4670,15 @@ def open_shadow_cqe_trade(cur, symbol, price, momentum, trend, signal_id, signal
         raise
 
     safe_update_trade_telemetry(cur, trade_id, {
-        "is_shadow": False,
+        "is_shadow": True,
         "entry_architecture": CQE_CONTINUATION_ENTRY_QUALITY,
-        "trade_size_gbp": CQE_SHADOW_TRADE_SIZE_GBP,
-        "dynamic_trade_size_gbp": CQE_SHADOW_TRADE_SIZE_GBP,
+        "trade_size_gbp": 0.0,
+        "dynamic_trade_size_gbp": 0.0,
+        "entry_value_gbp": 0.0,
+        "entry_value_usdt": 0.0,
+        "trade_size_usdt": 0.0,
+        "shadow_reason": "SHADOW_CQE_NO_CAPITAL",
+        "size_scaling_reason": "shadow_cqe_no_capital",
         "shadow_cqe_detected_at_entry": cqe_context.get("cqe_detected"),
         "shadow_cqe_reason_at_entry": cqe_context.get("cqe_reason"),
         "cqe_quality_score_at_entry": cqe_context.get("cqe_quality_score"),
@@ -4729,7 +4734,7 @@ def maybe_open_shadow_cqe_trade(cur, symbol, price, momentum, trend, signal_id, 
     )
 
     print(
-        f"🟢 OPEN CQE CONTINUATION | {symbol} | id={trade_id} | "
+        f"👻 OPEN SHADOW CQE CONTINUATION | {symbol} | id={trade_id} | "
         f"q={cqe_context.get('cqe_quality_score')} | "
         f"T/M={round(trend,3)}/{round(momentum,3)} | "
         f"m_acc={fmt_num(cqe_context.get('cqe_momentum_accel_30m'))} | "
@@ -4739,8 +4744,8 @@ def maybe_open_shadow_cqe_trade(cur, symbol, price, momentum, trend, signal_id, 
 
     if ENABLE_SHADOW_CQE_TELEGRAM_ALERTS:
         send_telegram_alert(
-            f"🟢 <b>LIVE ENTRY</b>\n🧠 <b>CQE_CONTINUATION_V1</b> | {symbol} LONG\n"
-            f"Quality: <b>{cqe_context.get('cqe_quality_score')}/9</b> | Model size {fmt_money(CQE_SHADOW_TRADE_SIZE_GBP)}\n"
+            f"👻 <b>SHADOW ENTRY</b>\n🧠 <b>CQE_CONTINUATION_V1</b> | {symbol} LONG\n"
+            f"Quality: <b>{cqe_context.get('cqe_quality_score')}/9</b> | Model size {fmt_money(CQE_SHADOW_TRADE_SIZE_GBP)} | Real capital £0.00\n"
             f"Entry {price} | T/M {fmt_num(trend)} / {fmt_num(momentum)}\n"
             f"Accel M/T: {fmt_num(cqe_context.get('cqe_momentum_accel_30m'))} / {fmt_num(cqe_context.get('cqe_trend_accel_30m'))}\n"
             f"Trend health: min {fmt_num(cqe_context.get('cqe_min_trend_30m'))} | "
@@ -4827,7 +4832,7 @@ def process_shadow_cqe_trades(cur, symbol, price, momentum, trend, now):
             close_reason = "cqe_120m_time_exit"
 
         if close_reason:
-            accounting = accounting_exit_values(CQE_SHADOW_TRADE_SIZE_GBP, pnl_percent)
+            accounting = accounting_exit_values(0.0, pnl_percent)
             pnl_gbp = accounting["pnl_gbp"]
             cur.execute("""
                 UPDATE bot_trades_v4
