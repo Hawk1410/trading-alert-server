@@ -1,11 +1,23 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v10.1.3
-# TITLE: CQE SHADOW CAPITAL SAFETY GATE + FAST REALITY OVERRIDE
+# VERSION: v10.2.0
+# TITLE: TOP3 FORM SHADOW SELECTOR + OPERATIONAL SAFETY HOTFIX
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v10.1.3 CQE SHADOW CAPITAL SAFETY GATE RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v10.2.0 TOP3 FORM SHADOW SELECTOR RUNNING 🔥🔥🔥", flush=True)
+
+# =========================
+# v10.2.0 CHANGE SUMMARY
+# =========================
+#
+# ✅ Adds TOP3 FORM SHADOW SELECTOR from 2026-06-24 research breakthrough.
+# ✅ Uses existing Coin Form score engine; adds relative ranking across coin_scores.
+# ✅ Top3 Form symbols may open BPT ghost probes even if old BPT trend/momentum gate would block.
+# ✅ Top3 Form probes are no-capital / shadow-only by default and cannot live-upgrade unless explicitly enabled.
+# ✅ Adds /form Telegram command for current Top Form ranking.
+# ✅ Leaves existing live engine, Coin Health, Personality, BPT lifecycle and exits intact.
+#
 
 # =========================
 # v6.1 CHANGE SUMMARY
@@ -697,6 +709,24 @@ COIN_FORM_SHADOW_SIZE_GBP = float(os.environ.get("COIN_FORM_SHADOW_SIZE_GBP", "5
 # DISABLED coins still remain disabled. NORMAL/THROTTLE/SHADOW still do not get fresh live capital.
 ENABLE_COIN_FORM_OVERRIDE_HEALTH_SHADOW = env_bool("ENABLE_COIN_FORM_OVERRIDE_HEALTH_SHADOW", True)
 ENABLE_COIN_FORM_OVERRIDE_ADAPTIVE_DEAD_MARKET_SHADOW = env_bool("ENABLE_COIN_FORM_OVERRIDE_ADAPTIVE_DEAD_MARKET_SHADOW", True)
+
+# =========================
+# 🧪 v10.2 TOP3 FORM SHADOW SELECTOR
+# =========================
+# Research finding 2026-06-24:
+# Relative Coin Form rank was far stronger than absolute HOT/GOOD labels.
+# TOP3 Form repeatedly outperformed Current Live across 24h/48h/72h/7d/14d.
+# This selector feeds no-capital BPT ghost probes only; live upgrades are OFF by default.
+ENABLE_TOP3_FORM_SHADOW_SELECTOR = env_bool("ENABLE_TOP3_FORM_SHADOW_SELECTOR", True)
+TOP_FORM_SHADOW_RANK_CUTOFF = int(os.environ.get("TOP_FORM_SHADOW_RANK_CUTOFF", "3") or 3)
+TOP_FORM_RANK_REPORT_LIMIT = int(os.environ.get("TOP_FORM_RANK_REPORT_LIMIT", "10") or 10)
+TOP_FORM_SELECTOR_ENGINE = "TOP3_FORM_SHADOW_SELECTOR"
+TOP_FORM_SHADOW_REASON = "TOP3_FORM_GHOST_PROBE_NO_CAPITAL"
+# Keep this false until real probe data confirms the live path.
+ENABLE_TOP3_FORM_LIVE_UPGRADES = env_bool("ENABLE_TOP3_FORM_LIVE_UPGRADES", False)
+# Optional safety rail. False by default because research showed momentum/trend add little inside TOP3 Form.
+ENABLE_TOP3_FORM_REQUIRE_MOMENTUM_POSITIVE = env_bool("ENABLE_TOP3_FORM_REQUIRE_MOMENTUM_POSITIVE", False)
+
 
 
 # =========================
@@ -1684,7 +1714,172 @@ def coin_form_trade_telemetry(snapshot):
         "form_signals_6h": snap.get("form_signals_6h"),
         "form_signals_12h": snap.get("form_signals_12h"),
         "form_updated_at": snap.get("form_updated_at"),
+        "coin_form_rank": snap.get("coin_form_rank"),
+        "form_rank": snap.get("coin_form_rank"),
+        "top_form_rank_at_entry": snap.get("coin_form_rank"),
+        "is_top3_form": snap.get("is_top3_form"),
+        "is_top5_form": snap.get("is_top5_form"),
+        "top_form_selector": snap.get("top_form_selector"),
     }
+
+
+def get_top_form_rankings(cur, limit=None):
+    """Return current Coin Form rankings from coin_scores.
+
+    v10.2 uses relative rank, not only HOT/GOOD labels. This intentionally uses
+    the existing Coin Form score engine and simply ranks the latest snapshots.
+    """
+    try:
+        ensure_coin_scores_v84_columns(cur)
+        lim = int(limit or TOP_FORM_RANK_REPORT_LIMIT or 10)
+        cur.execute("""
+            SELECT
+                symbol,
+                coin_form_score,
+                coin_form_mode,
+                coin_health_mode,
+                tier,
+                form_peak_3h,
+                form_peak_6h,
+                form_peak_12h,
+                form_updated_at,
+                ROW_NUMBER() OVER (
+                    ORDER BY COALESCE(coin_form_score, -999999) DESC, symbol ASC
+                ) AS form_rank
+            FROM coin_scores
+            WHERE symbol IS NOT NULL
+            ORDER BY COALESCE(coin_form_score, -999999) DESC, symbol ASC
+            LIMIT %s
+        """, (lim,))
+        rows = cur.fetchall() or []
+        out = []
+        for row in rows:
+            out.append({
+                "symbol": normalize_symbol(row[0]),
+                "coin_form_score": safe_float(row[1], 0.0),
+                "coin_form_mode": row[2],
+                "coin_health_mode": row[3],
+                "tier": row[4],
+                "form_peak_3h": safe_float(row[5], 0.0),
+                "form_peak_6h": safe_float(row[6], 0.0),
+                "form_peak_12h": safe_float(row[7], 0.0),
+                "form_updated_at": row[8],
+                "coin_form_rank": int(row[9] or 999),
+            })
+        return out
+    except Exception as e:
+        print(f"⚠️ get_top_form_rankings failed: {e}", flush=True)
+        safe_telemetry_rollback(cur)
+        return []
+
+
+def get_symbol_form_rank_snapshot(cur, symbol):
+    """Return latest relative Form rank for one symbol from coin_scores."""
+    sym = normalize_symbol(symbol)
+    try:
+        ensure_coin_scores_v84_columns(cur)
+        cur.execute("""
+            WITH ranked AS (
+                SELECT
+                    symbol,
+                    coin_form_score,
+                    coin_form_mode,
+                    coin_health_mode,
+                    tier,
+                    form_peak_3h,
+                    form_peak_6h,
+                    form_peak_12h,
+                    form_updated_at,
+                    ROW_NUMBER() OVER (
+                        ORDER BY COALESCE(coin_form_score, -999999) DESC, symbol ASC
+                    ) AS form_rank
+                FROM coin_scores
+                WHERE symbol IS NOT NULL
+            )
+            SELECT
+                symbol,
+                coin_form_score,
+                coin_form_mode,
+                coin_health_mode,
+                tier,
+                form_peak_3h,
+                form_peak_6h,
+                form_peak_12h,
+                form_updated_at,
+                form_rank
+            FROM ranked
+            WHERE symbol = %s
+        """, (sym,))
+        row = cur.fetchone()
+        if not row:
+            return {
+                "symbol": sym,
+                "coin_form_rank": 999,
+                "is_top3_form": False,
+                "is_top5_form": False,
+                "top_form_selector": False,
+                "top_form_reason": "no_coin_scores_rank_row",
+            }
+        rank = int(row[9] or 999)
+        return {
+            "symbol": normalize_symbol(row[0]),
+            "coin_form_score": safe_float(row[1], 0.0),
+            "coin_form_mode": row[2],
+            "coin_health_mode": row[3],
+            "tier": row[4],
+            "form_peak_3h": safe_float(row[5], 0.0),
+            "form_peak_6h": safe_float(row[6], 0.0),
+            "form_peak_12h": safe_float(row[7], 0.0),
+            "form_updated_at": row[8],
+            "coin_form_rank": rank,
+            "is_top3_form": rank <= int(TOP_FORM_SHADOW_RANK_CUTOFF),
+            "is_top5_form": rank <= 5,
+            "top_form_selector": rank <= int(TOP_FORM_SHADOW_RANK_CUTOFF),
+            "top_form_reason": f"form_rank_{rank}_lte_{TOP_FORM_SHADOW_RANK_CUTOFF}" if rank <= int(TOP_FORM_SHADOW_RANK_CUTOFF) else f"form_rank_{rank}_outside_top{TOP_FORM_SHADOW_RANK_CUTOFF}",
+        }
+    except Exception as e:
+        print(f"⚠️ get_symbol_form_rank_snapshot failed | {sym} | {e}", flush=True)
+        safe_telemetry_rollback(cur)
+        return {
+            "symbol": sym,
+            "coin_form_rank": 999,
+            "is_top3_form": False,
+            "is_top5_form": False,
+            "top_form_selector": False,
+            "top_form_reason": f"rank_error_{str(e)[:80]}",
+        }
+
+
+def top_form_rank_label(snapshot):
+    snap = snapshot or {}
+    rank = snap.get("coin_form_rank") or snap.get("form_rank") or "?"
+    score = snap.get("coin_form_score")
+    mode = snap.get("coin_form_mode") or "UNKNOWN"
+    return f"#{rank} {coin_form_emoji(mode)} {mode} ({fmt_num(score)})"
+
+
+def build_telegram_form_message(cur):
+    rows = get_top_form_rankings(cur, TOP_FORM_RANK_REPORT_LIMIT)
+    if not rows:
+        return "🧪 <b>Top Form Ranking</b>\nNo form ranking rows available."
+
+    lines = [
+        "🧪 <b>Top Form Ranking</b>",
+        f"Selector: <b>Top {TOP_FORM_SHADOW_RANK_CUTOFF}</b> ghost probes only",
+        f"Live upgrades from Top Form: <b>{ENABLE_TOP3_FORM_LIVE_UPGRADES}</b>",
+        "",
+    ]
+    for r in rows:
+        rank = int(r.get("coin_form_rank") or 999)
+        marker = "✅" if rank <= int(TOP_FORM_SHADOW_RANK_CUTOFF) else "▫️"
+        lines.append(
+            f"{marker} <b>#{rank} {r.get('symbol')}</b> | "
+            f"{coin_form_emoji(r.get('coin_form_mode'))} {r.get('coin_form_mode') or '?'} "
+            f"score {fmt_num(r.get('coin_form_score'))} | "
+            f"health {r.get('coin_health_mode') or '?'} | tier {r.get('tier') or '?'} | "
+            f"3/6/12h {fmt_num(r.get('form_peak_3h'))}/{fmt_num(r.get('form_peak_6h'))}/{fmt_num(r.get('form_peak_12h'))}"
+        )
+    return "\n".join(lines)
 
 
 def get_coin_form_snapshot(cur, symbol):
@@ -2824,12 +3019,19 @@ def live_shadow_label(is_shadow=False):
 
 
 def trade_close_title(is_shadow=False, closed_word="TRADE CLOSED"):
-    # v9.6: real-money exits are labelled as LIVE EXIT for easy OKX reconciliation.
-    return f"👻 SHADOW {closed_word}" if bool(is_shadow) else "🟢 <b>LIVE EXIT</b>"
+    """Unambiguous close title.
+
+    Important safety rule: callers should pass is_shadow=True unless a confirmed
+    successful OKX live entry exists. This prevents no-capital ghost/probe rows
+    being reported as live exits.
+    """
+    if bool(is_shadow):
+        return f"👻 <b>SHADOW / NO-CAPITAL {closed_word}</b>"
+    return f"🟢 <b>LIVE CAPITAL {closed_word}</b>"
 
 
 def trade_mode_line(is_shadow=False):
-    return "Mode: 👻 SHADOW / PAPER" if bool(is_shadow) else "Mode: 🟢 LIVE / REAL CAPITAL"
+    return "Mode: 👻 SHADOW / PAPER / NO REAL CAPITAL" if bool(is_shadow) else "Mode: 🟢 LIVE / REAL CAPITAL / OKX ORDER CONFIRMED"
 
 
 def trend_persistence_exit_reason(entry_quality):
@@ -3051,7 +3253,13 @@ def ensure_archetype_state_columns(cur):
         ADD COLUMN IF NOT EXISTS form_signals_3h INTEGER,
         ADD COLUMN IF NOT EXISTS form_signals_6h INTEGER,
         ADD COLUMN IF NOT EXISTS form_signals_12h INTEGER,
-        ADD COLUMN IF NOT EXISTS form_updated_at TIMESTAMPTZ
+        ADD COLUMN IF NOT EXISTS form_updated_at TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS coin_form_rank INTEGER,
+        ADD COLUMN IF NOT EXISTS form_rank INTEGER,
+        ADD COLUMN IF NOT EXISTS top_form_rank_at_entry INTEGER,
+        ADD COLUMN IF NOT EXISTS is_top3_form BOOLEAN DEFAULT FALSE,
+        ADD COLUMN IF NOT EXISTS is_top5_form BOOLEAN DEFAULT FALSE,
+        ADD COLUMN IF NOT EXISTS top_form_selector BOOLEAN DEFAULT FALSE
     """)
 
 
@@ -5001,7 +5209,56 @@ def get_bpt_row_params(lifecycle_row):
     }
 
 
+# v10.1.5: stale no-capital probe cleanup.
+# Ghost probes intentionally carry no OKX position, but stale OPEN ghost rows can
+# block same-symbol opportunities and create the impression of a stuck OKX trade.
+ENABLE_BPT_STALE_NO_CAPITAL_CLEANUP = env_bool("ENABLE_BPT_STALE_NO_CAPITAL_CLEANUP", True)
+BPT_STALE_NO_CAPITAL_CLEANUP_MINUTES = float(
+    os.environ.get("BPT_STALE_NO_CAPITAL_CLEANUP_MINUTES", str(float(BPT_CQE_MAX_HOLD_MINUTES) + 60.0)) or (float(BPT_CQE_MAX_HOLD_MINUTES) + 60.0)
+)
+
+def cleanup_stale_no_capital_bpt_trades(cur, symbol=None):
+    if not ENABLE_BPT_STALE_NO_CAPITAL_CLEANUP:
+        return 0
+    try:
+        params = [BPT_CQE_ENTRY_QUALITY, BPT_STALE_NO_CAPITAL_CLEANUP_MINUTES]
+        symbol_clause = ""
+        if symbol:
+            symbol_clause = "AND symbol = %s"
+            params.append(symbol)
+
+        cur.execute(f"""
+            UPDATE bot_trades_v4
+            SET status = 'CLOSED',
+                closed_at = NOW(),
+                close_price = COALESCE(close_price, entry_price),
+                pnl_percent = COALESCE(pnl_percent, 0),
+                pnl_gbp = COALESCE(pnl_gbp, 0),
+                pnl_usdt = COALESCE(pnl_usdt, 0),
+                close_reason = COALESCE(close_reason, 'stale_no_capital_probe_cleanup'),
+                telegram_close_alert_sent = FALSE
+            WHERE status = 'OPEN'
+              AND entry_quality = %s
+              AND opened_at < NOW() - (%s || ' minutes')::INTERVAL
+              AND COALESCE(NULLIF(trade_size_usdt, 0), NULLIF(entry_value_usdt, 0), NULLIF(trade_size_gbp, 0), 0) = 0
+              AND (
+                    COALESCE(shadow_reason, '') = %s
+                 OR COALESCE(size_scaling_reason, '') = %s
+                 OR COALESCE(is_shadow, FALSE) = TRUE
+              )
+              {symbol_clause}
+            RETURNING id, symbol
+        """, tuple(params[:2] + [GHOST_PROBE_LABEL, GHOST_PROBE_LABEL] + params[2:]))
+        rows = cur.fetchall() or []
+        if rows:
+            print(f"🧹 STALE NO-CAPITAL BPT CLEANUP | closed={len(rows)} | symbol={symbol or 'ALL'}", flush=True)
+        return len(rows)
+    except Exception as e:
+        print(f"⚠️ stale no-capital BPT cleanup failed | symbol={symbol or 'ALL'} | {e}", flush=True)
+        return 0
+
 def get_open_bpt_cqe_count(cur):
+    cleanup_stale_no_capital_bpt_trades(cur)
     cur.execute("""
         SELECT COUNT(*)
         FROM bot_trades_v4
@@ -5012,6 +5269,7 @@ def get_open_bpt_cqe_count(cur):
 
 
 def get_open_same_symbol_bpt_cqe_count(cur, symbol):
+    cleanup_stale_no_capital_bpt_trades(cur, symbol)
     cur.execute("""
         SELECT COUNT(*)
         FROM bot_trades_v4
@@ -5112,6 +5370,20 @@ def passes_bpt_cqe_probe_gate(cur, symbol, momentum, trend, leadership_context):
     if not ENABLE_BPT_CQE_LIFECYCLE_SHADOW:
         return False, "bpt_lifecycle_disabled"
 
+    top_form_shadow_ok = bool(
+        ENABLE_TOP3_FORM_SHADOW_SELECTOR
+        and (leadership_context or {}).get("top_form_shadow_probe")
+    )
+
+    if top_form_shadow_ok:
+        if ENABLE_TOP3_FORM_REQUIRE_MOMENTUM_POSITIVE and float(momentum or 0) <= 0:
+            return False, "top3_form_momentum_not_positive"
+        if get_open_bpt_cqe_count(cur) >= BPT_CQE_MAX_OPEN_TRADES:
+            return False, "top3_form_bpt_max_open_trades"
+        if get_open_same_symbol_bpt_cqe_count(cur, symbol) >= BPT_CQE_MAX_SAME_SYMBOL_OPEN:
+            return False, "top3_form_bpt_max_same_symbol_open"
+        return True, "top3_form_shadow_probe_allowed"
+
     adaptive_ok, adaptive_reason = is_adaptive_dead_market_leader_candidate(
         leadership_context,
         momentum=momentum,
@@ -5192,11 +5464,18 @@ def open_bpt_cqe_probe_trade(cur, symbol, price, momentum, trend, signal_id, sig
 
     apply_market_heat_to_trade(cur, trade_id)
 
-    ghost_probe_active = bool(ENABLE_BPT_CQE_GHOST_PROBES)
     market_heat_live_blocked = bool((leadership_context or {}).get("market_heat_live_blocked"))
+    top_form_shadow_probe = bool((leadership_context or {}).get("top_form_shadow_probe"))
+    top_form_rank_snapshot = (leadership_context or {}).get("coin_form_rank_snapshot") or {}
+
+    # v10.2 safety: Top3 Form selector is always no-capital unless explicitly
+    # upgraded later by a separate toggle. Even if ENABLE_BPT_CQE_GHOST_PROBES
+    # is changed in Render, Top3 Form probes remain ghost/no-capital.
+    ghost_probe_active = bool(ENABLE_BPT_CQE_GHOST_PROBES or top_form_shadow_probe)
     live_probe_enabled = bool(
         ENABLE_BPT_CQE_LIVE_PROBES
         and not ghost_probe_active
+        and not top_form_shadow_probe
         and not (leadership_context or {}).get("coin_form_live_blocked")
         and not market_heat_live_blocked
     )
@@ -5209,8 +5488,14 @@ def open_bpt_cqe_probe_trade(cur, symbol, price, momentum, trend, signal_id, sig
         "is_shadow": False if ghost_probe_active else not live_probe_enabled,
         "entry_architecture": BPT_CQE_ENTRY_QUALITY,
         "market_os_engine": (leadership_context or {}).get("market_os_engine"),
+        "top_form_selector": bool((leadership_context or {}).get("top_form_selector")),
+        "coin_form_rank": top_form_rank_snapshot.get("coin_form_rank"),
+        "form_rank": top_form_rank_snapshot.get("coin_form_rank"),
+        "top_form_rank_at_entry": top_form_rank_snapshot.get("coin_form_rank"),
+        "is_top3_form": bool(top_form_rank_snapshot.get("is_top3_form")),
+        "is_top5_form": bool(top_form_rank_snapshot.get("is_top5_form")),
         "size_scaling_reason": GHOST_PROBE_LABEL if ghost_probe_active else (leadership_context or {}).get("size_scaling_reason"),
-        "shadow_reason": GHOST_PROBE_LABEL if ghost_probe_active else None,
+        "shadow_reason": TOP_FORM_SHADOW_REASON if top_form_shadow_probe else (GHOST_PROBE_LABEL if ghost_probe_active else None),
         "leadership_mode": (leadership_context or {}).get("leadership_mode"),
         "trade_size_gbp": model_probe_size_gbp,
         "dynamic_trade_size_gbp": model_probe_size_gbp,
@@ -5531,6 +5816,10 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
         market_os_engine == "ADAPTIVE_DEAD_MARKET_LEADER"
         and not ENABLE_ADAPTIVE_DEAD_MARKET_LIVE_UPGRADES
     )
+    top_form_shadow_only = (
+        market_os_engine == TOP_FORM_SELECTOR_ENGINE
+        and not ENABLE_TOP3_FORM_LIVE_UPGRADES
+    )
     
     if (
         adaptive_dead_market_shadow_only
@@ -5604,6 +5893,7 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
     confirmed_ghost_live_entry_allowed = bool(
         ENABLE_BPT_CQE_CONFIRMED_GHOST_LIVE_ENTRY
         and ghost_probe_active
+        and not top_form_shadow_only
         and coin_form_allows_scalein
         and (not adaptive_dead_market_shadow_only or adaptive_dead_market_form_override)
         and coin_allows_live_upgrade_or_form_override
@@ -5620,6 +5910,7 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
     scalein_allowed = (
         ENABLE_CQE_REAL_SCALEINS
         and (not is_shadow_trade or confirmed_ghost_live_entry_allowed)
+        and not top_form_shadow_only
         and (not adaptive_dead_market_shadow_only or adaptive_dead_market_form_override)
         and coin_allows_live_upgrade_or_form_override
         and coin_form_allows_scalein
@@ -5635,6 +5926,8 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
     # This keeps behaviour unchanged but makes the reason explicit.
     if not ENABLE_BPT_CQE_LIVE_UPGRADES:
         scalein_block_reason = "live_upgrade_toggle_off"
+    elif top_form_shadow_only:
+        scalein_block_reason = "top3_form_shadow_only_no_live_upgrade"
     elif adaptive_dead_market_shadow_only and not adaptive_dead_market_form_override:
         scalein_block_reason = "adaptive_dead_market_leader_shadow_only"
     elif not ENABLE_CQE_REAL_SCALEINS:
@@ -5770,12 +6063,20 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
             })
             print(f"⚠️ BPT CQE LIVE UPGRADE ORDER FAILED/SKIPPED | {sym} | id={tid} | {okx_upgrade_result}", flush=True)
     else:
-        extra_shadow_tags = {
-            "shadow_reason": "ADAPTIVE_DEAD_MARKET_LEADER_SHADOW",
-            "size_scaling_reason": "adaptive_dead_market_leader_shadow_only",
-        } if adaptive_dead_market_shadow_only and not adaptive_dead_market_form_override else {
-            "size_scaling_reason": f"bpt_scalein_disabled_or_not_allowed:{scalein_block_reason}",
-        }
+        if top_form_shadow_only:
+            extra_shadow_tags = {
+                "shadow_reason": TOP_FORM_SHADOW_REASON,
+                "size_scaling_reason": "top3_form_shadow_only_no_live_upgrade",
+            }
+        elif adaptive_dead_market_shadow_only and not adaptive_dead_market_form_override:
+            extra_shadow_tags = {
+                "shadow_reason": "ADAPTIVE_DEAD_MARKET_LEADER_SHADOW",
+                "size_scaling_reason": "adaptive_dead_market_leader_shadow_only",
+            }
+        else:
+            extra_shadow_tags = {
+                "size_scaling_reason": f"bpt_scalein_disabled_or_not_allowed:{scalein_block_reason}",
+            }
 
         # v9.9.3 TRUE-EXECUTION HARDENING:
         # A confirmed ghost probe that does not pass the live gate is still paper.
@@ -6115,10 +6416,13 @@ def process_bpt_cqe_lifecycle_trades(cur, symbol, price, momentum, trend, now):
                 flush=True
             )
 
-            telegram_is_shadow = bool(is_shadow) or float(dynamic_size or 0) <= 0
+            # v10.1.5: classify close alerts by confirmed OKX capital, not DB shadow flag/model size.
+            telegram_is_shadow = not bool(has_live_entry)
+            capital_status_line = "Capital: 🟢 OKX live entry confirmed" if has_live_entry else "Capital: 👻 no successful OKX live entry / ghost or shadow row"
 
             send_telegram_alert(
                 f"{trade_close_title(telegram_is_shadow, 'BPT TRADE CLOSED')}\n{trade_mode_line(telegram_is_shadow)}\n🧪 <b>BPT_CQE_LIFECYCLE_V1</b> | {sym}\n"
+                f"{capital_status_line}\n"
                 f"Row: {lifecycle_row} | " + format_trade_pnl_lines(pnl_percent, pnl_gbp, 0) + "\n"
                 + f"Peak {fmt_num(current_peak)}% | DD {fmt_num(drawdown_from_peak)}%\n"
                 f"Size model {fmt_money(dynamic_size)} | Reason {close_reason}\n"
@@ -6462,11 +6766,14 @@ def process_persistence_hunter_trades(cur, symbol, price, momentum, trend, now):
                 log_trade_event(cur, tid, sym, f"exit_{close_reason}", price, pnl_percent, current_peak, mins, momentum, trend, False)
             except Exception as e:
                 print(f"⚠️ PH exit event failed: {e}", flush=True)
-            if not is_shadow and has_successful_okx_live_entry(cur, tid):
+            ph_has_live_entry = bool((not is_shadow) and has_successful_okx_live_entry(cur, tid))
+            if ph_has_live_entry:
                 okx_place_market_order(cur, tid, sym, direction, "exit", price=price, entry_price=entry_price, trade_size_quote=float(dynamic_size or PH_SHADOW_SIZE_GBP))
+            ph_telegram_is_shadow = not ph_has_live_entry
             send_telegram_alert(
-                f"{trade_close_title(is_shadow, 'PH TRADE CLOSED')} | {sym}\n"
-                f"{trade_mode_line(is_shadow)}\n"
+                f"{trade_close_title(ph_telegram_is_shadow, 'PH TRADE CLOSED')} | {sym}\n"
+                f"{trade_mode_line(ph_telegram_is_shadow)}\n"
+                f"Capital: {'🟢 OKX live entry confirmed' if ph_has_live_entry else '👻 no successful OKX live entry / shadow row'}\n"
                 f"PnL <b>{fmt_num(pnl_percent)}%</b> | {fmt_money(pnl_gbp)} | Peak {fmt_num(current_peak)}%\n"
                 f"DD {fmt_num(drawdown)}% | Reason {close_reason}\nID {tid}"
             )
@@ -7898,6 +8205,37 @@ def enrich_coin_selection_context(cur, symbol, leadership_context=None):
             "coin_form_reason": "coin_form_disabled",
             "form_updated_at": datetime.now(timezone.utc),
         }
+
+    # v10.2: attach relative Form rank. Research showed rank #1-#3 is the edge,
+    # not only absolute HOT/GOOD labels. This is telemetry + selector state only.
+    if ENABLE_TOP3_FORM_SHADOW_SELECTOR and not ctx.get("coin_form_rank_snapshot"):
+        try:
+            rank_snapshot = get_symbol_form_rank_snapshot(cur, symbol)
+            ctx["coin_form_rank_snapshot"] = rank_snapshot
+            ctx["top_form_selector"] = bool(rank_snapshot.get("is_top3_form"))
+            ctx["top_form_shadow_probe"] = bool(rank_snapshot.get("is_top3_form"))
+
+            # Merge rank data into the form snapshot so all existing telemetry functions inherit it.
+            form_snapshot = dict(ctx.get("coin_form_snapshot") or {})
+            form_snapshot.update({
+                "coin_form_rank": rank_snapshot.get("coin_form_rank"),
+                "is_top3_form": rank_snapshot.get("is_top3_form"),
+                "is_top5_form": rank_snapshot.get("is_top5_form"),
+                "top_form_selector": rank_snapshot.get("top_form_selector"),
+                "top_form_reason": rank_snapshot.get("top_form_reason"),
+            })
+            ctx["coin_form_snapshot"] = form_snapshot
+
+            if bool(rank_snapshot.get("is_top3_form")):
+                ctx["market_os_engine"] = TOP_FORM_SELECTOR_ENGINE
+                ctx["leadership_mode"] = TOP_FORM_SELECTOR_ENGINE
+                ctx["size_scaling_reason"] = TOP_FORM_SHADOW_REASON
+                ctx["shadow_reason"] = TOP_FORM_SHADOW_REASON
+        except Exception as e:
+            print(f"⚠️ v10.2 top form rank attach failed | {symbol} | {e}", flush=True)
+            safe_telemetry_rollback(cur)
+            ctx["top_form_selector"] = False
+            ctx["top_form_shadow_probe"] = False
 
     if not ctx.get("coin_health_snapshot"):
         try:
@@ -9638,7 +9976,8 @@ def webhook():
                     except Exception as e:
                         print(f"⚠️ trade_events exit log failed: {e}", flush=True)
 
-                    if has_successful_okx_live_entry(cur, tid):
+                    real_has_live_entry = bool(has_successful_okx_live_entry(cur, tid))
+                    if real_has_live_entry:
                         okx_place_market_order(
                             cur=cur,
                             trade_id=tid,
@@ -9661,7 +10000,7 @@ def webhook():
                     print(
                         f"💰 CLOSED REAL | {sym} | LONG | "
                         f"{round(pnl_percent,3)}% | peak={round(current_peak,3)} | "
-                        f"dd_from_peak={round(drawdown_from_peak,3)} | {close_reason}",
+                        f"dd_from_peak={round(drawdown_from_peak,3)} | {close_reason} | live_entry={real_has_live_entry}",
                         flush=True
                     )
 
@@ -9673,10 +10012,12 @@ def webhook():
                     exit_leadership_state = get_latest_leadership_state(cur, sym)
                     latest_signal_state = get_latest_signal_state(cur, sym)
 
+                    real_telegram_is_shadow = not bool(real_has_live_entry)
                     send_telegram_alert(
-                        f"{trade_close_title(False)}\n"
-                        f"{trade_mode_line(False)}\n"
-                        f"{engine_emoji(entry_quality)} <b>{engine_display_name(entry_quality)}</b> | {sym} LONG\n"
+                        f"{trade_close_title(real_telegram_is_shadow)}\n"
+                        f"{trade_mode_line(real_telegram_is_shadow)}\n"
+                        f"Capital: {'🟢 OKX live entry confirmed' if real_has_live_entry else '👻 no successful OKX live entry / DB-only row'}\n"
+                        f"{engine_emoji(entry_quality, real_telegram_is_shadow)} <b>{engine_display_name(entry_quality)}</b> | {sym} LONG\n"
                         f"{format_trade_pnl_lines(pnl_percent, pnl_gbp, 0)} | Peak {fmt_num(current_peak)}%\n"
                         f"DD {fmt_num(drawdown_from_peak)}% | Reason: {close_reason}\n"
                         f"Exit T/M {fmt_num(trend)} / {fmt_num(momentum)}\n"
@@ -10503,6 +10844,9 @@ def handle_telegram_command(text):
 
         if cmd in ["/coins", "/tiers"]:
             return build_telegram_coins_message(cur)
+
+        if cmd in ["/form", "/topform", "/top3"]:
+            return build_telegram_form_message(cur)
 
         if cmd in ["/lifecycle", "/phases"]:
             return "🧬 <b>Leadership Lifecycle</b>\n" + get_lifecycle_dashboard_text(cur, 12)
