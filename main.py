@@ -2,7 +2,7 @@
 # 🤖 BOT VERSION
 # =========================
 # VERSION: v10.2.0
-# TITLE: TOP3 FORM SHADOW SELECTOR + OPERATIONAL SAFETY HOTFIX
+# TITLE: V11 WAKEUP CQE ENGINE + TOP3 FORM SHADOW SELECTOR
 # =========================
 
 print("🔥🔥🔥 MAIN.PY v10.2.0 TOP3 FORM SHADOW SELECTOR RUNNING 🔥🔥🔥", flush=True)
@@ -426,7 +426,7 @@ def parse_symbol_set_env(name, default):
 OKX_BLOCKED_SYMBOLS = parse_symbol_set_env("OKX_BLOCKED_SYMBOLS", "TAOUSDT")
 OKX_EST_FEE_RATE_ROUND_TRIP = float(os.environ.get("OKX_EST_FEE_RATE_ROUND_TRIP", "0.002") or 0.002)
 
-DATA_VERSION = "v10.1.4_CQE_TIMEZONE_FIX"
+DATA_VERSION = "v11.0_WAKEUP_CQE_ENGINE"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -726,6 +726,27 @@ TOP_FORM_SHADOW_REASON = "TOP3_FORM_GHOST_PROBE_NO_CAPITAL"
 ENABLE_TOP3_FORM_LIVE_UPGRADES = env_bool("ENABLE_TOP3_FORM_LIVE_UPGRADES", False)
 # Optional safety rail. False by default because research showed momentum/trend add little inside TOP3 Form.
 ENABLE_TOP3_FORM_REQUIRE_MOMENTUM_POSITIVE = env_bool("ENABLE_TOP3_FORM_REQUIRE_MOMENTUM_POSITIVE", False)
+
+
+# =========================
+# 🌅 v11.0 WAKEUP CQE ENTRY ENGINE
+# =========================
+# Research finding 2026-06-26:
+# Static HOT/GOOD admission was negative over the tested window, while
+# DEAD_CORE wakeup structure + CQE confirmation was strongly positive.
+# V11 changes ENTRY discovery only. Coin Health/Form remain telemetry and
+# sizing context; they no longer veto V11 wakeup entries except DISABLED health.
+ENABLE_V11_WAKEUP_CQE_ENGINE = env_bool("ENABLE_V11_WAKEUP_CQE_ENGINE", True)
+V11_ENTRY_QUALITY = os.environ.get("V11_ENTRY_QUALITY", "V11_WAKEUP_CQE")
+V11_TRADE_SIZE_GBP = float(os.environ.get("V11_TRADE_SIZE_GBP", "5") or 5)
+# Keep safety rails: control panel, OKX tradability, max-open, same-symbol and OKX position guard.
+# Bypass only the stale research gates that tonight's SQL showed were suppressing the edge.
+ENABLE_V11_BYPASS_COIN_FORM_LIVE_FILTER = env_bool("ENABLE_V11_BYPASS_COIN_FORM_LIVE_FILTER", True)
+ENABLE_V11_BYPASS_COIN_HEALTH_SHADOW = env_bool("ENABLE_V11_BYPASS_COIN_HEALTH_SHADOW", True)
+ENABLE_V11_BYPASS_MARKET_HEAT_HOT_ONLY = env_bool("ENABLE_V11_BYPASS_MARKET_HEAT_HOT_ONLY", True)
+ENABLE_V11_BYPASS_DEAD_CORE_NOT_RISING_SHADOW = env_bool("ENABLE_V11_BYPASS_DEAD_CORE_NOT_RISING_SHADOW", True)
+ENABLE_V11_TELEGRAM = env_bool("ENABLE_V11_TELEGRAM", True)
+
 
 
 
@@ -2996,6 +3017,7 @@ def engine_display_name(entry_quality):
         "BPT_CQE_LIFECYCLE_V1": "BPT_CQE_LIFECYCLE_V1",
         "PERSISTENCE_HUNTER_V1": "PERSISTENCE_HUNTER_V1",
         "COIN_HEALTH_SHADOW": "COIN_HEALTH_SHADOW",
+        V11_ENTRY_QUALITY: V11_ENTRY_QUALITY,
     }
     return mapping.get(entry_quality, entry_quality or "UNKNOWN_ENGINE")
 
@@ -3010,6 +3032,8 @@ def engine_emoji(entry_quality, is_shadow=False):
         return "⚡"
     if entry_quality == "BPT_CQE_LIFECYCLE_V1":
         return "🧬"
+    if entry_quality == V11_ENTRY_QUALITY:
+        return "🌅"
     if entry_quality == "COIN_HEALTH_SHADOW":
         return "🩺"
     return "🤖"
@@ -5217,6 +5241,89 @@ BPT_STALE_NO_CAPITAL_CLEANUP_MINUTES = float(
     os.environ.get("BPT_STALE_NO_CAPITAL_CLEANUP_MINUTES", str(float(BPT_CQE_MAX_HOLD_MINUTES) + 60.0)) or (float(BPT_CQE_MAX_HOLD_MINUTES) + 60.0)
 )
 
+def evaluate_v11_wakeup_cqe_entry(leadership_context, momentum, trend):
+    """
+    V11 WAKEUP CQE ENGINE.
+
+    Evidence from 2026-06-26 research:
+    - CURRENT HOT/GOOD unique trades were strongly negative.
+    - DEAD_CORE wakeup structure was positive.
+    - DEAD_CORE wakeup + CQE detected materially improved expectancy.
+
+    This function is intentionally small and structural:
+    required = wakeup pattern + CQE detected.
+    not required = Coin Form, Coin Health, leadership age/delta.
+    """
+    ctx = leadership_context or {}
+    if not ENABLE_V11_WAKEUP_CQE_ENGINE:
+        return {"approved": False, "reason": "v11_disabled"}
+
+    lifecycle_row, lifecycle_quality = classify_bpt_lifecycle_row(momentum, trend)
+    market_state = str(ctx.get("market_lifecycle_state") or "").upper()
+    market_move = str(ctx.get("market_lifecycle_movement") or "").upper()
+    cqe_ctx = ctx.get("cqe_context") or {}
+    cqe_detected = bool(cqe_ctx.get("cqe_detected"))
+
+    stable_wakeup = (
+        market_state == "DEAD_CORE"
+        and market_move == "STABLE"
+        and lifecycle_row in ("EXTREME_RUNNER_ROW", "EARLY_INCUBATION_ROW")
+    )
+    rising_wakeup = (
+        market_state == "DEAD_CORE"
+        and market_move == "RISING"
+        and lifecycle_row == "HIGH_MONSTER_ROW"
+    )
+    wakeup_detected = bool(stable_wakeup or rising_wakeup)
+
+    if stable_wakeup:
+        wakeup_type = f"DEAD_CORE_STABLE_{lifecycle_row}"
+    elif rising_wakeup:
+        wakeup_type = "DEAD_CORE_RISING_HIGH_MONSTER_ROW"
+    else:
+        wakeup_type = "NO_WAKEUP"
+
+    approved = bool(wakeup_detected and cqe_detected)
+    if not wakeup_detected:
+        reason = f"v11_no_wakeup:{market_state or 'NONE'}:{market_move or 'NONE'}:{lifecycle_row}"
+    elif not cqe_detected:
+        reason = f"v11_wakeup_no_cqe:{cqe_ctx.get('cqe_reason') or 'no_cqe'}"
+    else:
+        reason = f"v11_wakeup_cqe:{wakeup_type}:q={cqe_ctx.get('cqe_quality_score')}"
+
+    return {
+        "approved": approved,
+        "reason": reason,
+        "wakeup_detected": wakeup_detected,
+        "wakeup_type": wakeup_type,
+        "lifecycle_row": lifecycle_row,
+        "lifecycle_quality_score": lifecycle_quality,
+        "market_state": market_state,
+        "market_move": market_move,
+        "cqe_detected": cqe_detected,
+        "cqe_quality_score": cqe_ctx.get("cqe_quality_score"),
+        "cqe_reason": cqe_ctx.get("cqe_reason"),
+    }
+
+
+def apply_v11_wakeup_context(leadership_context, v11):
+    ctx = leadership_context or {}
+    if not v11:
+        return ctx
+    ctx["v11_wakeup_evaluated"] = True
+    ctx["v11_wakeup_approved"] = bool(v11.get("approved"))
+    ctx["v11_wakeup_detected"] = bool(v11.get("wakeup_detected"))
+    ctx["v11_wakeup_type"] = v11.get("wakeup_type")
+    ctx["v11_wakeup_reason"] = v11.get("reason")
+    ctx["v11_lifecycle_row"] = v11.get("lifecycle_row")
+    ctx["v11_lifecycle_quality_score"] = v11.get("lifecycle_quality_score")
+    if v11.get("approved"):
+        ctx["market_os_engine"] = V11_ENTRY_QUALITY
+        ctx["entry_engine"] = V11_ENTRY_QUALITY
+        ctx["size_scaling_reason"] = v11.get("reason")
+    return ctx
+
+
 def cleanup_stale_no_capital_bpt_trades(cur, symbol=None):
     if not ENABLE_BPT_STALE_NO_CAPITAL_CLEANUP:
         return 0
@@ -7115,6 +7222,8 @@ def classify_leadership_tier(prior_avg_peak):
     return "LEADERSHIP_CORE"
 
 def get_trade_size_for_quality(entry_quality):
+    if entry_quality == V11_ENTRY_QUALITY:
+        return V11_TRADE_SIZE_GBP
     if entry_quality == "ROT_MICRO_V1":
         return ROT_MICRO_TRADE_SIZE_GBP
     if entry_quality == "LEADERSHIP_SCALED":
@@ -9051,6 +9160,31 @@ def webhook():
                 leadership_context["cqe_quality_score"] = cqe_context.get("cqe_quality_score")
                 leadership_context["cqe_context"] = cqe_context
 
+                # v11.0 needs market lifecycle before legacy live/shadow gates run.
+                # This is logging-safe and duplicates the later v6.9 block only when needed.
+                try:
+                    if ENABLE_MARKET_LIFECYCLE_ENGINE_V69:
+                        early_lifecycle_context = get_market_lifecycle_context(cur, leadership_context, signal_time)
+                        leadership_context.update(early_lifecycle_context or {})
+                except Exception as e:
+                    print(f"⚠️ v11 early market lifecycle context skipped | {symbol} | {e}", flush=True)
+                    safe_telemetry_rollback(cur)
+
+                v11_decision = evaluate_v11_wakeup_cqe_entry(leadership_context, momentum, trend)
+                leadership_context = apply_v11_wakeup_context(leadership_context, v11_decision)
+
+                if v11_decision.get("approved"):
+                    entry_allowed = True
+                    entry_quality = V11_ENTRY_QUALITY
+                    block_reason = None
+                    print(
+                        f"🌅 V11 WAKEUP CQE APPROVED | {symbol} | "
+                        f"{v11_decision.get('wakeup_type')} | "
+                        f"cqe={v11_decision.get('cqe_quality_score')} | "
+                        f"T/M={round(trend,3)}/{round(momentum,3)}",
+                        flush=True
+                    )
+
                 # v6.6.21 FREE THE UNICORNS:
                 # If the only reason the leadership gate blocked this was a tested Unicorn subclass,
                 # allow it through to the normal OKX / max-open / sizing checks.
@@ -9111,7 +9245,7 @@ def webhook():
                     leadership_context["size_scaling_reason"] = "base_core_size"
 
                 # v6.9.2: Core leadership is research/shadow only unless explicitly re-enabled.
-                if entry_quality == "LEADERSHIP_CORE" and not ENABLE_LEADERSHIP_CORE_LIVE:
+                if entry_quality == "LEADERSHIP_CORE" and not ENABLE_LEADERSHIP_CORE_LIVE and not (leadership_context or {}).get("v11_wakeup_approved"):
                     if ENABLE_LEADERSHIP_CORE_SHADOW:
                         shadow_ctx = dict(leadership_context or {})
                         shadow_ctx["market_os_engine"] = "LEADERSHIP_CORE_SHADOW"
@@ -9133,6 +9267,7 @@ def webhook():
                     if (
                         market_state == "DEAD_CORE"
                         and market_move != "RISING"
+                        and not (ENABLE_V11_BYPASS_DEAD_CORE_NOT_RISING_SHADOW and (leadership_context or {}).get("v11_wakeup_approved"))
                     ):
                         shadow_ctx = dict(leadership_context or {})
                         shadow_ctx["market_os_engine"] = "DEAD_CORE_FILTER_SHADOW"
@@ -9162,7 +9297,7 @@ def webhook():
                 # Research showed market_heat_score=3 (HOT) was the only clearly profitable
                 # master regime. Non-HOT live leadership entries are converted to shadow rows
                 # so we preserve learning without spending real OKX capital.
-                if entry_allowed and ENABLE_MARKET_HEAT_HOT_ONLY_LIVE:
+                if entry_allowed and ENABLE_MARKET_HEAT_HOT_ONLY_LIVE and not (ENABLE_V11_BYPASS_MARKET_HEAT_HOT_ONLY and (leadership_context or {}).get("v11_wakeup_approved")):
                     try:
                         live_entry_market_heat = get_market_heat_context(cur)
                         leadership_context = leadership_context or {}
@@ -9388,6 +9523,27 @@ def webhook():
             safe_telemetry_rollback(cur)
             leadership_context = leadership_context or {}
 
+        # ================= V11 WAKEUP CQE RE-EVALUATION =================
+        # If legacy leadership/heat/form gates blocked earlier, V11 can still allow
+        # the setup as long as the structural wakeup + CQE condition is present.
+        try:
+            if decision == "LONG" and leadership_context:
+                v11_decision = evaluate_v11_wakeup_cqe_entry(leadership_context, momentum, trend)
+                leadership_context = apply_v11_wakeup_context(leadership_context, v11_decision)
+                if v11_decision.get("approved"):
+                    entry_allowed = True
+                    entry_quality = V11_ENTRY_QUALITY
+                    block_reason = None
+                    print(
+                        f"🌅 V11 WAKEUP CQE RE-ALLOWED | {symbol} | "
+                        f"{v11_decision.get('wakeup_type')} | "
+                        f"cqe={v11_decision.get('cqe_quality_score')}",
+                        flush=True
+                    )
+        except Exception as e:
+            print(f"⚠️ V11 wakeup re-evaluation skipped | {symbol} | {e}", flush=True)
+            safe_telemetry_rollback(cur)
+
         # ================= SHADOW CQE ENTRY ENGINE =================
         try:
             if decision == "LONG" and leadership_context:
@@ -9456,7 +9612,11 @@ def webhook():
                     "coin_form_reason": "coin_form_disabled",
                 }
 
-                if ENABLE_COIN_FORM_ENGINE and not coin_form_allows_live_entry(coin_form_snapshot):
+                if (
+                    ENABLE_COIN_FORM_ENGINE
+                    and not coin_form_allows_live_entry(coin_form_snapshot)
+                    and not (ENABLE_V11_BYPASS_COIN_FORM_LIVE_FILTER and (leadership_context or {}).get("v11_wakeup_approved"))
+                ):
                     entry_allowed = False
                     block_reason = f"coin_form_{coin_form_snapshot.get('coin_form_mode')}_{coin_form_snapshot.get('coin_form_reason')}"
                     print(
@@ -9500,9 +9660,15 @@ def webhook():
 
                 elif ENABLE_COIN_HEALTH_ENGINE and coin_health_snapshot.get("coin_health_mode") == "SHADOW":
                     coin_form_health_override = bool(
-                        ENABLE_COIN_FORM_ENGINE
-                        and ENABLE_COIN_FORM_OVERRIDE_HEALTH_SHADOW
-                        and coin_form_allows_live_entry(coin_form_snapshot)
+                        (
+                            ENABLE_COIN_FORM_ENGINE
+                            and ENABLE_COIN_FORM_OVERRIDE_HEALTH_SHADOW
+                            and coin_form_allows_live_entry(coin_form_snapshot)
+                        )
+                        or (
+                            ENABLE_V11_BYPASS_COIN_HEALTH_SHADOW
+                            and (leadership_context or {}).get("v11_wakeup_approved")
+                        )
                     )
 
                     if coin_form_health_override:
@@ -9550,6 +9716,19 @@ def webhook():
                                 f"Available: {okx_position_context.get('available')} {okx_position_context.get('base_ccy')}\n"
                                 f"Estimated notional: {fmt_money(okx_position_context.get('estimated_notional_usd'))}"
                             )
+
+                # V11 late re-allow path must still obey the same hard safety rails.
+                if entry_allowed and (leadership_context or {}).get("v11_wakeup_approved"):
+                    okx_tradable, okx_tradability_reason = is_okx_symbol_live_tradable(symbol)
+                    if not okx_tradable:
+                        entry_allowed = False
+                        block_reason = f"v11_okx_not_tradable_{okx_tradability_reason}"
+                    elif get_live_real_open_count(cur) >= MAX_OPEN_TRADES:
+                        entry_allowed = False
+                        block_reason = "v11_max_open_trades"
+                    elif ENABLE_SAME_SYMBOL_STACKING_LIMIT and get_open_same_symbol_real_count(cur, symbol) >= MAX_SAME_SYMBOL_OPEN:
+                        entry_allowed = False
+                        block_reason = "v11_max_same_symbol_open"
 
                 if not entry_allowed:
                     print(
