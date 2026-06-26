@@ -426,7 +426,7 @@ def parse_symbol_set_env(name, default):
 OKX_BLOCKED_SYMBOLS = parse_symbol_set_env("OKX_BLOCKED_SYMBOLS", "TAOUSDT")
 OKX_EST_FEE_RATE_ROUND_TRIP = float(os.environ.get("OKX_EST_FEE_RATE_ROUND_TRIP", "0.002") or 0.002)
 
-DATA_VERSION = "v11.1_WAKEUP_CQE_DIRECT_PROMOTION"
+DATA_VERSION = "v11.2_CQE_PROMOTION_STATE_FIX"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -751,6 +751,7 @@ ENABLE_V11_BYPASS_DEAD_CORE_NOT_RISING_SHADOW = env_bool("ENABLE_V11_BYPASS_DEAD
 # market heat, and Coin Health/Form shadow gates). Hard safety rails still remain:
 # OKX tradability/min order, max-open, same-symbol, control panel, and DISABLED coins.
 ENABLE_V11_DIRECT_CQE_LIVE_UPGRADES = env_bool("ENABLE_V11_DIRECT_CQE_LIVE_UPGRADES", True)
+ENABLE_V11_DIRECT_PROMOTE_ANY_CONFIRMED_CQE_PROBE = env_bool("ENABLE_V11_DIRECT_PROMOTE_ANY_CONFIRMED_CQE_PROBE", True)
 ENABLE_V11_BYPASS_TOP3_SHADOW_ONLY_UPGRADE = env_bool("ENABLE_V11_BYPASS_TOP3_SHADOW_ONLY_UPGRADE", True)
 ENABLE_V11_BYPASS_ADAPTIVE_SHADOW_ONLY_UPGRADE = env_bool("ENABLE_V11_BYPASS_ADAPTIVE_SHADOW_ONLY_UPGRADE", True)
 ENABLE_V11_BYPASS_COIN_FORM_SCALEIN_FILTER = env_bool("ENABLE_V11_BYPASS_COIN_FORM_SCALEIN_FILTER", True)
@@ -5966,6 +5967,20 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
         (market_state_at_entry == "DEAD_CORE" and market_move_at_entry == "STABLE" and lifecycle_row in ("EXTREME_RUNNER_ROW", "EARLY_INCUBATION_ROW"))
         or (market_state_at_entry == "DEAD_CORE" and market_move_at_entry == "RISING" and lifecycle_row == "HIGH_MONSTER_ROW")
     )
+    no_live_capital_probe_active = bool(
+        safe_float(current_trade_size_usdt, 0) <= 0
+        and (
+            is_shadow_trade
+            or ghost_probe_active
+            or top3_ghost_probe_active
+            or shadow_cqe_probe_active
+            or str(size_scaling_reason or "").startswith("bpt_scalein_disabled_or_not_allowed")
+            or str(size_scaling_reason or "").startswith("top3_form_shadow_only")
+            or str(size_scaling_reason or "").startswith("shadow_cqe_no_capital")
+            or str(size_scaling_reason or "").startswith("GHOST_PROBE_NO_CAPITAL")
+        )
+    )
+
     v11_direct_cqe_live_upgrade = bool(
         ENABLE_V11_DIRECT_CQE_LIVE_UPGRADES
         and confirmed
@@ -5974,6 +5989,15 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
             or entry_quality_for_upgrade == V11_ENTRY_QUALITY
             or str(size_scaling_reason or "").startswith("v11_wakeup_cqe")
             or v11_structural_wakeup_at_entry
+            # v11.2 promotion-state fix:
+            # Overnight data showed confirmed CQE probes were being left in
+            # ghost/top3/shadow/no-capital states. CQE itself was the validated
+            # discriminator, so any confirmed no-capital CQE probe is eligible
+            # to attempt real OKX capital, while hard exchange/risk rails remain.
+            or (
+                ENABLE_V11_DIRECT_PROMOTE_ANY_CONFIRMED_CQE_PROBE
+                and no_live_capital_probe_active
+            )
         )
     )
 
