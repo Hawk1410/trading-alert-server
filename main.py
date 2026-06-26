@@ -426,7 +426,7 @@ def parse_symbol_set_env(name, default):
 OKX_BLOCKED_SYMBOLS = parse_symbol_set_env("OKX_BLOCKED_SYMBOLS", "TAOUSDT")
 OKX_EST_FEE_RATE_ROUND_TRIP = float(os.environ.get("OKX_EST_FEE_RATE_ROUND_TRIP", "0.002") or 0.002)
 
-DATA_VERSION = "v11.2_CQE_PROMOTION_STATE_FIX"
+DATA_VERSION = "v11.3_CQE_CORE3_LIVE_PROMOTION_CLEAN"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -756,6 +756,16 @@ ENABLE_V11_BYPASS_TOP3_SHADOW_ONLY_UPGRADE = env_bool("ENABLE_V11_BYPASS_TOP3_SH
 ENABLE_V11_BYPASS_ADAPTIVE_SHADOW_ONLY_UPGRADE = env_bool("ENABLE_V11_BYPASS_ADAPTIVE_SHADOW_ONLY_UPGRADE", True)
 ENABLE_V11_BYPASS_COIN_FORM_SCALEIN_FILTER = env_bool("ENABLE_V11_BYPASS_COIN_FORM_SCALEIN_FILTER", True)
 ENABLE_V11_BYPASS_COIN_HEALTH_SCALEIN_FILTER = env_bool("ENABLE_V11_BYPASS_COIN_HEALTH_SCALEIN_FILTER", True)
+
+# v11.3: data-backed CQE promotion clean-up. Since 19 Jun, the three
+# blockers below were profitable when CQE confirmed. They may be bypassed
+# for confirmed CQE probes only. The negative coin_health/form override
+# bucket is explicitly NOT bypassed.
+ENABLE_V11_CORE3_CQE_PROMOTION = env_bool("ENABLE_V11_CORE3_CQE_PROMOTION", True)
+ENABLE_V11_RELAX_SHADOW_NO_LIVE_SCALEIN = env_bool("ENABLE_V11_RELAX_SHADOW_NO_LIVE_SCALEIN", True)
+ENABLE_V11_RELAX_TOP3_SHADOW_ONLY = env_bool("ENABLE_V11_RELAX_TOP3_SHADOW_ONLY", True)
+ENABLE_V11_RELAX_MARKET_HEAT_NOT_HOT = env_bool("ENABLE_V11_RELAX_MARKET_HEAT_NOT_HOT", True)
+ENABLE_V11_BLOCK_BAD_COIN_HEALTH_FORM_OVERRIDE = env_bool("ENABLE_V11_BLOCK_BAD_COIN_HEALTH_FORM_OVERRIDE", True)
 ENABLE_V11_TELEGRAM = env_bool("ENABLE_V11_TELEGRAM", True)
 
 
@@ -5923,7 +5933,7 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
             lifecycle_row, upgrade_size_gbp, dynamic_trade_size_gbp, COALESCE(is_shadow, TRUE),
             trade_size_usdt, probe_size_gbp, size_scaling_reason, market_os_engine,
             entry_quality, market_lifecycle_state_at_entry, market_lifecycle_movement_at_entry,
-            coin_health_mode, coin_form_mode
+            coin_health_mode, coin_form_mode, shadow_reason
         FROM bot_trades_v4
         WHERE id = %s
     """, (tid,))
@@ -5939,6 +5949,8 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
     market_move_at_entry = str(row[10] or "").upper() if row and len(row) > 10 else ""
     stored_coin_health_mode = str(row[11] or "").upper() if row and len(row) > 11 else ""
     stored_coin_form_mode = str(row[12] or "").upper() if row and len(row) > 12 else ""
+    stored_shadow_reason = str(row[13] or "") if row and len(row) > 13 else ""
+    stored_shadow_reason_upper = stored_shadow_reason.upper()
     adaptive_dead_market_shadow_only = (
         market_os_engine == "ADAPTIVE_DEAD_MARKET_LEADER"
         and not ENABLE_ADAPTIVE_DEAD_MARKET_LIVE_UPGRADES
@@ -5955,9 +5967,23 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
     ):
         adaptive_dead_market_shadow_only = False
 
+    size_reason_upper = str(size_scaling_reason or "").upper()
     ghost_probe_active = (probe_size_gbp == 0.0 and size_scaling_reason == GHOST_PROBE_LABEL)
-    top3_ghost_probe_active = (size_scaling_reason == TOP_FORM_SHADOW_REASON)
-    shadow_cqe_probe_active = (size_scaling_reason == SHADOW_CQE_REASON)
+    top3_ghost_probe_active = (
+        size_scaling_reason == TOP_FORM_SHADOW_REASON
+        or stored_shadow_reason == TOP_FORM_SHADOW_REASON
+        or "TOP3_FORM" in size_reason_upper
+        or "TOP3_FORM" in stored_shadow_reason_upper
+    )
+    shadow_cqe_probe_active = (
+        size_scaling_reason == SHADOW_CQE_REASON
+        or stored_shadow_reason == SHADOW_CQE_REASON
+        or "SHADOW_CQE" in size_reason_upper
+        or "SHADOW_CQE" in stored_shadow_reason_upper
+    )
+    market_heat_block_active = "MARKET_HEAT_NOT_HOT" in size_reason_upper
+    shadow_no_live_scalein_active = "SHADOW_TRADE_NO_LIVE_SCALEIN" in size_reason_upper
+    bad_coin_health_form_override_active = "COIN_HEALTH_COIN_FORM_LIVE_OVERRIDE" in size_reason_upper
     current_trade_size_usdt = float(row[4] or 0) if row else 0.0
 
     # v11.1: identify confirmed Wakeup+CQE probes from either explicit V11 tags
@@ -5981,22 +6007,45 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
         )
     )
 
+    v11_core3_relax_candidate = bool(
+        ENABLE_V11_CORE3_CQE_PROMOTION
+        and not (ENABLE_V11_BLOCK_BAD_COIN_HEALTH_FORM_OVERRIDE and bad_coin_health_form_override_active)
+        and (
+            (ENABLE_V11_RELAX_SHADOW_NO_LIVE_SCALEIN and shadow_no_live_scalein_active)
+            or (ENABLE_V11_RELAX_TOP3_SHADOW_ONLY and top3_ghost_probe_active)
+            or (ENABLE_V11_RELAX_MARKET_HEAT_NOT_HOT and market_heat_block_active)
+        )
+    )
+
+    v11_promotion_tags = []
+    if shadow_no_live_scalein_active:
+        v11_promotion_tags.append("shadow_trade_no_live_scalein")
+    if top3_ghost_probe_active:
+        v11_promotion_tags.append("top3_form_shadow_only")
+    if market_heat_block_active:
+        v11_promotion_tags.append("market_heat_not_hot")
+    if bad_coin_health_form_override_active:
+        v11_promotion_tags.append("bad_coin_health_form_override_do_not_bypass")
+
     v11_direct_cqe_live_upgrade = bool(
         ENABLE_V11_DIRECT_CQE_LIVE_UPGRADES
         and confirmed
+        and not (ENABLE_V11_BLOCK_BAD_COIN_HEALTH_FORM_OVERRIDE and bad_coin_health_form_override_active)
         and (
             market_os_engine == V11_ENTRY_QUALITY
             or entry_quality_for_upgrade == V11_ENTRY_QUALITY
             or str(size_scaling_reason or "").startswith("v11_wakeup_cqe")
             or v11_structural_wakeup_at_entry
-            # v11.2 promotion-state fix:
-            # Overnight data showed confirmed CQE probes were being left in
-            # ghost/top3/shadow/no-capital states. CQE itself was the validated
-            # discriminator, so any confirmed no-capital CQE probe is eligible
-            # to attempt real OKX capital, while hard exchange/risk rails remain.
+            # v11.3 promotion-state fix:
+            # Since 19 Jun, the profitable CQE-confirmed blocked buckets were
+            # shadow_trade_no_live_scalein, top3_form_shadow_only, and
+            # market_heat_not_hot. Promote those; do not promote the losing
+            # coin_health_coin_form_live_override bucket.
+            or v11_core3_relax_candidate
             or (
                 ENABLE_V11_DIRECT_PROMOTE_ANY_CONFIRMED_CQE_PROBE
                 and no_live_capital_probe_active
+                and not (ENABLE_V11_BLOCK_BAD_COIN_HEALTH_FORM_OVERRIDE and bad_coin_health_form_override_active)
             )
         )
     )
@@ -6057,20 +6106,29 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
     coin_allows_live_upgrade_or_form_override = bool(coin_allows_live_upgrade or coin_health_form_override or adaptive_dead_market_form_override)
 
     if v11_direct_cqe_live_upgrade:
-        # V11.1: Wakeup+CQE is the live promotion gate. Legacy research-only
-        # restrictions should not keep a confirmed V11 setup paper-only.
-        if ENABLE_V11_BYPASS_TOP3_SHADOW_ONLY_UPGRADE:
+        # V11.3: CQE-confirmed promotion is allowed to bypass only the
+        # data-backed profitable blockers: Top3 shadow-only, shadow no-live
+        # scale-in, and market heat not-hot. Bad coin-health/form override is
+        # not bypassed. Hard exchange/risk rails remain below.
+        if ENABLE_V11_BYPASS_TOP3_SHADOW_ONLY_UPGRADE and top3_ghost_probe_active:
             top_form_shadow_only = False
-        if ENABLE_V11_BYPASS_ADAPTIVE_SHADOW_ONLY_UPGRADE:
+        if ENABLE_V11_BYPASS_ADAPTIVE_SHADOW_ONLY_UPGRADE and not bad_coin_health_form_override_active:
             adaptive_dead_market_shadow_only = False
             adaptive_dead_market_form_override = False
-        if ENABLE_V11_BYPASS_MARKET_HEAT_HOT_ONLY:
+        if ENABLE_V11_BYPASS_MARKET_HEAT_HOT_ONLY and (market_heat_block_active or v11_core3_relax_candidate):
             effective_market_heat_allows_live = True
-        if ENABLE_V11_BYPASS_COIN_FORM_SCALEIN_FILTER:
+        if ENABLE_V11_BYPASS_COIN_FORM_SCALEIN_FILTER and not bad_coin_health_form_override_active:
             coin_form_allows_scalein = True
-        if ENABLE_V11_BYPASS_COIN_HEALTH_SCALEIN_FILTER and stored_coin_health_mode != "DISABLED":
+        if ENABLE_V11_BYPASS_COIN_HEALTH_SCALEIN_FILTER and stored_coin_health_mode != "DISABLED" and not bad_coin_health_form_override_active:
             coin_allows_live_upgrade_or_form_override = True
         confirmation_allows_scalein = True
+        print(
+            f"🌅 V11.3 CQE PROMOTION ELIGIBLE | {sym} | id={tid} | "
+            f"tags={','.join(v11_promotion_tags) or 'v11_structural'} | "
+            f"row={lifecycle_row} | heat={market_heat_score}/{market_heat_regime} | "
+            f"health={stored_coin_health_mode} form={stored_coin_form_mode}",
+            flush=True
+        )
 
     # v9.3 EXECUTION FIX:
     # Raw BPT probes remain ghost/no-capital because recent data shows RAW_PROBE is strongly negative.
@@ -9318,17 +9376,25 @@ def webhook():
                         safe_telemetry_rollback(cur)
 
             if entry_allowed:
-                entry_quality = classify_leadership_tier(leadership_context["prior_avg_peak"])
+                v11_entry_approved_now = bool((leadership_context or {}).get("v11_wakeup_approved"))
+                if not v11_entry_approved_now:
+                    entry_quality = classify_leadership_tier(leadership_context["prior_avg_peak"])
+                else:
+                    entry_quality = V11_ENTRY_QUALITY
+                    leadership_context["market_os_engine"] = V11_ENTRY_QUALITY
+                    leadership_context["entry_engine"] = V11_ENTRY_QUALITY
+                    leadership_context["size_scaling_reason"] = leadership_context.get("size_scaling_reason") or "v11_wakeup_cqe_direct_entry"
                 leadership_context["leadership_max_60m"] = max(
                     float(leadership_context.get("prior_avg_peak") or 0),
                     get_recent_leadership_max(cur, symbol, 60)
                 )
-                leadership_context["market_os_engine"] = "CORE"
-                if ENABLE_LEADERSHIP_SIZE_SCALING_V66 and leadership_context["leadership_max_60m"] >= LEADERSHIP_SCALE_THRESHOLD:
-                    leadership_context["size_scaling_reason"] = "leadership_max_60m_scaled"
-                    entry_quality = "LEADERSHIP_SCALED"
-                else:
-                    leadership_context["size_scaling_reason"] = "base_core_size"
+                if not v11_entry_approved_now:
+                    leadership_context["market_os_engine"] = "CORE"
+                    if ENABLE_LEADERSHIP_SIZE_SCALING_V66 and leadership_context["leadership_max_60m"] >= LEADERSHIP_SCALE_THRESHOLD:
+                        leadership_context["size_scaling_reason"] = "leadership_max_60m_scaled"
+                        entry_quality = "LEADERSHIP_SCALED"
+                    else:
+                        leadership_context["size_scaling_reason"] = "base_core_size"
 
                 # v6.9.2: Core leadership is research/shadow only unless explicitly re-enabled.
                 if entry_quality == "LEADERSHIP_CORE" and not ENABLE_LEADERSHIP_CORE_LIVE and not (leadership_context or {}).get("v11_wakeup_approved"):
@@ -9840,13 +9906,21 @@ def webhook():
                     entry_trade_size = get_trade_size_for_context(entry_quality, leadership_context)
                     entry_quote_size = get_trade_size_quote_for_context(entry_quality, leadership_context)
 
-                    print(
-                        f"🚀 OPEN REAL | {symbol} | LONG | id={trade_id} | "
-                        f"tier={entry_quality} | size=£{entry_trade_size} | "
-                        f"prior_avg_peak={round(leadership_context.get('prior_avg_peak', 0), 3)} | "
-                        f"prior_runners={leadership_context.get('prior_runners')}",
-                        flush=True
-                    )
+                    if (leadership_context or {}).get("v11_wakeup_approved"):
+                        print(
+                            f"🌅🚀 V11.3 LIVE ENTRY ATTEMPT | {symbol} | LONG | id={trade_id} | "
+                            f"size=£{entry_trade_size} | reason={leadership_context.get('v11_wakeup_reason')} | "
+                            f"type={leadership_context.get('v11_wakeup_type')} | T/M={round(trend,3)}/{round(momentum,3)}",
+                            flush=True
+                        )
+                    else:
+                        print(
+                            f"🚀 OPEN REAL | {symbol} | LONG | id={trade_id} | "
+                            f"tier={entry_quality} | size=£{entry_trade_size} | "
+                            f"prior_avg_peak={round(leadership_context.get('prior_avg_peak', 0), 3)} | "
+                            f"prior_runners={leadership_context.get('prior_runners')}",
+                            flush=True
+                        )
 
                     live_open_after_entry = get_live_real_open_count(cur)
                     same_symbol_after_entry = get_open_same_symbol_real_count(cur, symbol)
