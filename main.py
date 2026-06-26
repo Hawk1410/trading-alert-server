@@ -426,7 +426,7 @@ def parse_symbol_set_env(name, default):
 OKX_BLOCKED_SYMBOLS = parse_symbol_set_env("OKX_BLOCKED_SYMBOLS", "TAOUSDT")
 OKX_EST_FEE_RATE_ROUND_TRIP = float(os.environ.get("OKX_EST_FEE_RATE_ROUND_TRIP", "0.002") or 0.002)
 
-DATA_VERSION = "v11.0_WAKEUP_CQE_ENGINE"
+DATA_VERSION = "v11.1_WAKEUP_CQE_DIRECT_PROMOTION"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -745,6 +745,16 @@ ENABLE_V11_BYPASS_COIN_FORM_LIVE_FILTER = env_bool("ENABLE_V11_BYPASS_COIN_FORM_
 ENABLE_V11_BYPASS_COIN_HEALTH_SHADOW = env_bool("ENABLE_V11_BYPASS_COIN_HEALTH_SHADOW", True)
 ENABLE_V11_BYPASS_MARKET_HEAT_HOT_ONLY = env_bool("ENABLE_V11_BYPASS_MARKET_HEAT_HOT_ONLY", True)
 ENABLE_V11_BYPASS_DEAD_CORE_NOT_RISING_SHADOW = env_bool("ENABLE_V11_BYPASS_DEAD_CORE_NOT_RISING_SHADOW", True)
+
+# v11.1: confirmed Wakeup+CQE probes are allowed to bypass legacy research-only
+# promotion gates (Top3 shadow-only, adaptive dead-market shadow-only, HOT-only
+# market heat, and Coin Health/Form shadow gates). Hard safety rails still remain:
+# OKX tradability/min order, max-open, same-symbol, control panel, and DISABLED coins.
+ENABLE_V11_DIRECT_CQE_LIVE_UPGRADES = env_bool("ENABLE_V11_DIRECT_CQE_LIVE_UPGRADES", True)
+ENABLE_V11_BYPASS_TOP3_SHADOW_ONLY_UPGRADE = env_bool("ENABLE_V11_BYPASS_TOP3_SHADOW_ONLY_UPGRADE", True)
+ENABLE_V11_BYPASS_ADAPTIVE_SHADOW_ONLY_UPGRADE = env_bool("ENABLE_V11_BYPASS_ADAPTIVE_SHADOW_ONLY_UPGRADE", True)
+ENABLE_V11_BYPASS_COIN_FORM_SCALEIN_FILTER = env_bool("ENABLE_V11_BYPASS_COIN_FORM_SCALEIN_FILTER", True)
+ENABLE_V11_BYPASS_COIN_HEALTH_SCALEIN_FILTER = env_bool("ENABLE_V11_BYPASS_COIN_HEALTH_SCALEIN_FILTER", True)
 ENABLE_V11_TELEGRAM = env_bool("ENABLE_V11_TELEGRAM", True)
 
 
@@ -5908,7 +5918,11 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
         return False
 
     cur.execute("""
-        SELECT lifecycle_row, upgrade_size_gbp, dynamic_trade_size_gbp, COALESCE(is_shadow, TRUE), trade_size_usdt, probe_size_gbp, size_scaling_reason, market_os_engine
+        SELECT
+            lifecycle_row, upgrade_size_gbp, dynamic_trade_size_gbp, COALESCE(is_shadow, TRUE),
+            trade_size_usdt, probe_size_gbp, size_scaling_reason, market_os_engine,
+            entry_quality, market_lifecycle_state_at_entry, market_lifecycle_movement_at_entry,
+            coin_health_mode, coin_form_mode
         FROM bot_trades_v4
         WHERE id = %s
     """, (tid,))
@@ -5919,6 +5933,11 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
     probe_size_gbp = float(row[5] or 0) if row else 0.0
     size_scaling_reason = str(row[6] or "") if row else ""
     market_os_engine = str(row[7] or "") if row and len(row) > 7 else ""
+    entry_quality_for_upgrade = str(row[8] or "") if row and len(row) > 8 else ""
+    market_state_at_entry = str(row[9] or "").upper() if row and len(row) > 9 else ""
+    market_move_at_entry = str(row[10] or "").upper() if row and len(row) > 10 else ""
+    stored_coin_health_mode = str(row[11] or "").upper() if row and len(row) > 11 else ""
+    stored_coin_form_mode = str(row[12] or "").upper() if row and len(row) > 12 else ""
     adaptive_dead_market_shadow_only = (
         market_os_engine == "ADAPTIVE_DEAD_MARKET_LEADER"
         and not ENABLE_ADAPTIVE_DEAD_MARKET_LIVE_UPGRADES
@@ -5936,7 +5955,27 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
         adaptive_dead_market_shadow_only = False
 
     ghost_probe_active = (probe_size_gbp == 0.0 and size_scaling_reason == GHOST_PROBE_LABEL)
+    top3_ghost_probe_active = (size_scaling_reason == TOP_FORM_SHADOW_REASON)
+    shadow_cqe_probe_active = (size_scaling_reason == SHADOW_CQE_REASON)
     current_trade_size_usdt = float(row[4] or 0) if row else 0.0
+
+    # v11.1: identify confirmed Wakeup+CQE probes from either explicit V11 tags
+    # or the exact structural wakeup pattern validated in SQL. This is deliberately
+    # evaluated at confirmation time so old pre-CQE shadow gates cannot starve capital.
+    v11_structural_wakeup_at_entry = bool(
+        (market_state_at_entry == "DEAD_CORE" and market_move_at_entry == "STABLE" and lifecycle_row in ("EXTREME_RUNNER_ROW", "EARLY_INCUBATION_ROW"))
+        or (market_state_at_entry == "DEAD_CORE" and market_move_at_entry == "RISING" and lifecycle_row == "HIGH_MONSTER_ROW")
+    )
+    v11_direct_cqe_live_upgrade = bool(
+        ENABLE_V11_DIRECT_CQE_LIVE_UPGRADES
+        and confirmed
+        and (
+            market_os_engine == V11_ENTRY_QUALITY
+            or entry_quality_for_upgrade == V11_ENTRY_QUALITY
+            or str(size_scaling_reason or "").startswith("v11_wakeup_cqe")
+            or v11_structural_wakeup_at_entry
+        )
+    )
 
     # v6.6.20:
     # ensure OKX minimum notional compatibility
@@ -5993,24 +6032,43 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
     )
     coin_allows_live_upgrade_or_form_override = bool(coin_allows_live_upgrade or coin_health_form_override or adaptive_dead_market_form_override)
 
+    if v11_direct_cqe_live_upgrade:
+        # V11.1: Wakeup+CQE is the live promotion gate. Legacy research-only
+        # restrictions should not keep a confirmed V11 setup paper-only.
+        if ENABLE_V11_BYPASS_TOP3_SHADOW_ONLY_UPGRADE:
+            top_form_shadow_only = False
+        if ENABLE_V11_BYPASS_ADAPTIVE_SHADOW_ONLY_UPGRADE:
+            adaptive_dead_market_shadow_only = False
+            adaptive_dead_market_form_override = False
+        if ENABLE_V11_BYPASS_MARKET_HEAT_HOT_ONLY:
+            effective_market_heat_allows_live = True
+        if ENABLE_V11_BYPASS_COIN_FORM_SCALEIN_FILTER:
+            coin_form_allows_scalein = True
+        if ENABLE_V11_BYPASS_COIN_HEALTH_SCALEIN_FILTER and stored_coin_health_mode != "DISABLED":
+            coin_allows_live_upgrade_or_form_override = True
+        confirmation_allows_scalein = True
+
     # v9.3 EXECUTION FIX:
     # Raw BPT probes remain ghost/no-capital because recent data shows RAW_PROBE is strongly negative.
     # But once a ghost probe is CQE-confirmed, HOT/GOOD Coin Form is allowed to place the first real OKX entry.
     # Previously this was blocked by `not is_shadow_trade`, leaving confirmed winners as paper-only.
     confirmed_ghost_live_entry_allowed = bool(
-        ENABLE_BPT_CQE_CONFIRMED_GHOST_LIVE_ENTRY
-        and ghost_probe_active
-        and not top_form_shadow_only
-        and coin_form_allows_scalein
-        and (not adaptive_dead_market_shadow_only or adaptive_dead_market_form_override)
-        and coin_allows_live_upgrade_or_form_override
-        and row_allows_scalein
-        and confirmation_allows_scalein
-        and effective_market_heat_allows_live
-        and habitat_allows_live
-        and (
-            habitat_hot_only_override
-            or (not ENABLE_NEUTRAL_MARKET_SHADOW_FILTER or market_heat_regime != "NEUTRAL")
+        v11_direct_cqe_live_upgrade
+        or (
+            ENABLE_BPT_CQE_CONFIRMED_GHOST_LIVE_ENTRY
+            and ghost_probe_active
+            and not top_form_shadow_only
+            and coin_form_allows_scalein
+            and (not adaptive_dead_market_shadow_only or adaptive_dead_market_form_override)
+            and coin_allows_live_upgrade_or_form_override
+            and row_allows_scalein
+            and confirmation_allows_scalein
+            and effective_market_heat_allows_live
+            and habitat_allows_live
+            and (
+                habitat_hot_only_override
+                or (not ENABLE_NEUTRAL_MARKET_SHADOW_FILTER or market_heat_regime != "NEUTRAL")
+            )
         )
     )
 
@@ -6031,7 +6089,9 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
     # The old Telegram/log line displayed "Live upgrades: True" even for shadow probes,
     # which made normal shadow confirmations look like failed live scale-ins.
     # This keeps behaviour unchanged but makes the reason explicit.
-    if not ENABLE_BPT_CQE_LIVE_UPGRADES:
+    if scalein_allowed and v11_direct_cqe_live_upgrade:
+        scalein_block_reason = "v11_wakeup_cqe_direct_live_upgrade"
+    elif not ENABLE_BPT_CQE_LIVE_UPGRADES:
         scalein_block_reason = "live_upgrade_toggle_off"
     elif top_form_shadow_only:
         scalein_block_reason = "top3_form_shadow_only_no_live_upgrade"
@@ -6144,10 +6204,12 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
                 "upgrade_size_gbp": actual_upgrade_size,
                 "probe_lifecycle_state": "FAST_TRACK_UPGRADED" if fast_track_active else "STANDARD_UPGRADED",
                 "size_scaling_reason": (
-                    "adaptive_dead_market_coin_form_live_override"
-                    if adaptive_dead_market_form_override else
-                    ("coin_health_coin_form_live_override" if coin_health_form_override else
-                     ("confirmed_ghost_probe_entered_live_capital" if ghost_probe_active else "bpt_live_scalein_executed"))
+                    "v11_wakeup_cqe_direct_live_upgrade"
+                    if v11_direct_cqe_live_upgrade else
+                    ("adaptive_dead_market_coin_form_live_override"
+                     if adaptive_dead_market_form_override else
+                     ("coin_health_coin_form_live_override" if coin_health_form_override else
+                      ("confirmed_ghost_probe_entered_live_capital" if ghost_probe_active else "bpt_live_scalein_executed")))
                 ),
             })
         else:
@@ -11180,6 +11242,7 @@ def bool_status():
         "ENABLE_BPT_CQE_LIVE_UPGRADES": ENABLE_BPT_CQE_LIVE_UPGRADES,
         "ENABLE_BPT_CQE_CONFIRMED_GHOST_LIVE_ENTRY": ENABLE_BPT_CQE_CONFIRMED_GHOST_LIVE_ENTRY,
         "ENABLE_MARKET_HEAT_HOT_ONLY_LIVE": ENABLE_MARKET_HEAT_HOT_ONLY_LIVE,
+        "ENABLE_V11_DIRECT_CQE_LIVE_UPGRADES": ENABLE_V11_DIRECT_CQE_LIVE_UPGRADES,
         "MARKET_HEAT_MIN_LIVE_SCORE": MARKET_HEAT_MIN_LIVE_SCORE,
         "ENABLE_HABITAT_ENGINE": ENABLE_HABITAT_ENGINE,
         "HABITAT_SHADOW_ONLY_COINS": sorted(HABITAT_SHADOW_ONLY_COINS),
