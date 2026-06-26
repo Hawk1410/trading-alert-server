@@ -2,10 +2,10 @@
 # 🤖 BOT VERSION
 # =========================
 # VERSION: v10.2.0
-# TITLE: V11 WAKEUP CQE ENGINE + TOP3 FORM SHADOW SELECTOR
+# TITLE: V11.4 ENTRY DECISION TRACE DEBUG
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v10.2.0 TOP3 FORM SHADOW SELECTOR RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v11.4 ENTRY DECISION TRACE DEBUG RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v10.2.0 CHANGE SUMMARY
@@ -426,7 +426,7 @@ def parse_symbol_set_env(name, default):
 OKX_BLOCKED_SYMBOLS = parse_symbol_set_env("OKX_BLOCKED_SYMBOLS", "TAOUSDT")
 OKX_EST_FEE_RATE_ROUND_TRIP = float(os.environ.get("OKX_EST_FEE_RATE_ROUND_TRIP", "0.002") or 0.002)
 
-DATA_VERSION = "v11.3_CQE_CORE3_LIVE_PROMOTION_CLEAN"
+DATA_VERSION = "v11.4_ENTRY_DECISION_TRACE_DEBUG"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -9281,12 +9281,60 @@ def webhook():
         entry_quality = None
         block_reason = None
 
+        # v11.4 DIAGNOSTIC TRACE:
+        # This build is designed to make every signal explain itself.
+        # No more "reason=None" without a clear stage/path.
+        decision_trace = []
+
+        def trace_stage(stage, passed=None, reason=None, details=None):
+            try:
+                decision_trace.append({
+                    "stage": str(stage),
+                    "passed": passed,
+                    "reason": reason,
+                    "details": details,
+                })
+            except Exception:
+                pass
+
+        def trace_summary(max_items=18):
+            try:
+                parts = []
+                for item in decision_trace[-max_items:]:
+                    mark = "✅" if item.get("passed") is True else ("❌" if item.get("passed") is False else "ℹ️")
+                    txt = f"{mark}{item.get('stage')}"
+                    if item.get("reason"):
+                        txt += f":{item.get('reason')}"
+                    if item.get("details"):
+                        txt += f"({item.get('details')})"
+                    parts.append(txt)
+                return " > ".join(parts) if parts else "no_trace"
+            except Exception:
+                return "trace_error"
+
+        def set_block(reason, stage="unknown", details=None):
+            trace_stage(stage, False, reason, details)
+            return False, reason
+
+        trace_stage(
+            "webhook",
+            True,
+            "received",
+            f"decision={decision or 'NO_ENTRY'} price={price} mom={round(momentum,3)} trend={round(trend,3)}"
+        )
+
         if decision == "LONG":
             entry_allowed, leadership_context, block_reason = passes_leadership_engine(
                 cur,
                 symbol,
                 momentum,
                 trend
+            )
+            trace_stage(
+                "leadership_engine",
+                bool(entry_allowed),
+                block_reason or "leadership_pass",
+                f"trend={round(trend,3)} mom={round(momentum,3)}"
             )
 
             if leadership_context:
@@ -9303,6 +9351,12 @@ def webhook():
                 leadership_context["shadow_cqe_reason"] = cqe_context.get("cqe_reason")
                 leadership_context["cqe_quality_score"] = cqe_context.get("cqe_quality_score")
                 leadership_context["cqe_context"] = cqe_context
+                trace_stage(
+                    "cqe_context",
+                    bool(cqe_context.get("cqe_detected") or cqe_context.get("cqe_confirmed") or cqe_context.get("cqe_quality_score")),
+                    cqe_context.get("cqe_reason") or "cqe_context_loaded",
+                    f"q={cqe_context.get('cqe_quality_score')} detected={cqe_context.get('cqe_detected')} confirmed={cqe_context.get('cqe_confirmed')}"
+                )
 
                 # v11.0 needs market lifecycle before legacy live/shadow gates run.
                 # This is logging-safe and duplicates the later v6.9 block only when needed.
@@ -9316,11 +9370,18 @@ def webhook():
 
                 v11_decision = evaluate_v11_wakeup_cqe_entry(leadership_context, momentum, trend)
                 leadership_context = apply_v11_wakeup_context(leadership_context, v11_decision)
+                trace_stage(
+                    "v11_wakeup_cqe",
+                    bool(v11_decision.get("approved")),
+                    v11_decision.get("reason") or v11_decision.get("block_reason") or ("approved" if v11_decision.get("approved") else "not_approved"),
+                    f"type={v11_decision.get('wakeup_type')} q={v11_decision.get('cqe_quality_score')}"
+                )
 
                 if v11_decision.get("approved"):
                     entry_allowed = True
                     entry_quality = V11_ENTRY_QUALITY
                     block_reason = None
+                    trace_stage("entry_reallowed_by_v11", True, "v11_wakeup_cqe_approved", f"quality={entry_quality}")
                     print(
                         f"🌅 V11 WAKEUP CQE APPROVED | {symbol} | "
                         f"{v11_decision.get('wakeup_type')} | "
@@ -9376,6 +9437,7 @@ def webhook():
                         safe_telemetry_rollback(cur)
 
             if entry_allowed:
+                trace_stage("entry_gate_pre_safety", True, block_reason or "entry_allowed_pre_safety", f"quality={entry_quality}")
                 v11_entry_approved_now = bool((leadership_context or {}).get("v11_wakeup_approved"))
                 if not v11_entry_approved_now:
                     entry_quality = classify_leadership_tier(leadership_context["prior_avg_peak"])
@@ -9409,6 +9471,7 @@ def webhook():
                         )
                     entry_allowed = False
                     block_reason = "leadership_core_shadow_only"
+                    trace_stage("leadership_core_live_gate", False, block_reason, "core_shadow_only")
 
                 # v7.5 SHADOW FILTER:
                 # DEAD_CORE markets that are not RISING are shadow-only.
@@ -9444,6 +9507,7 @@ def webhook():
 
                         entry_allowed = False
                         block_reason = "dead_core_not_rising_shadow"
+                        trace_stage("dead_core_live_gate", False, block_reason, f"state={market_state} move={market_move}")
 
                 # v9.9.1 HOT-ONLY LIVE CAPITAL GATE:
                 # Research showed market_heat_score=3 (HOT) was the only clearly profitable
@@ -9494,11 +9558,13 @@ def webhook():
 
                             entry_allowed = False
                             block_reason = shadow_ctx["size_scaling_reason"]
+                            trace_stage("market_heat_hot_only_gate", False, block_reason, f"heat={live_entry_heat_score} regime={live_entry_heat_regime}")
                     except Exception as e:
                         print(f"⚠️ HOT-only live gate failed; blocking live entry for safety | {symbol} | {e}", flush=True)
                         safe_telemetry_rollback(cur)
                         entry_allowed = False
                         block_reason = "market_heat_hot_only_gate_error"
+                        trace_stage("market_heat_hot_only_gate", False, block_reason, str(e))
 
                 # v6.1.4: check OKX tradability BEFORE creating DB trade / consuming slot.
                 if entry_allowed:
@@ -9506,12 +9572,14 @@ def webhook():
                     if not okx_tradable:
                         entry_allowed = False
                         block_reason = f"okx_not_tradable_{okx_tradability_reason}"
+                        trace_stage("okx_tradability", False, block_reason, symbol)
 
                 if entry_allowed:
                     open_count = get_live_real_open_count(cur)
                     if open_count >= MAX_OPEN_TRADES:
                         entry_allowed = False
                         block_reason = "max_open_trades"
+                        trace_stage("max_open_trades", False, block_reason, f"open_count={open_count}")
 
                 if entry_allowed and ENABLE_SAME_SYMBOL_STACKING_LIMIT:
                     same_symbol_count = get_open_same_symbol_real_count(cur, symbol)
@@ -9539,6 +9607,7 @@ def webhook():
                         else:
                             entry_allowed = False
                             block_reason = "max_same_symbol_open"
+                            trace_stage("same_symbol_limit", False, block_reason, f"same_symbol_count={same_symbol_count}")
 
 
             # v6.6 ROT_MICRO: independent tiny continuation harvester.
@@ -9592,6 +9661,26 @@ def webhook():
             block_reason = "shorts_disabled_v6_1_long_only"
         else:
             block_reason = None
+
+        # v11.4: normalize missing reasons before storing/logging.
+        if block_reason is None:
+            if decision is None:
+                block_reason = "no_entry_decision_update_only"
+                trace_stage("decision_model", False, block_reason, "TradingView alert was not LONG/SHORT")
+            elif decision == "SHORT":
+                block_reason = "shorts_disabled_v6_1_long_only"
+                trace_stage("direction_filter", False, block_reason, "long_only")
+            elif decision == "LONG" and not entry_allowed:
+                block_reason = "long_blocked_unknown_missing_reason"
+                trace_stage("unknown_block", False, block_reason, "missing return reason")
+            elif decision == "LONG" and entry_allowed:
+                trace_stage("entry_final", True, "entry_allowed", "ready_for_open_trade")
+
+        print(
+            f"🧭 ENTRY TRACE | {symbol} | decision={decision or 'NO_ENTRY'} | allowed={entry_allowed} | "
+            f"reason={block_reason} | {trace_summary()}",
+            flush=True
+        )
 
         # ================= UPDATE RAW SIGNAL INTELLIGENCE =================
         try:
@@ -9771,6 +9860,7 @@ def webhook():
                 ):
                     entry_allowed = False
                     block_reason = f"coin_form_{coin_form_snapshot.get('coin_form_mode')}_{coin_form_snapshot.get('coin_form_reason')}"
+                    trace_stage("coin_form_live_gate", False, block_reason, coin_form_snapshot.get("coin_form_mode"))
                     print(
                         f"🔥 COIN FORM BLOCK | {symbol} | "
                         f"mode={coin_form_snapshot.get('coin_form_mode')} | "
@@ -9808,6 +9898,7 @@ def webhook():
                 if ENABLE_COIN_HEALTH_ENGINE and coin_health_snapshot.get("coin_health_mode") == "DISABLED":
                     entry_allowed = False
                     block_reason = f"coin_disabled_{coin_health_snapshot.get('coin_health_reason')}"
+                    trace_stage("coin_health_live_gate", False, block_reason, "DISABLED")
                     print(f"🚫 COIN DISABLED | {symbol} | reason={coin_health_snapshot.get('coin_health_reason')}", flush=True)
 
                 elif ENABLE_COIN_HEALTH_ENGINE and coin_health_snapshot.get("coin_health_mode") == "SHADOW":
@@ -9836,6 +9927,7 @@ def webhook():
                     else:
                         entry_allowed = False
                         block_reason = f"coin_health_{coin_health_snapshot.get('coin_health_reason')}"
+                        trace_stage("coin_health_live_gate", False, block_reason, coin_health_snapshot.get("coin_health_mode"))
                         print(
                             f"🩺 COIN HEALTH ROUTE TO SHADOW | {symbol} | "
                             f"dead={coin_health_snapshot.get('coin_dead_streak')}/{COIN_HEALTH_DEAD_WINDOW} | "
@@ -9856,6 +9948,7 @@ def webhook():
                     if okx_position_exists:
                         entry_allowed = False
                         block_reason = f"okx_live_position_guard_{okx_position_context.get('reason')}"
+                        trace_stage("okx_position_guard", False, block_reason, okx_position_context.get("base_ccy"))
                         print(
                             f"🚫 BLOCKED LIVE ENTRY | {symbol} | existing/unknown OKX position | {okx_position_context}",
                             flush=True
@@ -9875,21 +9968,32 @@ def webhook():
                     if not okx_tradable:
                         entry_allowed = False
                         block_reason = f"v11_okx_not_tradable_{okx_tradability_reason}"
+                        trace_stage("v11_late_okx_tradability", False, block_reason, symbol)
                     elif get_live_real_open_count(cur) >= MAX_OPEN_TRADES:
                         entry_allowed = False
                         block_reason = "v11_max_open_trades"
+                        trace_stage("v11_late_max_open_trades", False, block_reason, f"max={MAX_OPEN_TRADES}")
                     elif ENABLE_SAME_SYMBOL_STACKING_LIMIT and get_open_same_symbol_real_count(cur, symbol) >= MAX_SAME_SYMBOL_OPEN:
                         entry_allowed = False
                         block_reason = "v11_max_same_symbol_open"
+                        trace_stage("v11_late_same_symbol_limit", False, block_reason, f"max_same={MAX_SAME_SYMBOL_OPEN}")
 
                 if not entry_allowed:
                     print(
                         f"⛔ BLOCKED | {symbol} | {decision} | "
                         f"mom={round(momentum,3)} trend={round(trend,3)} | "
-                        f"reason={block_reason}",
+                        f"reason={block_reason} | trace={trace_summary()}",
                         flush=True
                     )
+                    if (leadership_context or {}).get("v11_wakeup_approved") and ENABLE_BLOCKED_TRADE_TELEGRAM:
+                        send_telegram_alert(
+                            f"🚫 <b>V11.4 ENTRY BLOCKED</b> | {symbol} LONG\n"
+                            f"Reason: <b>{block_reason}</b>\n"
+                            f"T/M: {fmt_num(trend)} / {fmt_num(momentum)}\n"
+                            f"Trace: {trace_summary(10)}"
+                        )
                 else:
+                    trace_stage("open_trade_db", True, "creating_trade_row", f"quality={entry_quality}")
                     trade_id = open_trade(
                         cur,
                         symbol,
@@ -9954,6 +10058,7 @@ def webhook():
                         f"<b>Leaders</b>\n{top_leaders_text}"
                     )
 
+                    trace_stage("okx_order_attempt", True, "calling_okx_market_order", f"trade_id={trade_id}")
                     okx_entry_result = okx_place_market_order(
                         cur=cur,
                         trade_id=trade_id,
@@ -10000,12 +10105,14 @@ def webhook():
                 print(
                     f"⛔ BLOCKED | {symbol} | {decision} | "
                     f"mom={round(momentum,3)} trend={round(trend,3)} | "
-                    f"reason={block_reason}",
+                    f"reason={block_reason} | trace={trace_summary()}",
                     flush=True
                 )
         else:
+            # Non-entry alert. This is normal TradingView update noise, not a strategy failure.
             print(
-                f"⛔ BLOCKED | {symbol} | reason=None",
+                f"ℹ️ NO ENTRY DECISION | {symbol} | decision={decision or 'NO_ENTRY'} | "
+                f"mom={round(momentum,3)} trend={round(trend,3)} | reason={block_reason} | trace={trace_summary()}",
                 flush=True
             )
 
