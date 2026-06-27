@@ -5,7 +5,7 @@
 # TITLE: V11.4 ENTRY DECISION TRACE DEBUG
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v11.4 ENTRY DECISION TRACE DEBUG RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v11.5 TRUE OKX ENTRY FIRST RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v10.2.0 CHANGE SUMMARY
@@ -426,7 +426,7 @@ def parse_symbol_set_env(name, default):
 OKX_BLOCKED_SYMBOLS = parse_symbol_set_env("OKX_BLOCKED_SYMBOLS", "TAOUSDT")
 OKX_EST_FEE_RATE_ROUND_TRIP = float(os.environ.get("OKX_EST_FEE_RATE_ROUND_TRIP", "0.002") or 0.002)
 
-DATA_VERSION = "v11.4_ENTRY_DECISION_TRACE_DEBUG"
+DATA_VERSION = "v11.5_TRUE_OKX_ENTRY_FIRST"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -4007,23 +4007,52 @@ def log_okx_order(cur, trade_id, symbol, okx_inst_id, action, side, direction,
     ))
 
 def get_live_real_open_count(cur):
+    """Exchange-truth live open count.
+
+    v11.5: A bot_trades_v4 row is not considered real/live unless it has a
+    successful non-skipped OKX entry log. This prevents phantom DB rows from
+    blocking fresh live entries.
+    """
     cur.execute("""
         SELECT COUNT(*)
-        FROM bot_trades_v4
-        WHERE status = 'OPEN'
-          AND COALESCE(is_shadow, FALSE) = FALSE
-          AND COALESCE(NULLIF(trade_size_usdt, 0), NULLIF(entry_value_usdt, 0), 0) > 0
+        FROM bot_trades_v4 bt
+        WHERE bt.status = 'OPEN'
+          AND COALESCE(bt.is_shadow, FALSE) = FALSE
+          AND COALESCE(NULLIF(bt.trade_size_usdt, 0), NULLIF(bt.entry_value_usdt, 0), 0) > 0
+          AND EXISTS (
+              SELECT 1
+              FROM okx_order_log ol
+              WHERE ol.trade_id = bt.id::text
+                AND ol.action = 'entry'
+                AND COALESCE(ol.dry_run, FALSE) = FALSE
+                AND COALESCE(ol.success, FALSE) = TRUE
+                AND ol.error_message IS NULL
+                AND COALESCE(ol.response_payload::text, '') NOT ILIKE '%%skipped%%'
+                AND COALESCE(ol.response_payload::text, '') NOT ILIKE '%%dry_run%%'
+          )
     """)
     return cur.fetchone()[0] or 0
 
 def get_open_same_symbol_real_count(cur, symbol):
+    """Exchange-truth same-symbol live open count."""
     cur.execute("""
         SELECT COUNT(*)
-        FROM bot_trades_v4
-        WHERE status = 'OPEN'
-          AND COALESCE(is_shadow, FALSE) = FALSE
-          AND symbol = %s
-          AND COALESCE(NULLIF(trade_size_usdt, 0), NULLIF(entry_value_usdt, 0), 0) > 0
+        FROM bot_trades_v4 bt
+        WHERE bt.status = 'OPEN'
+          AND COALESCE(bt.is_shadow, FALSE) = FALSE
+          AND bt.symbol = %s
+          AND COALESCE(NULLIF(bt.trade_size_usdt, 0), NULLIF(bt.entry_value_usdt, 0), 0) > 0
+          AND EXISTS (
+              SELECT 1
+              FROM okx_order_log ol
+              WHERE ol.trade_id = bt.id::text
+                AND ol.action = 'entry'
+                AND COALESCE(ol.dry_run, FALSE) = FALSE
+                AND COALESCE(ol.success, FALSE) = TRUE
+                AND ol.error_message IS NULL
+                AND COALESCE(ol.response_payload::text, '') NOT ILIKE '%%skipped%%'
+                AND COALESCE(ol.response_payload::text, '') NOT ILIKE '%%dry_run%%'
+          )
     """, (symbol,))
     return cur.fetchone()[0] or 0
 
@@ -8648,12 +8677,12 @@ def open_trade(cur, symbol, direction, price, momentum, trend, quality,
         VALUES (
             %s,%s,%s,'OPEN',NOW(),%s,%s,%s,%s,0,%s,%s,
             %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-            FALSE
+            TRUE
         )
         RETURNING id
     """, (
         symbol, direction, price, DATA_VERSION, momentum, trend, quality, signal_id, signal_time,
-        entry_snapshot.get("trade_size_gbp"), entry_snapshot.get("dynamic_trade_size_gbp"),
+        0.0, 0.0,
         entry_snapshot.get("leadership_prior_successes"), entry_snapshot.get("leadership_prior_runners"),
         entry_snapshot.get("leadership_prior_avg_peak"), entry_snapshot.get("leadership_tier"),
         entry_snapshot.get("leadership_mode"), entry_snapshot.get("leadership_score"),
@@ -8675,20 +8704,20 @@ def open_trade(cur, symbol, direction, price, momentum, trend, quality,
     try:
         cur.connection.commit()
         print(
-            f"✅ REAL ENTRY SNAPSHOT PERSISTED FIRST | {symbol} | id={trade_id} | "
+            f"🧾 PROVISIONAL ENTRY SNAPSHOT PERSISTED | {symbol} | id={trade_id} | "
             f"score={entry_snapshot.get('leadership_score')} | rank={entry_snapshot.get('leadership_rank_at_entry')} | "
             f"age={entry_snapshot.get('leadership_age_minutes_at_entry')} | d30={entry_snapshot.get('leadership_delta_30m_at_entry')}",
             flush=True
         )
     except Exception as e:
-        print(f"🚨 REAL ENTRY SNAPSHOT EARLY COMMIT FAILED | {symbol} | id={trade_id} | {e}", flush=True)
+        print(f"🚨 PROVISIONAL ENTRY SNAPSHOT EARLY COMMIT FAILED | {symbol} | id={trade_id} | {e}", flush=True)
         raise
 
     try:
         entry_optional_telemetry = {
             "market_os_engine": entry_snapshot.get("market_os_engine"),
-            "size_scaling_reason": entry_snapshot.get("size_scaling_reason"),
-            **accounting_entry_telemetry(gbp_to_usdt_quote(entry_snapshot.get("dynamic_trade_size_gbp") or entry_snapshot.get("trade_size_gbp"))),
+            "size_scaling_reason": "okx_entry_pending_provisional",
+            "shadow_reason": "okx_entry_pending_provisional",
         }
         entry_optional_telemetry.update(lifecycle_trade_telemetry_from_context(leadership_context))
         entry_optional_telemetry.update(market_context_trade_telemetry(leadership_context))
@@ -10010,52 +10039,11 @@ def webhook():
                     entry_trade_size = get_trade_size_for_context(entry_quality, leadership_context)
                     entry_quote_size = get_trade_size_quote_for_context(entry_quality, leadership_context)
 
-                    if (leadership_context or {}).get("v11_wakeup_approved"):
-                        print(
-                            f"🌅🚀 V11.3 LIVE ENTRY ATTEMPT | {symbol} | LONG | id={trade_id} | "
-                            f"size=£{entry_trade_size} | reason={leadership_context.get('v11_wakeup_reason')} | "
-                            f"type={leadership_context.get('v11_wakeup_type')} | T/M={round(trend,3)}/{round(momentum,3)}",
-                            flush=True
-                        )
-                    else:
-                        print(
-                            f"🚀 OPEN REAL | {symbol} | LONG | id={trade_id} | "
-                            f"tier={entry_quality} | size=£{entry_trade_size} | "
-                            f"prior_avg_peak={round(leadership_context.get('prior_avg_peak', 0), 3)} | "
-                            f"prior_runners={leadership_context.get('prior_runners')}",
-                            flush=True
-                        )
-
-                    live_open_after_entry = get_live_real_open_count(cur)
-                    same_symbol_after_entry = get_open_same_symbol_real_count(cur, symbol)
-                    current_leadership_state = get_latest_leadership_state(cur, symbol)
-                    top_leaders_text = get_top_leaders_text(cur, 4)
-
-                    send_telegram_alert(
-                        f"🟢 <b>LIVE ENTRY</b>\n"
-                        f"{engine_emoji(entry_quality)} <b>{engine_display_name(entry_quality)}</b> | {symbol} LONG\n"
-                        f"Model size {fmt_money(entry_trade_size)} | OKX {fmt_money(entry_quote_size)}\n"
-                        f"Entry {price} | T/M {fmt_num(trend)} / {fmt_num(momentum)}\n"
-                        f"Coin Form: {coin_form_label(leadership_context.get('coin_form_snapshot') or {})}\n"
-                        f"{'🦄 Unicorn override: ' + str(leadership_context.get('unicorn_override_reason')) + ' | P ' + str(leadership_context.get('unicorn_pressure_score')) + chr(10) if leadership_context.get('unicorn_override_triggered') else ''}"
-                        f"Phase: {short_phase(leadership_context.get('lifecycle_phase') or leadership_context.get('leadership_phase'))} "
-                        f"({leadership_context.get('leadership_transition') or 'n/a'})\n"
-                        f"Score {fmt_num(leadership_context.get('prior_avg_peak'))} | "
-                        f"Δ30 {fmt_num(leadership_context.get('leadership_delta_30m') or leadership_context.get('delta_30m'))} | "
-                        f"Age {fmt_num(leadership_context.get('leadership_age_minutes'), 1)}m | "
-                        f"Rank #{leadership_context.get('leadership_rank') or 'n/a'}\n"
-                        f"S/R/M: {leadership_context.get('prior_successes')} / {leadership_context.get('prior_runners')} / {leadership_context.get('monsters') or 0}\n"
-                        f"Breadth N/C/A/M: {leadership_context.get('market_near_count') or 0}/"
-                        f"{leadership_context.get('market_core_count') or 0}/"
-                        f"{leadership_context.get('market_aggressive_count') or 0}/"
-                        f"{leadership_context.get('market_monster_count') or 0}\n"
-                        f"Lifecycle: {leadership_context.get('market_lifecycle_window') or 'n/a'} | "
-                        f"B {fmt_num(leadership_context.get('market_breadth'), 2)} | "
-                        f"BA {fmt_num(leadership_context.get('market_breadth_accel'), 2)} | "
-                        f"Med {fmt_num(leadership_context.get('market_median_peak_context'), 3)}\n"
-                        f"Slots {live_open_after_entry}/{MAX_OPEN_TRADES} | Same {same_symbol_after_entry}/{MAX_SAME_SYMBOL_OPEN}\n"
-                        f"ID {trade_id}\n\n"
-                        f"<b>Leaders</b>\n{top_leaders_text}"
+                    print(
+                        f"🧾 ENTRY APPROVED - PROVISIONAL DB ROW | {symbol} | LONG | id={trade_id} | "
+                        f"model_size=£{entry_trade_size} | okx_quote={entry_quote_size} | "
+                        f"quality={entry_quality} | trace={trace_summary(8)}",
+                        flush=True
                     )
 
                     trace_stage("okx_order_attempt", True, "calling_okx_market_order", f"trade_id={trade_id}")
@@ -10070,36 +10058,76 @@ def webhook():
                         trade_size_quote=entry_quote_size
                     )
 
-                    # v6.6.10 CRITICAL: persist the real trade + OKX order log immediately.
-                    # Previously, later lifecycle/update exceptions could rollback the trade row
-                    # after OKX had already bought on exchange.
-                    if not okx_entry_result.get("success"):
+                    okx_live_confirmed = (
+                        bool(okx_entry_result.get("success"))
+                        and not bool(okx_entry_result.get("dry_run"))
+                        and not bool(okx_entry_result.get("skipped"))
+                    )
+
+                    if not okx_live_confirmed:
+                        fail_reason = okx_entry_result.get("reason") or okx_entry_result.get("error") or "okx_entry_not_live_confirmed"
+                        safe_update_trade_telemetry(cur, trade_id, {
+                            "trade_size_gbp": 0.0,
+                            "dynamic_trade_size_gbp": 0.0,
+                            "trade_size_usdt": 0.0,
+                            "entry_value_usdt": 0.0,
+                            "entry_value_gbp": 0.0,
+                            "is_shadow": True,
+                            "shadow_reason": f"okx_entry_not_confirmed:{fail_reason}",
+                            "size_scaling_reason": f"okx_entry_not_confirmed:{fail_reason}",
+                        })
                         cur.execute("""
                             UPDATE bot_trades_v4
                             SET status = 'CLOSED',
                                 closed_at = NOW(),
                                 close_reason = %s
                             WHERE id = %s
-                        """, (f"okx_entry_failed: {okx_entry_result.get('reason') or okx_entry_result.get('error')}", trade_id))
+                        """, (f"okx_entry_not_confirmed: {fail_reason}", trade_id))
                         conn.commit()
-                        print(f"🚨 REAL ENTRY DB SAVED AS FAILED | {symbol} | id={trade_id} | reason={okx_entry_result}", flush=True)
+                        trace_stage("okx_order_result", False, "okx_entry_not_confirmed", str(fail_reason)[:180])
+                        print(f"🚨 ENTRY NOT LIVE-CONFIRMED | {symbol} | id={trade_id} | result={okx_entry_result}", flush=True)
                         send_telegram_alert(
-                            f"🚨 <b>ENTRY FAILED AFTER DB CREATE</b> | {symbol}\n"
-                            f"Trade row saved/closed for audit. Reason: {okx_entry_result.get('reason') or okx_entry_result.get('error')}\n"
+                            f"🚨 <b>ENTRY NOT LIVE-CONFIRMED</b> | {symbol}\n"
+                            f"No live position recorded. Trade row closed as zero-capital.\n"
+                            f"Reason: {fail_reason}\n"
                             f"ID {trade_id}"
                         )
                     else:
                         actual_entry_quote_size = float(okx_entry_result.get("actual_quote_size") or entry_quote_size)
-                        if abs(actual_entry_quote_size - float(entry_quote_size or 0)) > 0.0001:
-                            actual_entry_gbp_size = usdt_quote_to_gbp(actual_entry_quote_size)
-                            safe_update_trade_telemetry(cur, trade_id, {
-                                "trade_size_gbp": actual_entry_gbp_size,
-                                "dynamic_trade_size_gbp": actual_entry_gbp_size,
-                                **accounting_entry_telemetry(actual_entry_quote_size),
-                                "size_scaling_reason": (leadership_context.get("size_scaling_reason") or "") + "_partial_position_fill",
-                            })
+                        actual_entry_gbp_size = usdt_quote_to_gbp(actual_entry_quote_size)
+                        safe_update_trade_telemetry(cur, trade_id, {
+                            "trade_size_gbp": actual_entry_gbp_size,
+                            "dynamic_trade_size_gbp": actual_entry_gbp_size,
+                            "is_shadow": False,
+                            "shadow_reason": None,
+                            **accounting_entry_telemetry(actual_entry_quote_size),
+                            "size_scaling_reason": leadership_context.get("size_scaling_reason") or "okx_live_entry_confirmed",
+                        })
                         conn.commit()
-                        print(f"✅ REAL ENTRY PERSISTED | {symbol} | id={trade_id}", flush=True)
+                        trace_stage("okx_order_result", True, "okx_live_entry_confirmed", f"quote={actual_entry_quote_size}")
+                        print(f"✅ TRUE OKX LIVE ENTRY PERSISTED | {symbol} | id={trade_id} | quote={actual_entry_quote_size} | gbp={actual_entry_gbp_size}", flush=True)
+
+                        live_open_after_entry = get_live_real_open_count(cur)
+                        same_symbol_after_entry = get_open_same_symbol_real_count(cur, symbol)
+                        top_leaders_text = get_top_leaders_text(cur, 4)
+
+                        send_telegram_alert(
+                            f"🟢 <b>LIVE ENTRY CONFIRMED ON OKX</b>\n"
+                            f"{engine_emoji(entry_quality)} <b>{engine_display_name(entry_quality)}</b> | {symbol} LONG\n"
+                            f"Model size {fmt_money(entry_trade_size)} | OKX quote {fmt_money(actual_entry_quote_size)} | DB {fmt_money(actual_entry_gbp_size)}\n"
+                            f"Entry {price} | T/M {fmt_num(trend)} / {fmt_num(momentum)}\n"
+                            f"Coin Form: {coin_form_label(leadership_context.get('coin_form_snapshot') or {})}\n"
+                            f"Phase: {short_phase(leadership_context.get('lifecycle_phase') or leadership_context.get('leadership_phase'))} "
+                            f"({leadership_context.get('leadership_transition') or 'n/a'})\n"
+                            f"Score {fmt_num(leadership_context.get('prior_avg_peak'))} | "
+                            f"Δ30 {fmt_num(leadership_context.get('leadership_delta_30m') or leadership_context.get('delta_30m'))} | "
+                            f"Age {fmt_num(leadership_context.get('leadership_age_minutes'), 1)}m | "
+                            f"Rank #{leadership_context.get('leadership_rank') or 'n/a'}\n"
+                            f"Slots {live_open_after_entry}/{MAX_OPEN_TRADES} | Same {same_symbol_after_entry}/{MAX_SAME_SYMBOL_OPEN}\n"
+                            f"Trace: {trace_summary(8)}\n"
+                            f"ID {trade_id}\n\n"
+                            f"<b>Leaders</b>\n{top_leaders_text}"
+                        )
 
             else:
                 print(
