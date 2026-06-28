@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v10.2.0
-# TITLE: V11.4 ENTRY DECISION TRACE DEBUG
+# VERSION: v11.6.0
+# TITLE: HEALTHY NORMAL BPT + PH MIN PROBE + MARKET VISIBILITY
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v11.5 TRUE OKX ENTRY FIRST RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v11.6 HEALTHY NORMAL BPT + PH MIN PROBE RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v10.2.0 CHANGE SUMMARY
@@ -426,7 +426,7 @@ def parse_symbol_set_env(name, default):
 OKX_BLOCKED_SYMBOLS = parse_symbol_set_env("OKX_BLOCKED_SYMBOLS", "TAOUSDT")
 OKX_EST_FEE_RATE_ROUND_TRIP = float(os.environ.get("OKX_EST_FEE_RATE_ROUND_TRIP", "0.002") or 0.002)
 
-DATA_VERSION = "v11.5_TRUE_OKX_ENTRY_FIRST"
+DATA_VERSION = "v11.6_HEALTHY_NORMAL_BPT_PH_PROBE"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -965,11 +965,22 @@ GHOST_PROBE_LABEL = "GHOST_PROBE_NO_CAPITAL"
 ENABLE_BPT_CQE_CONFIRMED_GHOST_LIVE_ENTRY = os.environ.get("ENABLE_BPT_CQE_CONFIRMED_GHOST_LIVE_ENTRY", "true").lower() == "true"
 ENABLE_NEUTRAL_MARKET_SHADOW_FILTER = os.environ.get("ENABLE_NEUTRAL_MARKET_SHADOW_FILTER", "true").lower() == "true"
 
-# v9.9: research-backed master live-capital gate.
-# Last-14d test showed market_heat_score=3 (HOT) was the only clearly profitable regime.
-# Ghost/shadow probes still log normally, but real OKX capital is only added while HOT.
+# v9.9: master live-capital heat gate.
+# v11.6 update: keep the global HOT-only rail for legacy engines, but add a
+# targeted, simulation-backed BPT exception for trusted LIVE coins in NORMAL
+# form when market heat is HEALTHY/HOT. Do not globally lower the master gate.
 ENABLE_MARKET_HEAT_HOT_ONLY_LIVE = os.environ.get("ENABLE_MARKET_HEAT_HOT_ONLY_LIVE", "true").lower() == "true"
 MARKET_HEAT_MIN_LIVE_SCORE = int(os.environ.get("MARKET_HEAT_MIN_LIVE_SCORE", "3") or 3)
+
+# v11.6: data-backed live-capital exception.
+# Supabase sims across 3d/7d/14d showed BPT + market_heat>=2 + NORMAL form
+# on trusted LIVE coins was the cleanest positive-expectancy route back to
+# real capital, while GOOD/HOT and broad HEALTHY rules were weaker.
+ENABLE_BPT_HEALTHY_NORMAL_LIVE_EXCEPTION = os.environ.get("ENABLE_BPT_HEALTHY_NORMAL_LIVE_EXCEPTION", "true").lower() == "true"
+BPT_HEALTHY_NORMAL_MIN_HEAT_SCORE = int(os.environ.get("BPT_HEALTHY_NORMAL_MIN_HEAT_SCORE", "2") or 2)
+BPT_HEALTHY_NORMAL_REQUIRED_FORM = os.environ.get("BPT_HEALTHY_NORMAL_REQUIRED_FORM", "NORMAL").upper()
+BPT_HEALTHY_NORMAL_REQUIRE_LIVE_HEALTH = os.environ.get("BPT_HEALTHY_NORMAL_REQUIRE_LIVE_HEALTH", "true").lower() == "true"
+
 ENABLE_ADAPTIVE_DEAD_MARKET_CONFIRMED_LIVE_UPGRADES = os.environ.get("ENABLE_ADAPTIVE_DEAD_MARKET_CONFIRMED_LIVE_UPGRADES", "true").lower() == "true"
 
 # =========================
@@ -1238,6 +1249,16 @@ ENABLE_PERSISTENCE_HUNTER_LIVE = os.environ.get("ENABLE_PERSISTENCE_HUNTER_LIVE"
 PH_ENTRY_QUALITY = "PERSISTENCE_HUNTER_V1"
 PH_LIFECYCLE_ROW = "PERSISTENCE_HUNTER_ROW"
 PH_SHADOW_SIZE_GBP = float(os.environ.get("PH_SHADOW_SIZE_GBP", "35") or 35)
+
+# v11.6: tiny real-capital PH production experiment.
+# Shadow rows remain £0 unless OKX confirms an entry. The probe uses the OKX
+# minimum notional so real figures match real fills and risk stays tiny.
+ENABLE_PH_MIN_LIVE_PROBE = os.environ.get("ENABLE_PH_MIN_LIVE_PROBE", "true").lower() == "true"
+PH_MIN_LIVE_PROBE_GBP = float(os.environ.get("PH_MIN_LIVE_PROBE_GBP", "2.50") or 2.50)
+PH_MIN_LIVE_MIN_HEAT_SCORE = int(os.environ.get("PH_MIN_LIVE_MIN_HEAT_SCORE", "2") or 2)
+PH_MIN_LIVE_REQUIRED_HEALTH = os.environ.get("PH_MIN_LIVE_REQUIRED_HEALTH", "LIVE").upper()
+PH_MIN_LIVE_REQUIRED_FORM = os.environ.get("PH_MIN_LIVE_REQUIRED_FORM", "HOT").upper()
+
 PH_MAX_OPEN_TRADES = int(os.environ.get("PH_MAX_OPEN_TRADES", "5") or 5)
 PH_MAX_SAME_SYMBOL_OPEN = int(os.environ.get("PH_MAX_SAME_SYMBOL_OPEN", "1") or 1)
 
@@ -2078,6 +2099,34 @@ def coin_form_allows_live_entry(snapshot):
         return True
     mode = ((snapshot or {}).get("coin_form_mode") or "UNKNOWN").upper()
     return mode in COIN_FORM_ALLOWED_LIVE_MODES
+
+
+def coin_form_mode_from_snapshot(snapshot):
+    return str((snapshot or {}).get("coin_form_mode") or "UNKNOWN").upper()
+
+
+def bpt_healthy_normal_live_exception_allowed(coin_health_mode, coin_form_snapshot, market_heat_score, market_heat_regime=None):
+    """v11.6 targeted exception for BPT confirmed ghost live entry.
+
+    This intentionally does not change the global HOT-only gate. It only lets
+    confirmed BPT probes place real capital when the exact simulated setup is
+    present: trusted LIVE health, NORMAL form, and HEALTHY/HOT heat.
+    """
+    if not ENABLE_BPT_HEALTHY_NORMAL_LIVE_EXCEPTION:
+        return False
+    health = str(coin_health_mode or "UNKNOWN").upper()
+    if BPT_HEALTHY_NORMAL_REQUIRE_LIVE_HEALTH and health != "LIVE":
+        return False
+    if health == "DISABLED":
+        return False
+    form_mode = coin_form_mode_from_snapshot(coin_form_snapshot)
+    if form_mode != BPT_HEALTHY_NORMAL_REQUIRED_FORM:
+        return False
+    heat_score = safe_int(market_heat_score, -1)
+    if heat_score < BPT_HEALTHY_NORMAL_MIN_HEAT_SCORE:
+        return False
+    # score>=2 already means HEALTHY/HOT in current heat classifier.
+    return True
 
 
 def classify_personality_from_lifts(momentum_lift, trend_lift, leadership_lift, heat_lift, current_personality="UNKNOWN"):
@@ -3559,6 +3608,46 @@ def build_market_state_message(cur, hours=3):
         """, (hours,))
         reasons = cur.fetchall() or []
 
+        cur.execute("""
+            SELECT
+                COALESCE(market_heat_score, -1) AS heat_score,
+                COALESCE(market_heat_regime, 'UNKNOWN') AS heat_regime,
+                COUNT(*) AS trades,
+                COUNT(*) FILTER (WHERE COALESCE(is_shadow,FALSE)=FALSE AND COALESCE(trade_size_gbp,0)>0) AS real_trades,
+                COALESCE(ROUND(AVG(pnl_percent) FILTER (WHERE pnl_percent IS NOT NULL)::numeric,3),0) AS avg_pnl,
+                COALESCE(ROUND(AVG(peak_pnl_percent)::numeric,3),0) AS avg_peak
+            FROM bot_trades_v4
+            WHERE opened_at >= NOW() - (%s || ' hours')::INTERVAL
+            GROUP BY 1,2
+            ORDER BY heat_score DESC
+        """, (hours,))
+        heat_rows = cur.fetchall() or []
+
+        cur.execute("""
+            SELECT
+                COUNT(*) FILTER (WHERE entry_quality='BPT_CQE_LIFECYCLE_V1' AND market_heat_score >= 2 AND coin_health_mode='LIVE' AND coin_form_mode='NORMAL') AS bpt_healthy_normal,
+                COUNT(*) FILTER (WHERE entry_quality='PERSISTENCE_HUNTER_V1' AND market_heat_score >= 2 AND coin_health_mode='LIVE' AND coin_form_mode='HOT') AS ph_min_probe,
+                COUNT(*) FILTER (WHERE COALESCE(is_shadow,FALSE)=FALSE AND COALESCE(trade_size_gbp,0)>0) AS real_capital,
+                COUNT(*) FILTER (WHERE COALESCE(is_shadow,TRUE)=TRUE OR COALESCE(trade_size_gbp,0)=0) AS shadow_or_ghost
+            FROM bot_trades_v4
+            WHERE opened_at >= NOW() - (%s || ' hours')::INTERVAL
+        """, (hours,))
+        elig = cur.fetchone() or (0,0,0,0)
+        bpt_healthy_normal_count, ph_min_probe_count, real_capital_count, shadow_or_ghost_count = elig
+
+        cur.execute("""
+            SELECT
+                COALESCE(coin_health_mode,'UNKNOWN') AS health,
+                COALESCE(coin_form_mode,'UNKNOWN') AS form,
+                COUNT(*) AS trades
+            FROM bot_trades_v4
+            WHERE opened_at >= NOW() - (%s || ' hours')::INTERVAL
+            GROUP BY 1,2
+            ORDER BY trades DESC
+            LIMIT 6
+        """, (hours,))
+        health_form_rows = cur.fetchall() or []
+
         if core_candidates and core_candidates > 0:
             regime = "IGNITION_READY"
             why = "Core-quality aligned candidates are appearing."
@@ -3583,7 +3672,19 @@ def build_market_state_message(cur, hours=3):
             f"Leaders >=2.0: <b>{elite_leaders}</b> | >=1.25: <b>{core_leaders}</b>",
             f"Core candidates: <b>{core_candidates}</b> | Rot micro candidates: <b>{rot_candidates}</b>",
             f"OKX tradable cache: <b>{len(OKX_TRADABLE_SPOT_INST_IDS)}</b> pairs",
+            "",
+            "<b>Live Capital / Ghost Mix</b>",
+            f"Real capital rows: <b>{real_capital_count}</b> | Shadow/ghost rows: <b>{shadow_or_ghost_count}</b>",
+            f"v11.6 BPT eligible rows: <b>{bpt_healthy_normal_count}</b> | PH min-probe rows: <b>{ph_min_probe_count}</b>",
         ]
+        if heat_rows:
+            lines.append("\n<b>Market Heat Trades</b>")
+            for heat_score, heat_regime, h_trades, h_real, h_avg, h_peak in heat_rows:
+                lines.append(f"{heat_regime}({heat_score}): {h_trades} rows | real {h_real} | avg {h_avg}% | peak {h_peak}%")
+        if health_form_rows:
+            lines.append("\n<b>Health/Form Mix</b>")
+            for health, form, cnt in health_form_rows:
+                lines.append(f"{health}/{form}: {cnt}")
         if leaders:
             lines.append("\n<b>Top leaders</b>")
             for sym, score, mode in leaders:
@@ -5718,15 +5819,16 @@ def open_bpt_cqe_probe_trade(cur, symbol, price, momentum, trend, signal_id, sig
         flush=True
     )
 
-    send_telegram_alert(
-        f"👻 <b>GHOST PROBE OPENED</b>\n🧪 <b>BPT_CQE_LIFECYCLE_V1</b> | {symbol} LONG\n"
-        f"Row: <b>{lifecycle_row}</b> | Q {fmt_num(q)}\n"
-        f"Probe size: {fmt_money(model_probe_size_gbp)} | Live probe: {live_probe_enabled}\n"
-        f"{'Market heat live block: ON' + chr(10) if market_heat_live_blocked else ''}"
-        f"Entry {price} | T/M {fmt_num(trend)} / {fmt_num(momentum)}\n"
-        f"Confirm target: +{BPT_CQE_CONFIRM_PEAK}% within {BPT_CQE_CONFIRM_WINDOW_MINUTES}m\n"
-        f"ID {trade_id}"
-    )
+    if live_probe_enabled or TELEGRAM_SHOW_SHADOW_TRADES:
+        send_telegram_alert(
+            f"👻 <b>GHOST PROBE OPENED</b>\n🧪 <b>BPT_CQE_LIFECYCLE_V1</b> | {symbol} LONG\n"
+            f"Row: <b>{lifecycle_row}</b> | Q {fmt_num(q)}\n"
+            f"Probe size: {fmt_money(model_probe_size_gbp)} | Live probe: {live_probe_enabled}\n"
+            f"{'Market heat live block: ON' + chr(10) if market_heat_live_blocked else ''}"
+            f"Entry {price} | T/M {fmt_num(trend)} / {fmt_num(momentum)}\n"
+            f"Confirm target: +{BPT_CQE_CONFIRM_PEAK}% within {BPT_CQE_CONFIRM_WINDOW_MINUTES}m\n"
+            f"ID {trade_id}"
+        )
 
     return trade_id
 
@@ -6117,9 +6219,30 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
     habitat_allows_live = bool(habitat_for_scalein.get("allows_live", True))
     habitat_hot_only_override = bool(habitat_for_scalein.get("hot_only_override", False))
     effective_market_heat_allows_live = bool(market_heat_allows_live or habitat_hot_only_override)
+
+    # v11.6: Targeted BPT exception. The old global HOT-only gate was starving
+    # real capital. Simulations showed the edge was not broad HEALTHY trading,
+    # but confirmed BPT entries on LIVE coins in NORMAL form while heat is >=2.
+    bpt_healthy_normal_live_exception = bpt_healthy_normal_live_exception_allowed(
+        coin_profile_for_scalein.get("coin_health_mode"),
+        coin_form_for_scalein,
+        market_heat_score,
+        market_heat_regime,
+    )
+    if bpt_healthy_normal_live_exception:
+        effective_market_heat_allows_live = True
+        coin_form_allows_scalein = True
+        # This exception is deliberately more recent than habitat v0.1. It only
+        # applies to already-LIVE coins, so it cannot re-enable disabled/shadow
+        # habitat coins.
+        habitat_allows_live = True
+
     log_habitat_decision(sym, habitat_for_scalein, "bpt_scalein")
 
-    safe_update_trade_telemetry(cur, tid, market_heat_for_scalein)
+    safe_update_trade_telemetry(cur, tid, {
+        **market_heat_for_scalein,
+        "live_gate_reason": "HEALTHY_NORMAL_BPT" if bpt_healthy_normal_live_exception else None,
+    })
 
     adaptive_dead_market_form_override = bool(
         adaptive_dead_market_shadow_only
@@ -6200,7 +6323,9 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
     # The old Telegram/log line displayed "Live upgrades: True" even for shadow probes,
     # which made normal shadow confirmations look like failed live scale-ins.
     # This keeps behaviour unchanged but makes the reason explicit.
-    if scalein_allowed and v11_direct_cqe_live_upgrade:
+    if scalein_allowed and bpt_healthy_normal_live_exception:
+        scalein_block_reason = "bpt_healthy_normal_live_exception"
+    elif scalein_allowed and v11_direct_cqe_live_upgrade:
         scalein_block_reason = "v11_wakeup_cqe_direct_live_upgrade"
     elif not ENABLE_BPT_CQE_LIVE_UPGRADES:
         scalein_block_reason = "live_upgrade_toggle_off"
@@ -6315,13 +6440,16 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
                 "upgrade_size_gbp": actual_upgrade_size,
                 "probe_lifecycle_state": "FAST_TRACK_UPGRADED" if fast_track_active else "STANDARD_UPGRADED",
                 "size_scaling_reason": (
-                    "v11_wakeup_cqe_direct_live_upgrade"
-                    if v11_direct_cqe_live_upgrade else
-                    ("adaptive_dead_market_coin_form_live_override"
-                     if adaptive_dead_market_form_override else
-                     ("coin_health_coin_form_live_override" if coin_health_form_override else
-                      ("confirmed_ghost_probe_entered_live_capital" if ghost_probe_active else "bpt_live_scalein_executed")))
+                    "bpt_healthy_normal_live_exception"
+                    if bpt_healthy_normal_live_exception else
+                    ("v11_wakeup_cqe_direct_live_upgrade"
+                     if v11_direct_cqe_live_upgrade else
+                     ("adaptive_dead_market_coin_form_live_override"
+                      if adaptive_dead_market_form_override else
+                      ("coin_health_coin_form_live_override" if coin_health_form_override else
+                       ("confirmed_ghost_probe_entered_live_capital" if ghost_probe_active else "bpt_live_scalein_executed"))))
                 ),
+                "live_gate_reason": "HEALTHY_NORMAL_BPT" if bpt_healthy_normal_live_exception else ("HOT_GATE" if market_heat_score >= MARKET_HEAT_MIN_LIVE_SCORE else None),
             })
         else:
             # v9.9.3 TRUE-EXECUTION HARDENING:
@@ -6340,6 +6468,7 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
                 "probe_lifecycle_state": "FAST_TRACK_CONFIRMED_NO_LIVE_SCALEIN" if fast_track_active else "STANDARD_CONFIRMED_NO_LIVE_SCALEIN",
                 "shadow_reason": "CONFIRMED_BUT_NO_OKX_EXECUTION",
                 "size_scaling_reason": f"bpt_live_scalein_not_executed:{fail_reason}",
+                "live_gate_reason": f"okx_not_executed:{fail_reason}",
             })
             print(f"⚠️ BPT CQE LIVE UPGRADE ORDER FAILED/SKIPPED | {sym} | id={tid} | {okx_upgrade_result}", flush=True)
     else:
@@ -6371,6 +6500,7 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
             "upgrade_size_gbp": 0.0,
             "cqe_upgraded": False,
             "probe_lifecycle_state": "FAST_TRACK_CONFIRMED_SCALEIN_DISABLED" if fast_track_active else "STANDARD_CONFIRMED_SCALEIN_DISABLED",
+            "live_gate_reason": scalein_block_reason,
             **extra_shadow_tags,
         })
 
@@ -6397,18 +6527,19 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
         upgrade_alert_title = "🚀 LIVE UPGRADE EXECUTED"
     else:
         upgrade_alert_title = "👻 SHADOW CONFIRMATION (NO REAL MONEY)"
-    send_telegram_alert(
-        f"{upgrade_alert_title} | {sym}\n"
-        f"Mode: <b>{trade_mode_label}</b> | Row: <b>{lifecycle_row}</b>\n"
-        f"Live scale-in: <b>{live_scalein_label}</b>\n"
-        f"Model upgrade target {fmt_money(upgrade_size)} | Actual live added {fmt_money(actual_upgrade_size)} | Total live/model size {fmt_money(displayed_dynamic_size)}\n"
-        f"Confirmed peak {fmt_num(peak_for_confirmation)}% | age {fmt_num(age_mins,1)}m\n"
-        f"Trigger: {fast_track_reason or 'standard_30m_confirmation'}\n"
-        f"Avg T/M {fmt_num(metrics['avg_trend'])} / {fmt_num(metrics['avg_momentum'])}\n"
-        f"Live upgrades toggle: {ENABLE_BPT_CQE_LIVE_UPGRADES} | Real scale-in allowed: {scalein_allowed}\n"
-        f"Reason: {scalein_block_reason}\n"
-        f"ID {tid}"
-    )
+    if actual_live_capital_deployed or TELEGRAM_SHOW_SHADOW_TRADES:
+        send_telegram_alert(
+            f"{upgrade_alert_title} | {sym}\n"
+            f"Mode: <b>{trade_mode_label}</b> | Row: <b>{lifecycle_row}</b>\n"
+            f"Live scale-in: <b>{live_scalein_label}</b>\n"
+            f"Model upgrade target {fmt_money(upgrade_size)} | Actual live added {fmt_money(actual_upgrade_size)} | Total live/model size {fmt_money(displayed_dynamic_size)}\n"
+            f"Confirmed peak {fmt_num(peak_for_confirmation)}% | age {fmt_num(age_mins,1)}m\n"
+            f"Trigger: {fast_track_reason or 'standard_30m_confirmation'}\n"
+            f"Avg T/M {fmt_num(metrics['avg_trend'])} / {fmt_num(metrics['avg_momentum'])}\n"
+            f"Live upgrades toggle: {ENABLE_BPT_CQE_LIVE_UPGRADES} | Real scale-in allowed: {scalein_allowed}\n"
+            f"Reason: {scalein_block_reason}\n"
+            f"ID {tid}"
+        )
     return True
 
 
@@ -6887,17 +7018,33 @@ def open_persistence_hunter_trade(cur, symbol, price, momentum, trend, signal_id
 
     apply_market_heat_to_trade(cur, tid)
 
-    try:
-        safe_update_trade_telemetry(cur, tid, accounting_entry_telemetry(PH_SHADOW_SIZE_GBP))
-    except Exception as e:
-        print(f"⚠️ v7.1 PH entry accounting telemetry failed | {symbol} | id={tid} | {e}", flush=True)
-        safe_telemetry_rollback(cur)
+    ph_coin_profile = get_coin_score_profile(cur, symbol)
+    ph_form_snapshot = get_coin_form_snapshot(cur, symbol) if ENABLE_COIN_FORM_ENGINE else {"coin_form_mode": "UNKNOWN"}
+    ph_market_heat = get_market_heat_context(cur)
+    ph_heat_score = safe_int(ph_market_heat.get("market_heat_score"), -1)
+    ph_health_mode = str(ph_coin_profile.get("coin_health_mode") or "UNKNOWN").upper()
+    ph_form_mode = coin_form_mode_from_snapshot(ph_form_snapshot)
+    ph_min_live_probe_allowed = bool(
+        ENABLE_PH_MIN_LIVE_PROBE
+        and ph_health_mode == PH_MIN_LIVE_REQUIRED_HEALTH
+        and ph_form_mode == PH_MIN_LIVE_REQUIRED_FORM
+        and ph_heat_score >= PH_MIN_LIVE_MIN_HEAT_SCORE
+    )
+    ph_live_requested = bool(ENABLE_PERSISTENCE_HUNTER_LIVE or ph_min_live_probe_allowed)
+    ph_live_size_gbp = max(MIN_OKX_ORDER_NOTIONAL_GBP, PH_MIN_LIVE_PROBE_GBP)
 
+    # v11.6 true-accounting: shadow PH rows carry £0 until OKX confirms a real entry.
     safe_update_trade_telemetry(cur, tid, {
-        "is_shadow": not ENABLE_PERSISTENCE_HUNTER_LIVE,
+        "is_shadow": True,
         "entry_architecture": PH_ENTRY_QUALITY,
-        "trade_size_gbp": PH_SHADOW_SIZE_GBP,
-        "dynamic_trade_size_gbp": PH_SHADOW_SIZE_GBP,
+        "trade_size_gbp": 0.0,
+        "dynamic_trade_size_gbp": 0.0,
+        "entry_value_gbp": 0.0,
+        "entry_value_usdt": 0.0,
+        "trade_size_usdt": 0.0,
+        "size_scaling_reason": "PH_MIN_LIVE_PROBE_PENDING" if ph_live_requested else "PH_SHADOW_NO_CAPITAL",
+        "shadow_reason": None if ph_live_requested else "PH_SHADOW_NO_CAPITAL",
+        "live_gate_reason": "PH_PROBE" if ph_min_live_probe_allowed else ("PH_GLOBAL_LIVE" if ENABLE_PERSISTENCE_HUNTER_LIVE else "SHADOW_ONLY"),
         "lifecycle_row": PH_LIFECYCLE_ROW,
         "ph_detected": True,
         "ph_reason": reason,
@@ -6908,9 +7055,12 @@ def open_persistence_hunter_trade(cur, symbol, price, momentum, trend, signal_id
         "leadership_rank_at_entry": ctx.get("leadership_rank"),
         "lifecycle_trail_activation": PH_TRAIL_ACTIVATION,
         "lifecycle_trail_drawdown": PH_TRAIL_DRAWDOWN,
-        **accounting_entry_telemetry_from_gbp(PH_SHADOW_SIZE_GBP),
-        **coin_selection_trade_telemetry(ctx),
-        **market_context_trade_telemetry(ctx),
+        **accounting_entry_telemetry_from_gbp(0.0),
+        **coin_selection_trade_telemetry({**ctx, **ph_coin_profile, "coin_form_snapshot": ph_form_snapshot}),
+        **market_context_trade_telemetry({**ctx, **ph_market_heat}),
+        **ph_market_heat,
+        "coin_health_mode": ph_health_mode,
+        "coin_form_mode": ph_form_mode,
     })
 
     try:
@@ -6918,23 +7068,58 @@ def open_persistence_hunter_trade(cur, symbol, price, momentum, trend, signal_id
     except Exception as e:
         print(f"⚠️ PH trade_events entry log failed: {e}", flush=True)
 
-    if ENABLE_PERSISTENCE_HUNTER_LIVE:
-        okx_place_market_order(cur, tid, symbol, "LONG", "entry", price=price, entry_price=price, trade_size_quote=PH_SHADOW_SIZE_GBP)
+    ph_live_executed = False
+    ph_actual_gbp = 0.0
+    if ph_live_requested:
+        ph_order = okx_place_market_order(cur, tid, symbol, "LONG", "entry", price=price, entry_price=price, trade_size_quote=gbp_to_usdt_quote(ph_live_size_gbp))
+        ph_live_executed = bool(
+            ph_order.get("success")
+            and not ph_order.get("skipped")
+            and not ph_order.get("blocked")
+            and not ph_order.get("dry_run")
+        )
+        if ph_live_executed:
+            actual_quote = float(ph_order.get("actual_quote_size") or gbp_to_usdt_quote(ph_live_size_gbp) or 0)
+            ph_actual_gbp = usdt_quote_to_gbp(actual_quote)
+            safe_update_trade_telemetry(cur, tid, {
+                "is_shadow": False,
+                "trade_size_gbp": ph_actual_gbp,
+                "dynamic_trade_size_gbp": ph_actual_gbp,
+                **accounting_entry_telemetry(actual_quote),
+                "size_scaling_reason": "PH_MIN_LIVE_PROBE_EXECUTED" if ph_min_live_probe_allowed else "PH_GLOBAL_LIVE_EXECUTED",
+                "shadow_reason": None,
+                "live_gate_reason": "PH_PROBE",
+            })
+        else:
+            fail_reason = ph_order.get("reason") or ph_order.get("error") or "unknown"
+            safe_update_trade_telemetry(cur, tid, {
+                "is_shadow": True,
+                "trade_size_gbp": 0.0,
+                "dynamic_trade_size_gbp": 0.0,
+                "entry_value_gbp": 0.0,
+                "entry_value_usdt": 0.0,
+                "trade_size_usdt": 0.0,
+                "size_scaling_reason": f"PH_LIVE_PROBE_NOT_EXECUTED:{fail_reason}",
+                "shadow_reason": "PH_LIVE_PROBE_NOT_EXECUTED",
+            })
 
     print(
-        f"🧲 OPEN PH SHADOW | {symbol} | id={tid} | score={fmt_num(ctx.get('leadership_score'))} | "
-        f"age={fmt_num(ctx.get('core_age_minutes'),1)}m | hits={ctx.get('core_hits_240m')} | T/M={fmt_num(trend)}/{fmt_num(momentum)}",
+        f"🧲 OPEN PH {'LIVE PROBE' if ph_live_executed else 'SHADOW'} | {symbol} | id={tid} | "
+        f"size={fmt_money(ph_actual_gbp)} | heat={ph_heat_score} | health={ph_health_mode} form={ph_form_mode} | "
+        f"score={fmt_num(ctx.get('leadership_score'))} | age={fmt_num(ctx.get('core_age_minutes'),1)}m | "
+        f"hits={ctx.get('core_hits_240m')} | T/M={fmt_num(trend)}/{fmt_num(momentum)}",
         flush=True,
     )
 
-    send_telegram_alert(
-        f"🧲 <b>PERSISTENCE HUNTER</b> | {symbol} LONG\n"
-        f"Shadow size {fmt_money(PH_SHADOW_SIZE_GBP)} | Live: {ENABLE_PERSISTENCE_HUNTER_LIVE}\n"
-        f"Score {fmt_num(ctx.get('leadership_score'))} | Rank #{ctx.get('leadership_rank') or 'n/a'}\n"
-        f"Core age {fmt_num(ctx.get('core_age_minutes'),1)}m | Hits {ctx.get('core_hits_240m')} | Top3 hits {ctx.get('top3_hits_240m')}\n"
-        f"T/M {fmt_num(trend)} / {fmt_num(momentum)}\n"
-        f"Reason: {reason}\nID {tid}"
-    )
+    if ph_live_executed:
+        send_telegram_alert(
+            f"🟢 <b>PH MIN LIVE PROBE</b> | {symbol} LONG\n"
+            f"Real size {fmt_money(ph_actual_gbp)} | heat {ph_heat_score}/{ph_market_heat.get('market_heat_regime')} | health {ph_health_mode} | form {ph_form_mode}\n"
+            f"Score {fmt_num(ctx.get('leadership_score'))} | Rank #{ctx.get('leadership_rank') or 'n/a'}\n"
+            f"Core age {fmt_num(ctx.get('core_age_minutes'),1)}m | Hits {ctx.get('core_hits_240m')} | Top3 hits {ctx.get('top3_hits_240m')}\n"
+            f"T/M {fmt_num(trend)} / {fmt_num(momentum)}\n"
+            f"Reason: {reason}\nID {tid}"
+        )
     return tid
 
 
@@ -7015,7 +7200,9 @@ def process_persistence_hunter_trades(cur, symbol, price, momentum, trend, now):
             close_reason = "ph_max_hold_exit"
 
         if close_reason:
-            accounting = accounting_exit_values(float(dynamic_size or PH_SHADOW_SIZE_GBP), pnl_percent)
+            ph_has_live_entry = bool((not is_shadow) and has_successful_okx_live_entry(cur, tid))
+            accounting_size_gbp = float(dynamic_size or 0.0) if ph_has_live_entry else 0.0
+            accounting = accounting_exit_values(accounting_size_gbp, pnl_percent)
             pnl_gbp = accounting["pnl_gbp"]
             cur.execute("""
                 UPDATE bot_trades_v4
@@ -7046,17 +7233,17 @@ def process_persistence_hunter_trades(cur, symbol, price, momentum, trend, now):
                 log_trade_event(cur, tid, sym, f"exit_{close_reason}", price, pnl_percent, current_peak, mins, momentum, trend, False)
             except Exception as e:
                 print(f"⚠️ PH exit event failed: {e}", flush=True)
-            ph_has_live_entry = bool((not is_shadow) and has_successful_okx_live_entry(cur, tid))
             if ph_has_live_entry:
-                okx_place_market_order(cur, tid, sym, direction, "exit", price=price, entry_price=entry_price, trade_size_quote=float(dynamic_size or PH_SHADOW_SIZE_GBP))
+                okx_place_market_order(cur, tid, sym, direction, "exit", price=price, entry_price=entry_price, trade_size_quote=gbp_to_usdt_quote(accounting_size_gbp))
             ph_telegram_is_shadow = not ph_has_live_entry
-            send_telegram_alert(
-                f"{trade_close_title(ph_telegram_is_shadow, 'PH TRADE CLOSED')} | {sym}\n"
-                f"{trade_mode_line(ph_telegram_is_shadow)}\n"
-                f"Capital: {'🟢 OKX live entry confirmed' if ph_has_live_entry else '👻 no successful OKX live entry / shadow row'}\n"
-                f"PnL <b>{fmt_num(pnl_percent)}%</b> | {fmt_money(pnl_gbp)} | Peak {fmt_num(current_peak)}%\n"
-                f"DD {fmt_num(drawdown)}% | Reason {close_reason}\nID {tid}"
-            )
+            if ph_has_live_entry:
+                send_telegram_alert(
+                    f"{trade_close_title(ph_telegram_is_shadow, 'PH TRADE CLOSED')} | {sym}\n"
+                    f"{trade_mode_line(ph_telegram_is_shadow)}\n"
+                    f"Capital: 🟢 OKX live entry confirmed\n"
+                    f"PnL <b>{fmt_num(pnl_percent)}%</b> | {fmt_money(pnl_gbp)} | Peak {fmt_num(current_peak)}%\n"
+                    f"DD {fmt_num(drawdown)}% | Reason {close_reason}\nID {tid}"
+                )
 
 
 def build_telegram_persistence_hunter_message(cur, hours=24):
