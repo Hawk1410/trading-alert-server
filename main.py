@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v11.6.0
-# TITLE: HEALTHY NORMAL BPT + PH MIN PROBE + MARKET VISIBILITY
+# VERSION: v11.7.0
+# TITLE: COMMAND CENTRE + FAST/SLOW BPT CONFIRM
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v11.6 HEALTHY NORMAL BPT + PH MIN PROBE RUNNING 🔥🔥🔥", flush=True)
+print("🔥🔥🔥 MAIN.PY v11.7 COMMAND CENTRE + FAST/SLOW BPT CONFIRM RUNNING 🔥🔥🔥", flush=True)
 
 # =========================
 # v10.2.0 CHANGE SUMMARY
@@ -426,7 +426,7 @@ def parse_symbol_set_env(name, default):
 OKX_BLOCKED_SYMBOLS = parse_symbol_set_env("OKX_BLOCKED_SYMBOLS", "TAOUSDT")
 OKX_EST_FEE_RATE_ROUND_TRIP = float(os.environ.get("OKX_EST_FEE_RATE_ROUND_TRIP", "0.002") or 0.002)
 
-DATA_VERSION = "v11.6_HEALTHY_NORMAL_BPT_PH_PROBE"
+DATA_VERSION = "v11.7_COMMAND_CENTRE_SLOW_CONFIRM"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -1179,6 +1179,25 @@ BPT_CQE_CONFIRM_PEAK = float(os.environ.get("BPT_CQE_CONFIRM_PEAK", "1.0") or 1.
 BPT_CQE_CONFIRM_AVG_TREND = float(os.environ.get("BPT_CQE_CONFIRM_AVG_TREND", "0.05") or 0.05)
 BPT_CQE_CONFIRM_AVG_MOMENTUM = float(os.environ.get("BPT_CQE_CONFIRM_AVG_MOMENTUM", "0.05") or 0.05)
 BPT_CQE_CONFIRM_MIN_SIGNAL_COUNT = int(os.environ.get("BPT_CQE_CONFIRM_MIN_SIGNAL_COUNT", "0") or 0)
+
+# =========================
+# v11.7 FAST / SLOW BPT CONFIRMATION
+# =========================
+# Research 2026-06-28:
+# - A 1.0% / 30m-only confirmation catches high quality fast movers but misses many slow burners.
+# - Blindly extending confirmation time creates weaker late entries.
+# - Best next logic: fast confirm at 0.9% within 30m, then slow-watch only if the probe is objectively persistent.
+ENABLE_BPT_FAST_SLOW_CONFIRM = os.environ.get("ENABLE_BPT_FAST_SLOW_CONFIRM", "true").lower() == "true"
+BPT_FAST_CONFIRM_PEAK = float(os.environ.get("BPT_FAST_CONFIRM_PEAK", "0.9") or 0.9)
+BPT_FAST_CONFIRM_WINDOW_MINUTES = float(os.environ.get("BPT_FAST_CONFIRM_WINDOW_MINUTES", "30") or 30)
+
+ENABLE_BPT_SLOW_WATCH = os.environ.get("ENABLE_BPT_SLOW_WATCH", "true").lower() == "true"
+BPT_SLOW_WATCH_START_MINUTES = float(os.environ.get("BPT_SLOW_WATCH_START_MINUTES", "30") or 30)
+BPT_SLOW_WATCH_MAX_MINUTES = float(os.environ.get("BPT_SLOW_WATCH_MAX_MINUTES", "60") or 60)
+BPT_LATE_CONFIRM_PEAK = float(os.environ.get("BPT_LATE_CONFIRM_PEAK", "1.0") or 1.0)
+BPT_SLOW_WATCH_MIN_SIGNAL_COUNT = int(os.environ.get("BPT_SLOW_WATCH_MIN_SIGNAL_COUNT", "10") or 10)
+BPT_SLOW_WATCH_MIN_AVG_MOMENTUM = float(os.environ.get("BPT_SLOW_WATCH_MIN_AVG_MOMENTUM", "0.30") or 0.30)
+BPT_SLOW_WATCH_MIN_AVG_TREND = float(os.environ.get("BPT_SLOW_WATCH_MIN_AVG_TREND", "0.22") or 0.22)
 # =========================
 # 🧬 v7.2 ADAPTIVE PROBE LIFECYCLE ENGINE
 # =========================
@@ -5307,6 +5326,11 @@ def ensure_bpt_cqe_lifecycle_columns(cur):
         ADD COLUMN IF NOT EXISTS confirmation_avg_momentum NUMERIC,
         ADD COLUMN IF NOT EXISTS confirmation_signal_count INTEGER,
         ADD COLUMN IF NOT EXISTS confirmation_age_minutes NUMERIC,
+        ADD COLUMN IF NOT EXISTS confirmation_path TEXT,
+        ADD COLUMN IF NOT EXISTS probe_watch_minutes NUMERIC,
+        ADD COLUMN IF NOT EXISTS probe_watch_reason TEXT,
+        ADD COLUMN IF NOT EXISTS late_confirmation_reason TEXT,
+        ADD COLUMN IF NOT EXISTS live_gate_reason TEXT,
         ADD COLUMN IF NOT EXISTS bpt_exit_reason TEXT,
         ADD COLUMN IF NOT EXISTS ph_detected BOOLEAN DEFAULT FALSE,
         ADD COLUMN IF NOT EXISTS ph_reason TEXT,
@@ -6034,13 +6058,69 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
     age_mins = (safe_now - safe_opened_at).total_seconds() / 60
     peak_for_confirmation = max(float(current_peak or 0), metrics["peak_window"])
 
-    confirmed = (
-        peak_for_confirmation >= BPT_CQE_CONFIRM_PEAK
-        and float(peak_time_minutes or 999999) <= BPT_CQE_CONFIRM_WINDOW_MINUTES
-        and metrics["avg_trend"] >= BPT_CQE_CONFIRM_AVG_TREND
+    # v11.7 two-stage confirmation:
+    # FAST_CONFIRM catches clean early expansion at 0.9% within 30m.
+    # SLOW_WATCH does not upgrade just because it eventually hits 1%;
+    # it only keeps watching / late-confirms if signal density + momentum + trend persistence are strong.
+    base_confirmation_quality = (
+        metrics["avg_trend"] >= BPT_CQE_CONFIRM_AVG_TREND
         and metrics["avg_momentum"] >= BPT_CQE_CONFIRM_AVG_MOMENTUM
         and metrics["signal_count"] >= BPT_CQE_CONFIRM_MIN_SIGNAL_COUNT
     )
+
+    fast_confirmed = False
+    slow_watch_candidate = False
+    late_confirmed = False
+    confirmation_path = None
+    probe_watch_reason = None
+    late_confirmation_reason = None
+
+    if ENABLE_BPT_FAST_SLOW_CONFIRM:
+        fast_confirmed = bool(
+            peak_for_confirmation >= BPT_FAST_CONFIRM_PEAK
+            and float(peak_time_minutes or 999999) <= BPT_FAST_CONFIRM_WINDOW_MINUTES
+            and base_confirmation_quality
+        )
+        slow_watch_candidate = bool(
+            ENABLE_BPT_SLOW_WATCH
+            and age_mins >= BPT_SLOW_WATCH_START_MINUTES
+            and age_mins <= BPT_SLOW_WATCH_MAX_MINUTES
+            and metrics["signal_count"] >= BPT_SLOW_WATCH_MIN_SIGNAL_COUNT
+            and metrics["avg_momentum"] >= BPT_SLOW_WATCH_MIN_AVG_MOMENTUM
+            and metrics["avg_trend"] >= BPT_SLOW_WATCH_MIN_AVG_TREND
+        )
+        late_confirmed = bool(
+            slow_watch_candidate
+            and peak_for_confirmation >= BPT_LATE_CONFIRM_PEAK
+        )
+
+        if fast_confirmed:
+            confirmation_path = "FAST_CONFIRM"
+        elif late_confirmed:
+            confirmation_path = "LATE_CONFIRM"
+            late_confirmation_reason = (
+                f"slow_watch_peak>={BPT_LATE_CONFIRM_PEAK}:"
+                f"sigs={metrics['signal_count']},"
+                f"mom={round(metrics['avg_momentum'],3)},"
+                f"trend={round(metrics['avg_trend'],3)}"
+            )
+        elif slow_watch_candidate:
+            confirmation_path = "SLOW_WATCH"
+            probe_watch_reason = (
+                f"slow_watch:"
+                f"sigs={metrics['signal_count']}>={BPT_SLOW_WATCH_MIN_SIGNAL_COUNT},"
+                f"mom={round(metrics['avg_momentum'],3)}>={BPT_SLOW_WATCH_MIN_AVG_MOMENTUM},"
+                f"trend={round(metrics['avg_trend'],3)}>={BPT_SLOW_WATCH_MIN_AVG_TREND}"
+            )
+
+        confirmed = bool(fast_confirmed or late_confirmed)
+    else:
+        confirmed = (
+            peak_for_confirmation >= BPT_CQE_CONFIRM_PEAK
+            and float(peak_time_minutes or 999999) <= BPT_CQE_CONFIRM_WINDOW_MINUTES
+            and base_confirmation_quality
+        )
+        confirmation_path = "STANDARD_30M" if confirmed else None
 
     # v6.6.19:
     # CQE confirmation alone is not enough for real scale-in.
@@ -6053,10 +6133,27 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
         "confirmation_avg_momentum": metrics["avg_momentum"],
         "confirmation_signal_count": metrics["signal_count"],
         "confirmation_age_minutes": age_mins,
+        "confirmation_path": confirmation_path,
+        "probe_watch_minutes": age_mins if confirmation_path in ("SLOW_WATCH", "LATE_CONFIRM") else None,
+        "probe_watch_reason": probe_watch_reason,
+        "late_confirmation_reason": late_confirmation_reason,
     })
 
     fast_track_active = bool(fast_track_reason)
+
     if not confirmed and not fast_track_active:
+        if confirmation_path == "SLOW_WATCH":
+            safe_update_trade_telemetry(cur, tid, {
+                "probe_lifecycle_state": "SLOW_WATCH",
+                "probe_lifecycle_trigger": probe_watch_reason or "slow_watch_candidate",
+                "probe_lifecycle_trigger_age_minutes": age_mins,
+                "probe_lifecycle_trigger_momentum": metrics["avg_momentum"],
+                "probe_lifecycle_trigger_trend": metrics["avg_trend"],
+            })
+            try:
+                log_trade_event(cur, tid, sym, "bpt_slow_watch", current_price or entry_price, 0, current_peak, age_mins, metrics["avg_momentum"], metrics["avg_trend"], False)
+            except Exception as e:
+                print(f"⚠️ BPT slow-watch trade_events log failed: {e}", flush=True)
         return False
 
     cur.execute("""
@@ -6368,12 +6465,23 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
         WHERE id = %s
     """, (tid,))
 
+    confirmed_state = "FAST_TRACK_CONFIRMED_PENDING_SCALEIN" if fast_track_active else (
+        "FAST_CONFIRMED_PENDING_SCALEIN" if confirmation_path == "FAST_CONFIRM" else (
+            "LATE_CONFIRMED_PENDING_SCALEIN" if confirmation_path == "LATE_CONFIRM" else "STANDARD_CONFIRMED_PENDING_SCALEIN"
+        )
+    )
+    confirmed_trigger = fast_track_reason or (
+        "fast_confirm_0_9_30m" if confirmation_path == "FAST_CONFIRM" else (
+            late_confirmation_reason or "late_confirm_slow_watch" if confirmation_path == "LATE_CONFIRM" else "standard_confirmation"
+        )
+    )
+
     safe_update_trade_telemetry(cur, tid, {
-        "probe_lifecycle_state": "FAST_TRACK_CONFIRMED_PENDING_SCALEIN" if fast_track_active else "STANDARD_CONFIRMED_PENDING_SCALEIN",
-        "probe_lifecycle_trigger": fast_track_reason or "standard_30m_confirmation",
+        "probe_lifecycle_state": confirmed_state,
+        "probe_lifecycle_trigger": confirmed_trigger,
         "probe_lifecycle_trigger_age_minutes": age_mins,
-        "probe_lifecycle_trigger_momentum": momentum,
-        "probe_lifecycle_trigger_trend": trend,
+        "probe_lifecycle_trigger_momentum": metrics["avg_momentum"],
+        "probe_lifecycle_trigger_trend": metrics["avg_trend"],
     })
 
     try:
@@ -11272,6 +11380,287 @@ def build_telegram_recent_message(cur, hours=6):
         return f"🕒 <b>Recent Activity</b> unavailable: {e}"
 
 
+
+def build_telegram_pulse_message(cur, hours=3):
+    """v11.7 Command Centre / Pulse dashboard.
+
+    Purpose:
+    - Tell the operator whether the bot should be trading.
+    - Detect over-filtering by scanning recent blocked signals for future peak follow-through.
+    - Keep shadow/live accounting explicit so ghost probes do not look like real trades.
+    """
+    try:
+        force_okx_cache_refresh_if_empty("build_telegram_pulse_message")
+
+        cur.execute("""
+            WITH sig AS (
+                SELECT *
+                FROM signals_raw
+                WHERE timestamp >= NOW() - (%s || ' hours')::INTERVAL
+            ),
+            latest AS (
+                SELECT data_version
+                FROM sig
+                GROUP BY data_version
+                ORDER BY MAX(timestamp) DESC NULLS LAST
+                LIMIT 1
+            )
+            SELECT
+                NOW() AS db_now,
+                (SELECT data_version FROM latest) AS latest_version,
+                COUNT(*) AS signals,
+                COUNT(DISTINCT symbol) AS symbols,
+                MAX(timestamp) AS latest_signal,
+                COUNT(*) FILTER (WHERE decision='LONG') AS long_signals,
+                COUNT(*) FILTER (WHERE decision='SHORT') AS short_signals,
+                COUNT(*) FILTER (WHERE decision IS NULL) AS update_signals,
+                COUNT(*) FILTER (WHERE COALESCE(entry_allowed,FALSE)=TRUE) AS entry_allowed,
+                COUNT(*) FILTER (WHERE block_reason IS NOT NULL) AS blocked,
+                ROUND(AVG(momentum)::numeric,3) AS avg_momentum,
+                ROUND(AVG(trend)::numeric,3) AS avg_trend
+            FROM sig
+        """, (hours,))
+        (
+            db_now, latest_version, signals, symbols, latest_signal, long_signals, short_signals,
+            update_signals, entry_allowed, blocked, avg_mom, avg_trend
+        ) = cur.fetchone() or (None, "UNKNOWN", 0, 0, None, 0, 0, 0, 0, 0, 0, 0)
+
+        cur.execute("""
+            SELECT
+                COALESCE(market_heat_score,-1) AS heat_score,
+                COALESCE(market_heat_regime,'UNKNOWN') AS heat_regime,
+                COUNT(*) AS signals,
+                COUNT(*) FILTER (WHERE decision='LONG') AS longs,
+                COUNT(*) FILTER (WHERE decision='SHORT') AS shorts,
+                ROUND(AVG(momentum)::numeric,3) AS avg_mom,
+                ROUND(AVG(trend)::numeric,3) AS avg_trend
+            FROM signals_raw
+            WHERE timestamp >= NOW() - (%s || ' hours')::INTERVAL
+            GROUP BY 1,2
+            ORDER BY heat_score DESC
+        """, (hours,))
+        heat_rows = cur.fetchall() or []
+
+        cur.execute("""
+            SELECT COALESCE(block_reason,'no_block') AS reason, COUNT(*) AS signals
+            FROM signals_raw
+            WHERE timestamp >= NOW() - (%s || ' hours')::INTERVAL
+            GROUP BY 1
+            ORDER BY signals DESC
+            LIMIT 8
+        """, (hours,))
+        block_rows = cur.fetchall() or []
+
+        cur.execute("""
+            SELECT
+                COUNT(*) AS trade_rows,
+                COUNT(*) FILTER (WHERE COALESCE(is_shadow,FALSE)=FALSE AND COALESCE(trade_size_gbp,0)>0) AS real_rows,
+                COUNT(*) FILTER (WHERE COALESCE(is_shadow,TRUE)=TRUE OR COALESCE(trade_size_gbp,0)=0) AS shadow_or_ghost_rows,
+                COUNT(*) FILTER (WHERE status='OPEN' AND COALESCE(is_shadow,FALSE)=FALSE AND COALESCE(trade_size_gbp,0)>0) AS open_real,
+                COUNT(*) FILTER (WHERE status='OPEN' AND (COALESCE(is_shadow,TRUE)=TRUE OR COALESCE(trade_size_gbp,0)=0)) AS open_shadow,
+                COUNT(*) FILTER (WHERE entry_quality='BPT_CQE_LIFECYCLE_V1' AND market_heat_score >= 2 AND coin_health_mode='LIVE' AND coin_form_mode='NORMAL') AS bpt_v116_eligible,
+                COUNT(*) FILTER (WHERE entry_quality='PERSISTENCE_HUNTER_V1' AND market_heat_score >= 2 AND coin_health_mode='LIVE' AND coin_form_mode='HOT') AS ph_probe_eligible,
+                COUNT(*) FILTER (WHERE probe_lifecycle_state='SLOW_WATCH') AS slow_watch_rows,
+                COUNT(*) FILTER (WHERE probe_lifecycle_state ILIKE '%%LATE_CONFIRMED%%') AS late_confirm_rows,
+                COUNT(*) FILTER (WHERE probe_lifecycle_state ILIKE '%%FAST_CONFIRMED%%') AS fast_confirm_rows,
+                ROUND(AVG(pnl_percent) FILTER (WHERE pnl_percent IS NOT NULL)::numeric,3) AS avg_pnl,
+                ROUND(AVG(peak_pnl_percent)::numeric,3) AS avg_peak
+            FROM bot_trades_v4
+            WHERE opened_at >= NOW() - (%s || ' hours')::INTERVAL
+        """, (hours,))
+        (
+            trade_rows, real_rows, shadow_or_ghost_rows, open_real, open_shadow,
+            bpt_elig, ph_elig, slow_watch_rows, late_confirm_rows, fast_confirm_rows,
+            avg_trade_pnl, avg_trade_peak
+        ) = cur.fetchone() or (0,0,0,0,0,0,0,0,0,0,0,0)
+
+        # Missed-opportunity scanner. This can only measure follow-through that has
+        # actually happened up to now, so very fresh signals are naturally conservative.
+        cur.execute("""
+            WITH sig AS (
+                SELECT id, timestamp, symbol, price, decision, block_reason, momentum, trend,
+                       market_heat_score, market_heat_regime
+                FROM signals_raw
+                WHERE timestamp >= NOW() - (%s || ' hours')::INTERVAL
+                  AND price IS NOT NULL
+            ),
+            peaks AS (
+                SELECT
+                    s.id, s.timestamp, s.symbol, s.price, s.decision, s.block_reason,
+                    s.momentum, s.trend, s.market_heat_score, s.market_heat_regime,
+                    100 * (MAX(f.price) / NULLIF(s.price,0) - 1) AS future_peak
+                FROM sig s
+                LEFT JOIN signals_raw f
+                  ON f.symbol = s.symbol
+                 AND f.timestamp >= s.timestamp
+                 AND f.timestamp <= LEAST(NOW(), s.timestamp + INTERVAL '120 minutes')
+                GROUP BY s.id, s.timestamp, s.symbol, s.price, s.decision, s.block_reason,
+                         s.momentum, s.trend, s.market_heat_score, s.market_heat_regime
+            )
+            SELECT
+                COUNT(*) AS scanned,
+                COUNT(*) FILTER (WHERE future_peak >= 0.5) AS runners_05,
+                COUNT(*) FILTER (WHERE future_peak >= 1.0) AS runners_1,
+                COUNT(*) FILTER (WHERE future_peak >= 2.0) AS runners_2,
+                ROUND(MAX(future_peak)::numeric,3) AS best_peak,
+                ROUND(AVG(future_peak)::numeric,3) AS avg_peak
+            FROM peaks
+        """, (hours,))
+        scanned, runners_05, runners_1, runners_2, best_future_peak, avg_future_peak = cur.fetchone() or (0,0,0,0,0,0)
+
+        cur.execute("""
+            WITH sig AS (
+                SELECT id, timestamp, symbol, price, decision, block_reason, momentum, trend,
+                       market_heat_score, market_heat_regime
+                FROM signals_raw
+                WHERE timestamp >= NOW() - (%s || ' hours')::INTERVAL
+                  AND price IS NOT NULL
+            ),
+            peaks AS (
+                SELECT
+                    s.symbol,
+                    COUNT(*) AS signals,
+                    COUNT(*) FILTER (WHERE s.decision='LONG') AS longs,
+                    COUNT(*) FILTER (WHERE s.decision='SHORT') AS shorts,
+                    MAX(100 * (f.price / NULLIF(s.price,0) - 1)) AS best_future_peak,
+                    ROUND(AVG(s.momentum)::numeric,3) AS avg_mom,
+                    ROUND(AVG(s.trend)::numeric,3) AS avg_trend,
+                    MAX(s.market_heat_score) AS max_heat,
+                    MODE() WITHIN GROUP (ORDER BY COALESCE(s.block_reason,'no_block')) AS top_block
+                FROM sig s
+                LEFT JOIN signals_raw f
+                  ON f.symbol = s.symbol
+                 AND f.timestamp >= s.timestamp
+                 AND f.timestamp <= LEAST(NOW(), s.timestamp + INTERVAL '120 minutes')
+                GROUP BY s.symbol
+            )
+            SELECT symbol, signals, longs, shorts,
+                   ROUND(best_future_peak::numeric,3) AS best_future_peak,
+                   avg_mom, avg_trend, max_heat, top_block
+            FROM peaks
+            ORDER BY best_future_peak DESC NULLS LAST, signals DESC
+            LIMIT 8
+        """, (hours,))
+        coin_rows = cur.fetchall() or []
+
+        cur.execute("""
+            SELECT
+                symbol,
+                COUNT(*) AS rows,
+                ROUND(AVG(COALESCE(confirmation_age_minutes, probe_lifecycle_trigger_age_minutes))::numeric,1) AS avg_age,
+                ROUND(AVG(confirmation_avg_momentum)::numeric,3) AS avg_conf_mom,
+                ROUND(AVG(confirmation_avg_trend)::numeric,3) AS avg_conf_trend,
+                ROUND(AVG(confirmation_signal_count)::numeric,1) AS avg_conf_sigs,
+                MAX(probe_lifecycle_state) AS state
+            FROM bot_trades_v4
+            WHERE opened_at >= NOW() - (%s || ' hours')::INTERVAL
+              AND (
+                    probe_lifecycle_state='SLOW_WATCH'
+                    OR probe_lifecycle_state ILIKE '%%LATE_CONFIRMED%%'
+                    OR probe_lifecycle_state ILIKE '%%FAST_CONFIRMED%%'
+                  )
+            GROUP BY symbol
+            ORDER BY rows DESC, avg_age DESC
+            LIMIT 5
+        """, (hours,))
+        watch_rows = cur.fetchall() or []
+
+        # Verdict
+        current_heat_score = max([safe_int(r[0], -1) for r in heat_rows], default=-1)
+        latest_age_min = None
+        try:
+            if latest_signal:
+                latest_age_min = (ensure_utc(db_now) - ensure_utc(latest_signal)).total_seconds() / 60
+        except Exception:
+            latest_age_min = None
+
+        if latest_age_min is not None and latest_age_min > 30:
+            verdict = "⚠️ STALE SIGNALS"
+            confidence = 35
+            recommendation = "Check TradingView/Render/webhook flow."
+        elif runners_1 and runners_1 > 0 and real_rows == 0:
+            verdict = "⚠️ POSSIBLE OVER-FILTERING"
+            confidence = 45
+            recommendation = "Missed >1% runners detected. Inspect block reasons / top coins."
+        elif current_heat_score <= 0 and (runners_1 or 0) == 0:
+            verdict = "✅ CORRECTLY IDLE"
+            confidence = 92
+            recommendation = "Market is DEAD and no major long runners were missed."
+        elif long_signals == 0:
+            verdict = "✅ NO LONG EDGE"
+            confidence = 88
+            recommendation = "Long-only bot correctly waiting."
+        elif real_rows and real_rows > 0:
+            verdict = "🟢 TRADING"
+            confidence = 80
+            recommendation = "Monitor live PnL and live/shadow accounting."
+        else:
+            verdict = "🟡 WATCHING"
+            confidence = 70
+            recommendation = "Signals exist, but no confirmed live setup yet."
+
+        def pct(x):
+            return fmt_num(x, 3)
+
+        lines = [
+            f"🧭 <b>BOT COMMAND CENTRE / PULSE</b>",
+            f"Window: <b>{hours}h</b> | Version: <b>{latest_version or DATA_VERSION}</b>",
+            f"Latest signal: <b>{latest_signal}</b>",
+            "",
+            f"<b>🏁 Verdict</b>",
+            f"{verdict} | Confidence <b>{confidence}%</b>",
+            f"{recommendation}",
+            "",
+            f"<b>📈 Market</b>",
+            f"Signals: <b>{signals}</b> across <b>{symbols}</b> coins",
+            f"LONG <b>{long_signals}</b> | SHORT <b>{short_signals}</b> | Updates <b>{update_signals}</b>",
+            f"Avg momentum/trend: <b>{avg_mom}</b> / <b>{avg_trend}</b>",
+        ]
+
+        if heat_rows:
+            lines.append("\n<b>🔥 Heat</b>")
+            for heat_score, heat_regime, cnt, longs, shorts, hmom, htrend in heat_rows:
+                icon = "🔥" if heat_score == 3 else ("🟢" if heat_score == 2 else ("🟡" if heat_score == 1 else "🔴"))
+                lines.append(f"{icon} {heat_regime}({heat_score}): {cnt} sigs | L {longs} / S {shorts} | mom/tr {hmom}/{htrend}")
+
+        lines += [
+            "",
+            f"<b>🤖 Bot / Capital</b>",
+            f"Trade rows: <b>{trade_rows}</b> | Real <b>{real_rows}</b> | Shadow/Ghost <b>{shadow_or_ghost_rows}</b>",
+            f"Open real: <b>{open_real}</b> | Open shadow/ghost: <b>{open_shadow}</b>",
+            f"BPT v11.6 eligible rows: <b>{bpt_elig}</b> | PH probe eligible: <b>{ph_elig}</b>",
+            f"Fast confirms: <b>{fast_confirm_rows}</b> | Slow watch: <b>{slow_watch_rows}</b> | Late confirms: <b>{late_confirm_rows}</b>",
+            "",
+            f"<b>🔍 Missed Opportunity Scanner</b>",
+            f"Scanned: <b>{scanned}</b> | >0.5% <b>{runners_05}</b> | >1% <b>{runners_1}</b> | >2% <b>{runners_2}</b>",
+            f"Best future peak so far: <b>{pct(best_future_peak)}%</b> | Avg: <b>{pct(avg_future_peak)}%</b>",
+        ]
+
+        if block_rows:
+            lines.append("\n<b>🚦 Top Block Reasons</b>")
+            for reason, cnt in block_rows[:6]:
+                lines.append(f"{reason}: <b>{cnt}</b>")
+
+        if coin_rows:
+            lines.append("\n<b>🪙 Top Recent Coins</b>")
+            for sym, cnt, longs, shorts, bestp, cmom, ctrend, heat, top_block in coin_rows[:6]:
+                lines.append(f"{sym}: peak <b>{pct(bestp)}%</b> | sigs {cnt} L{longs}/S{shorts} | mom/tr {cmom}/{ctrend} | heat {heat} | {top_block}")
+
+        if watch_rows:
+            lines.append("\n<b>👀 Slow / Confirm Watch</b>")
+            for sym, cnt, age, mom, tr, sigs, state in watch_rows:
+                lines.append(f"{sym}: {state} | rows {cnt} | age {age}m | sigs {sigs} | mom/tr {mom}/{tr}")
+
+        msg = "\n".join(lines)
+        if len(msg) > 3900:
+            msg = "\n".join(lines[:42]) + "\n\n…truncated. Use /market or SQL for deeper detail."
+        return msg
+
+    except Exception as e:
+        print(f"⚠️ pulse message failed: {e}", flush=True)
+        safe_telemetry_rollback(cur)
+        return f"🧭 <b>Pulse unavailable</b>: {e}"
+
 def build_telegram_regime_message(cur, hours=3):
     force_okx_cache_refresh_if_empty("build_telegram_regime_message")
     """More regime-focused version of /market."""
@@ -11515,7 +11904,10 @@ def handle_telegram_command(text):
         if cmd in ["/telemetry", "/tel"]:
             return build_telegram_telemetry_message(cur, 24)
 
-        if cmd in ["/market", "/why", "/state"]:
+        if cmd in ["/pulse", "/centre", "/center", "/command", "/why"]:
+            return build_telegram_pulse_message(cur, 3)
+
+        if cmd in ["/market", "/state"]:
             return build_market_state_message(cur, 3)
 
         if cmd in ["/regime"]:
@@ -11539,7 +11931,8 @@ def handle_telegram_command(text):
         if cmd == "/help":
             return (
                 "🤖 <b>Trading Bot Commands</b>\n"
-                "/market - explain current market state + why bot is/isn't trading\n"
+                "/pulse - Command Centre: market, bot, missed opportunities, verdict\n"
+                "/market - market heat + live/ghost mix\n"
                 "/regime - deeper regime detail\n"
                 "/rejections - recent block/rejection reasons\n"
                 "/recent - recent entries/exits/banks/activity\n"
