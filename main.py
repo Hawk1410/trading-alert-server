@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v11.8.0
+# VERSION: v11.9.0
 # TITLE: COMMAND CENTRE + FAST/SLOW BPT CONFIRM
 # =========================
 
-print("🛡️🛡️🛡️ MAIN.PY v11.8 EXECUTION INTEGRITY + COMMAND CENTRE RUNNING 🛡️🛡️🛡️", flush=True)
+print("🛡️🛡️🛡️ MAIN.PY v11.9 PHASE GATE REBALANCE + EXECUTION INTEGRITY RUNNING 🛡️🛡️🛡️", flush=True)
 
 # =========================
 # v10.2.0 CHANGE SUMMARY
@@ -426,7 +426,7 @@ def parse_symbol_set_env(name, default):
 OKX_BLOCKED_SYMBOLS = parse_symbol_set_env("OKX_BLOCKED_SYMBOLS", "TAOUSDT")
 OKX_EST_FEE_RATE_ROUND_TRIP = float(os.environ.get("OKX_EST_FEE_RATE_ROUND_TRIP", "0.002") or 0.002)
 
-DATA_VERSION = "v11.8_EXECUTION_INTEGRITY"
+DATA_VERSION = "v11.9_PHASE_GATE_REBALANCE"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -7750,6 +7750,36 @@ def passes_leadership_engine(cur, symbol, momentum, trend):
 
     if phase == "EMERGING_LEADER":
         return True, leadership, "leadership_emerging_allowed"
+
+    # v11.9 PHASE GATE REBALANCE:
+    # SQL replay showed that leadership_phase=OTHER was blocking a meaningful
+    # number of real LONG runners. Do not open the floodgate: only allow OTHER
+    # into the existing confirmation pipeline when the live signal already has
+    # enough trend, momentum, leadership score, and 15m leadership acceleration.
+    # leadership_trend_too_low remains blocked above this section.
+    if phase == "OTHER":
+        other_score = safe_float(score, 0)
+        other_delta_15m = safe_float(leadership.get("leadership_delta_15m"), -999)
+
+        if (
+            trend >= 0.20
+            and momentum >= 0.45
+            and other_score >= 0.40
+            and other_delta_15m >= 0.30
+        ):
+            leadership["phase_gate_rebalance"] = True
+            leadership["phase_gate_rebalance_reason"] = "other_confirm_allowed"
+            leadership["phase_gate_rebalance_min_trend"] = 0.20
+            leadership["phase_gate_rebalance_min_momentum"] = 0.45
+            leadership["phase_gate_rebalance_min_score"] = 0.40
+            leadership["phase_gate_rebalance_min_delta_15m"] = 0.30
+            print(
+                f"🟣 v11.9 OTHER PHASE CONFIRM ALLOWED | {symbol} | "
+                f"trend={trend:.3f} | mom={momentum:.3f} | "
+                f"score={other_score:.3f} | d15={other_delta_15m:.3f}",
+                flush=True,
+            )
+            return True, leadership, "leadership_other_confirm_allowed"
 
     return False, leadership, "leadership_phase_not_tradable"
 
