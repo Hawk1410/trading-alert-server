@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v11.9.0
+# VERSION: v11.9.1
 # TITLE: COMMAND CENTRE + FAST/SLOW BPT CONFIRM
 # =========================
 
-print("🛡️🛡️🛡️ MAIN.PY v11.9 PHASE GATE REBALANCE + EXECUTION INTEGRITY RUNNING 🛡️🛡️🛡️", flush=True)
+print("🛡️🛡️🛡️ MAIN.PY v11.9.1 EXECUTION HEAT RESCUE VERIFIED RUNNING 🛡️🛡️🛡️", flush=True)
 
 # =========================
 # v10.2.0 CHANGE SUMMARY
@@ -426,7 +426,7 @@ def parse_symbol_set_env(name, default):
 OKX_BLOCKED_SYMBOLS = parse_symbol_set_env("OKX_BLOCKED_SYMBOLS", "TAOUSDT")
 OKX_EST_FEE_RATE_ROUND_TRIP = float(os.environ.get("OKX_EST_FEE_RATE_ROUND_TRIP", "0.002") or 0.002)
 
-DATA_VERSION = "v11.9_PHASE_GATE_REBALANCE"
+DATA_VERSION = "v11.9.1_EXECUTION_HEAT_RESCUE"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -5852,9 +5852,12 @@ def open_bpt_cqe_probe_trade(cur, symbol, price, momentum, trend, signal_id, sig
     model_probe_size_usdt = 0.0 if ghost_probe_active else gbp_to_usdt_quote(BPT_CQE_PROBE_SIZE_GBP)
 
     safe_update_trade_telemetry(cur, trade_id, {
-        # Ghost probes are not marked shadow because they are eligible for a future live upgrade.
-        # They simply carry zero capital until confirmation.
-        "is_shadow": False if ghost_probe_active else not live_probe_enabled,
+        # v11.9.1 EXECUTION INTEGRITY:
+        # Ghost/no-capital probes must be classified as shadow until OKX confirms
+        # a real live entry/upgrade. They remain eligible for future live upgrade
+        # via confirmed_ghost_live_entry_allowed, but they must never appear as
+        # real/open capital while trade_size_usdt == 0.
+        "is_shadow": True if ghost_probe_active else not live_probe_enabled,
         "entry_architecture": BPT_CQE_ENTRY_QUALITY,
         "market_os_engine": (leadership_context or {}).get("market_os_engine"),
         "top_form_selector": bool((leadership_context or {}).get("top_form_selector")),
@@ -7740,6 +7743,22 @@ def passes_leadership_engine(cur, symbol, momentum, trend):
         return False, leadership, "leadership_no_30m_prior"
 
     if phase == "CLIMAX_LEADER":
+        # v11.9.1 HEAT/CLIMAX RESCUE:
+        # 7-day replay supported only a very strict climax rescue. This lets
+        # exceptional climax leaders continue into the existing safety/confirmation
+        # pipeline; it does not bypass OKX, coin health/form, max-open, or sizing.
+        climax_score = safe_float(score, 0)
+        if trend >= 0.30 and momentum >= 1.20 and climax_score >= 0.50:
+            leadership["climax_heat_rescue"] = True
+            leadership["climax_heat_rescue_reason"] = "strict_climax_rescue_allowed"
+            leadership["market_os_engine"] = leadership.get("market_os_engine") or "CLIMAX_HEAT_RESCUE"
+            leadership["size_scaling_reason"] = leadership.get("size_scaling_reason") or "climax_heat_rescue_strict"
+            print(
+                f"🔥 v11.9.1 CLIMAX RESCUE ALLOWED | {symbol} | "
+                f"trend={trend:.3f} | mom={momentum:.3f} | score={climax_score:.3f}",
+                flush=True,
+            )
+            return True, leadership, "leadership_climax_heat_rescue_allowed"
         return False, leadership, "leadership_climax_delta_blocked"
 
     if phase == "DECAYING_LEADER":
@@ -9953,37 +9972,74 @@ def webhook():
                         log_habitat_decision(symbol, habitat_for_entry, "main_entry")
 
                         if (not habitat_entry_allows_live) or (live_entry_heat_score < MARKET_HEAT_MIN_LIVE_SCORE and not habitat_entry_override):
-                            shadow_ctx = dict(leadership_context or {})
-                            shadow_ctx["market_os_engine"] = (shadow_ctx.get("market_os_engine") or "HABITAT_FILTER_SHADOW")
-                            if not habitat_entry_allows_live:
-                                shadow_ctx["size_scaling_reason"] = f"habitat_live_block:{habitat_for_entry.get('reason')}"
-                            else:
-                                shadow_ctx["size_scaling_reason"] = (
-                                    f"market_heat_not_hot:score={live_entry_heat_score},"
+                            # v11.9.1 HEAT RESCUE:
+                            # The 7-day replay only supported a narrow bypass of the HOT-only
+                            # market gate. This is NOT a broad heat relaxation and does not
+                            # override habitat disallow, OKX, coin health/form, max-open, or sizing.
+                            heat_rescue_score = safe_float((leadership_context or {}).get("prior_avg_peak") or (leadership_context or {}).get("leadership_score"), 0)
+                            heat_rescue_allowed = bool(
+                                habitat_entry_allows_live
+                                and not habitat_entry_override
+                                and live_entry_heat_score < MARKET_HEAT_MIN_LIVE_SCORE
+                                and trend >= 0.30
+                                and momentum >= 0.80
+                                and heat_rescue_score >= 0.50
+                            )
+
+                            if heat_rescue_allowed:
+                                leadership_context = leadership_context or {}
+                                leadership_context["heat_rescue_allowed"] = True
+                                leadership_context["heat_rescue_reason"] = "strict_market_heat_not_hot_rescue"
+                                leadership_context["market_os_engine"] = leadership_context.get("market_os_engine") or "HEAT_RESCUE"
+                                leadership_context["size_scaling_reason"] = leadership_context.get("size_scaling_reason") or (
+                                    f"heat_rescue_market_heat_not_hot:score={live_entry_heat_score},"
                                     f"regime={live_entry_heat_regime},min={MARKET_HEAT_MIN_LIVE_SCORE}"
                                 )
-
-                            try:
-                                open_shadow_market_os_trade(
-                                    cur,
-                                    symbol,
-                                    "LONG",
-                                    price,
-                                    momentum,
-                                    trend,
-                                    entry_quality or "HOT_ONLY_FILTER",
-                                    signal_id,
-                                    signal_time,
-                                    shadow_ctx,
-                                    shadow_ctx["size_scaling_reason"],
-                                    model_size_gbp=float(get_trade_size_for_quality(entry_quality or "STANDARD"))
+                                block_reason = leadership_context["size_scaling_reason"]
+                                trace_stage(
+                                    "market_heat_hot_only_gate",
+                                    True,
+                                    "strict_heat_rescue_allowed",
+                                    f"heat={live_entry_heat_score} regime={live_entry_heat_regime} score={round(heat_rescue_score,3)}"
                                 )
-                            except Exception as e:
-                                print(f"⚠️ HOT-only shadow creation failed: {e}", flush=True)
+                                print(
+                                    f"🔥 v11.9.1 HEAT RESCUE ALLOWED | {symbol} | "
+                                    f"heat={live_entry_heat_score}/{live_entry_heat_regime} | "
+                                    f"trend={trend:.3f} | mom={momentum:.3f} | score={heat_rescue_score:.3f}",
+                                    flush=True,
+                                )
+                            else:
+                                shadow_ctx = dict(leadership_context or {})
+                                shadow_ctx["market_os_engine"] = (shadow_ctx.get("market_os_engine") or "HABITAT_FILTER_SHADOW")
+                                if not habitat_entry_allows_live:
+                                    shadow_ctx["size_scaling_reason"] = f"habitat_live_block:{habitat_for_entry.get('reason')}"
+                                else:
+                                    shadow_ctx["size_scaling_reason"] = (
+                                        f"market_heat_not_hot:score={live_entry_heat_score},"
+                                        f"regime={live_entry_heat_regime},min={MARKET_HEAT_MIN_LIVE_SCORE}"
+                                    )
 
-                            entry_allowed = False
-                            block_reason = shadow_ctx["size_scaling_reason"]
-                            trace_stage("market_heat_hot_only_gate", False, block_reason, f"heat={live_entry_heat_score} regime={live_entry_heat_regime}")
+                                try:
+                                    open_shadow_market_os_trade(
+                                        cur,
+                                        symbol,
+                                        "LONG",
+                                        price,
+                                        momentum,
+                                        trend,
+                                        entry_quality or "HOT_ONLY_FILTER",
+                                        signal_id,
+                                        signal_time,
+                                        shadow_ctx,
+                                        shadow_ctx["size_scaling_reason"],
+                                        model_size_gbp=float(get_trade_size_for_quality(entry_quality or "STANDARD"))
+                                    )
+                                except Exception as e:
+                                    print(f"⚠️ HOT-only shadow creation failed: {e}", flush=True)
+
+                                entry_allowed = False
+                                block_reason = shadow_ctx["size_scaling_reason"]
+                                trace_stage("market_heat_hot_only_gate", False, block_reason, f"heat={live_entry_heat_score} regime={live_entry_heat_regime}")
                     except Exception as e:
                         print(f"⚠️ HOT-only live gate failed; blocking live entry for safety | {symbol} | {e}", flush=True)
                         safe_telemetry_rollback(cur)
