@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v11.7.0
+# VERSION: v11.8.0
 # TITLE: COMMAND CENTRE + FAST/SLOW BPT CONFIRM
 # =========================
 
-print("🔥🔥🔥 MAIN.PY v11.7 COMMAND CENTRE + FAST/SLOW BPT CONFIRM RUNNING 🔥🔥🔥", flush=True)
+print("🛡️🛡️🛡️ MAIN.PY v11.8 EXECUTION INTEGRITY + COMMAND CENTRE RUNNING 🛡️🛡️🛡️", flush=True)
 
 # =========================
 # v10.2.0 CHANGE SUMMARY
@@ -426,7 +426,7 @@ def parse_symbol_set_env(name, default):
 OKX_BLOCKED_SYMBOLS = parse_symbol_set_env("OKX_BLOCKED_SYMBOLS", "TAOUSDT")
 OKX_EST_FEE_RATE_ROUND_TRIP = float(os.environ.get("OKX_EST_FEE_RATE_ROUND_TRIP", "0.002") or 0.002)
 
-DATA_VERSION = "v11.7_COMMAND_CENTRE_SLOW_CONFIRM"
+DATA_VERSION = "v11.8_EXECUTION_INTEGRITY"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -3873,18 +3873,13 @@ def resolve_live_entry_quote_size(cur, symbol, okx_inst_id, requested_quote_size
     else:
         actual = target
 
-    if actual < float(MIN_POSITION_SIZE_GBP):
-        return 0.0, {
-            "adjusted": True,
-            "reason": "available_below_min_position_size",
-            "quote_ccy": quote_ccy,
-            "requested_quote_size": requested,
-            "target_quote_size": target,
-            "available_quote_size": available,
-            "min_position_size": float(MIN_POSITION_SIZE_GBP),
-            "okx_min_order": min_result,
-        }
-
+    # v11.8 EXECUTION INTEGRITY FIX:
+    # requested_quote_size is in quote currency (usually USDT), while MIN_POSITION_SIZE_GBP
+    # is in GBP. v11.7 compared those directly, so a perfectly valid ~6.75 USDT
+    # order could be blocked against a 10 GBP threshold even with 200+ USDT available.
+    # Live execution should only fail here when the account cannot meet OKX's own
+    # minimum order requirement. Strategy-level sizing can remain separate from
+    # exchange-validity checks.
     if min_result.get("success") and min_required > 0 and actual < min_required:
         return 0.0, {
             "adjusted": True,
@@ -4361,6 +4356,98 @@ def log_okx_exit_skip_no_live_entry(cur, trade_id, symbol, direction, price=None
     )
 
     print(f"🛡️ OKX EXIT SKIPPED | {symbol} | no successful live entry", flush=True)
+
+
+def quarantine_failed_live_entry_trade(cur, trade_id, symbol, reason, okx_result=None):
+    """
+    v11.8 execution-integrity guard.
+
+    A bot_trades_v4 row may be created provisionally so events/OKX logs have a
+    trade_id, but it must never remain OPEN + real unless OKX confirms a live
+    entry. Failed entries are immediately closed, zeroed, and marked shadow.
+    """
+    reason_text = str(reason or "okx_entry_not_confirmed")[:240]
+    try:
+        safe_update_trade_telemetry(cur, trade_id, {
+            "trade_size_gbp": 0.0,
+            "dynamic_trade_size_gbp": 0.0,
+            "probe_size_gbp": 0.0,
+            "trade_size_usdt": 0.0,
+            "entry_value_usdt": 0.0,
+            "entry_value_gbp": 0.0,
+            "pnl_usdt": 0.0,
+            "pnl_gbp": 0.0,
+            "is_shadow": True,
+            "shadow_reason": f"v11_8_okx_entry_failed:{reason_text}",
+            "size_scaling_reason": f"v11_8_okx_entry_failed:{reason_text}",
+        })
+    except Exception as e:
+        print(f"⚠️ v11.8 quarantine telemetry failed | {symbol} | id={trade_id} | {e}", flush=True)
+        safe_telemetry_rollback(cur)
+
+    try:
+        cur.execute("""
+            UPDATE bot_trades_v4
+            SET status = 'CLOSED',
+                closed_at = NOW(),
+                close_reason = %s,
+                pnl_percent = COALESCE(pnl_percent, 0)
+            WHERE id = %s
+        """, (f"v11_8_okx_entry_failed_no_real_trade:{reason_text}", str(trade_id)))
+    except Exception as e:
+        print(f"🚨 v11.8 quarantine close failed | {symbol} | id={trade_id} | {e}", flush=True)
+        raise
+
+    print(f"🧯 v11.8 PHANTOM TRADE QUARANTINED | {symbol} | id={trade_id} | reason={reason_text}", flush=True)
+
+
+def okx_entry_result_is_live_confirmed(result):
+    return bool(
+        result
+        and result.get("success")
+        and not result.get("dry_run")
+        and not result.get("skipped")
+        and not result.get("blocked")
+    )
+
+
+def assert_no_open_zero_size_real_trade(cur, trade_id=None, symbol=None):
+    """Auto-quarantine impossible live state: OPEN + real + zero capital/no OKX entry."""
+    params = []
+    extra = ""
+    if trade_id is not None:
+        extra += " AND bt.id = %s"
+        params.append(str(trade_id))
+    if symbol is not None:
+        extra += " AND bt.symbol = %s"
+        params.append(symbol)
+
+    cur.execute(f"""
+        SELECT bt.id::text, bt.symbol
+        FROM bot_trades_v4 bt
+        WHERE bt.status = 'OPEN'
+          AND COALESCE(bt.is_shadow, FALSE) = FALSE
+          AND (
+                COALESCE(NULLIF(bt.trade_size_usdt, 0), NULLIF(bt.entry_value_usdt, 0), 0) <= 0
+                OR NOT EXISTS (
+                    SELECT 1
+                    FROM okx_order_log ol
+                    WHERE ol.trade_id = bt.id::text
+                      AND ol.action = 'entry'
+                      AND COALESCE(ol.dry_run, FALSE) = FALSE
+                      AND COALESCE(ol.success, FALSE) = TRUE
+                      AND ol.error_message IS NULL
+                      AND COALESCE(ol.response_payload::text, '') NOT ILIKE '%%skipped%%'
+                      AND COALESCE(ol.response_payload::text, '') NOT ILIKE '%%dry_run%%'
+                )
+          )
+          {extra}
+        LIMIT 25
+    """, tuple(params))
+    rows = cur.fetchall() or []
+    for bad_id, bad_symbol in rows:
+        quarantine_failed_live_entry_trade(cur, bad_id, bad_symbol, "execution_integrity_invariant_open_real_without_okx_entry")
+    return len(rows)
 
 def calculate_exit_base_size(entry_price, trade_size_quote):
     if entry_price <= 0:
@@ -5817,7 +5904,7 @@ def open_bpt_cqe_probe_trade(cur, symbol, price, momentum, trend, signal_id, sig
             entry_price=price,
             trade_size_quote=gbp_to_usdt_quote(BPT_CQE_PROBE_SIZE_GBP),
         )
-        if okx_probe_result.get("success") and not okx_probe_result.get("skipped") and not okx_probe_result.get("blocked") and not okx_probe_result.get("dry_run"):
+        if okx_entry_result_is_live_confirmed(okx_probe_result):
             requested_probe_quote = gbp_to_usdt_quote(BPT_CQE_PROBE_SIZE_GBP)
             actual_probe_quote = float(okx_probe_result.get("actual_quote_size") or requested_probe_quote)
             actual_probe_gbp = usdt_quote_to_gbp(actual_probe_quote)
@@ -5829,13 +5916,11 @@ def open_bpt_cqe_probe_trade(cur, symbol, price, momentum, trend, signal_id, sig
                 "size_scaling_reason": "bpt_probe_live_entry_executed" if abs(actual_probe_quote - float(requested_probe_quote)) <= 0.0001 else "bpt_probe_partial_position_fill",
             })
         else:
-            cur.execute("""
-                UPDATE bot_trades_v4
-                SET status = 'CLOSED',
-                    closed_at = NOW(),
-                    close_reason = %s
-                WHERE id = %s
-            """, (f"okx_bpt_probe_failed: {okx_probe_result.get('reason') or okx_probe_result.get('error')}", trade_id))
+            quarantine_failed_live_entry_trade(
+                cur, trade_id, symbol,
+                f"okx_bpt_probe_failed:{okx_probe_result.get('reason') or okx_probe_result.get('error')}",
+                okx_probe_result
+            )
 
     print(
         f"👻 OPEN BPT CQE GHOST PROBE | {symbol} | id={trade_id} | row={lifecycle_row} | "
@@ -7180,12 +7265,7 @@ def open_persistence_hunter_trade(cur, symbol, price, momentum, trend, signal_id
     ph_actual_gbp = 0.0
     if ph_live_requested:
         ph_order = okx_place_market_order(cur, tid, symbol, "LONG", "entry", price=price, entry_price=price, trade_size_quote=gbp_to_usdt_quote(ph_live_size_gbp))
-        ph_live_executed = bool(
-            ph_order.get("success")
-            and not ph_order.get("skipped")
-            and not ph_order.get("blocked")
-            and not ph_order.get("dry_run")
-        )
+        ph_live_executed = okx_entry_result_is_live_confirmed(ph_order)
         if ph_live_executed:
             actual_quote = float(ph_order.get("actual_quote_size") or gbp_to_usdt_quote(ph_live_size_gbp) or 0)
             ph_actual_gbp = usdt_quote_to_gbp(actual_quote)
@@ -7200,16 +7280,7 @@ def open_persistence_hunter_trade(cur, symbol, price, momentum, trend, signal_id
             })
         else:
             fail_reason = ph_order.get("reason") or ph_order.get("error") or "unknown"
-            safe_update_trade_telemetry(cur, tid, {
-                "is_shadow": True,
-                "trade_size_gbp": 0.0,
-                "dynamic_trade_size_gbp": 0.0,
-                "entry_value_gbp": 0.0,
-                "entry_value_usdt": 0.0,
-                "trade_size_usdt": 0.0,
-                "size_scaling_reason": f"PH_LIVE_PROBE_NOT_EXECUTED:{fail_reason}",
-                "shadow_reason": "PH_LIVE_PROBE_NOT_EXECUTED",
-            })
+            quarantine_failed_live_entry_trade(cur, tid, symbol, f"PH_LIVE_PROBE_NOT_EXECUTED:{fail_reason}", ph_order)
 
     print(
         f"🧲 OPEN PH {'LIVE PROBE' if ph_live_executed else 'SHADOW'} | {symbol} | id={tid} | "
@@ -10353,31 +10424,12 @@ def webhook():
                         trade_size_quote=entry_quote_size
                     )
 
-                    okx_live_confirmed = (
-                        bool(okx_entry_result.get("success"))
-                        and not bool(okx_entry_result.get("dry_run"))
-                        and not bool(okx_entry_result.get("skipped"))
-                    )
+                    okx_live_confirmed = okx_entry_result_is_live_confirmed(okx_entry_result)
 
                     if not okx_live_confirmed:
                         fail_reason = okx_entry_result.get("reason") or okx_entry_result.get("error") or "okx_entry_not_live_confirmed"
-                        safe_update_trade_telemetry(cur, trade_id, {
-                            "trade_size_gbp": 0.0,
-                            "dynamic_trade_size_gbp": 0.0,
-                            "trade_size_usdt": 0.0,
-                            "entry_value_usdt": 0.0,
-                            "entry_value_gbp": 0.0,
-                            "is_shadow": True,
-                            "shadow_reason": f"okx_entry_not_confirmed:{fail_reason}",
-                            "size_scaling_reason": f"okx_entry_not_confirmed:{fail_reason}",
-                        })
-                        cur.execute("""
-                            UPDATE bot_trades_v4
-                            SET status = 'CLOSED',
-                                closed_at = NOW(),
-                                close_reason = %s
-                            WHERE id = %s
-                        """, (f"okx_entry_not_confirmed: {fail_reason}", trade_id))
+                        quarantine_failed_live_entry_trade(cur, trade_id, symbol, fail_reason, okx_entry_result)
+                        assert_no_open_zero_size_real_trade(cur, trade_id=trade_id, symbol=symbol)
                         conn.commit()
                         trace_stage("okx_order_result", False, "okx_entry_not_confirmed", str(fail_reason)[:180])
                         print(f"🚨 ENTRY NOT LIVE-CONFIRMED | {symbol} | id={trade_id} | result={okx_entry_result}", flush=True)
