@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v11.9.1
-# TITLE: COMMAND CENTRE + FAST/SLOW BPT CONFIRM
+# VERSION: v12.0
+# TITLE: RESEARCH PLATFORM + DECISION TRACE
 # =========================
 
-print("🛡️🛡️🛡️ MAIN.PY v11.9.1 EXECUTION HEAT RESCUE VERIFIED RUNNING 🛡️🛡️🛡️", flush=True)
+print("🧬🧬🧬 MAIN.PY v12.0 RESEARCH PLATFORM RUNNING 🧬🧬🧬", flush=True)
 
 # =========================
 # v10.2.0 CHANGE SUMMARY
@@ -426,7 +426,11 @@ def parse_symbol_set_env(name, default):
 OKX_BLOCKED_SYMBOLS = parse_symbol_set_env("OKX_BLOCKED_SYMBOLS", "TAOUSDT")
 OKX_EST_FEE_RATE_ROUND_TRIP = float(os.environ.get("OKX_EST_FEE_RATE_ROUND_TRIP", "0.002") or 0.002)
 
-DATA_VERSION = "v11.9.1_EXECUTION_HEAT_RESCUE"
+DATA_VERSION = "v12.0_RESEARCH_PLATFORM"
+RESEARCH_PLATFORM_VERSION = "v12.0_DECISION_TRACE_V1"
+ENABLE_DECISION_TRACE_V12 = os.environ.get("ENABLE_DECISION_TRACE_V12", "true").lower() == "true"
+# If RUNTIME_DDL_ENABLED is false in production, create the table manually with the SQL file supplied.
+ENABLE_DECISION_TRACE_DDL = os.environ.get("ENABLE_DECISION_TRACE_DDL", "false").lower() == "true"
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -1492,6 +1496,134 @@ def safe_update_signal_telemetry(cur, signal_id, telemetry):
         SET {set_sql}
         WHERE id = %s
     """, values)
+
+
+# =========================
+# 🧬 v12.0 RESEARCH PLATFORM — DECISION TRACE
+# =========================
+
+def ensure_decision_trace_v12_table(cur):
+    """
+    v12 observability table. No trading logic depends on this table.
+    If production runtime DDL is disabled, create it manually with the supplied SQL.
+    """
+    if not (RUNTIME_DDL_ENABLED or ENABLE_DECISION_TRACE_DDL):
+        return
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS decision_trace_v12 (
+            id BIGSERIAL PRIMARY KEY,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            bot_version TEXT,
+            research_version TEXT,
+            data_version TEXT,
+            signal_id BIGINT,
+            signal_timestamp TIMESTAMPTZ,
+            symbol TEXT,
+            direction TEXT,
+            decision TEXT,
+            final_status TEXT,
+            final_reason TEXT,
+            entry_allowed BOOLEAN,
+            is_shadow BOOLEAN,
+            would_live BOOLEAN,
+            okx_attempted BOOLEAN DEFAULT FALSE,
+            okx_success BOOLEAN,
+            trade_id TEXT,
+            trace JSONB NOT NULL DEFAULT '[]'::jsonb,
+            genome JSONB NOT NULL DEFAULT '{}'::jsonb,
+            metrics JSONB NOT NULL DEFAULT '{}'::jsonb
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_decision_trace_v12_created_at ON decision_trace_v12(created_at DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_decision_trace_v12_signal_id ON decision_trace_v12(signal_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_decision_trace_v12_reason ON decision_trace_v12(final_reason)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_decision_trace_v12_symbol_created ON decision_trace_v12(symbol, created_at DESC)")
+
+
+def json_dumps_safe(value):
+    try:
+        return json.dumps(value, default=str)
+    except Exception:
+        return json.dumps({"serialization_error": str(value)[:500]}, default=str)
+
+
+def build_trading_genome_v12(symbol, decision, momentum, trend, entry_quality=None, leadership_context=None, extra=None):
+    ctx = leadership_context or {}
+    coin_form = ctx.get("coin_form_snapshot") or {}
+    coin_health = ctx.get("coin_health_snapshot") or {}
+    cqe_ctx = ctx.get("cqe_context") or {}
+    genome = {
+        "symbol": symbol,
+        "decision": decision or "NO_ENTRY",
+        "entry_quality": entry_quality,
+        "entry_archetype": ctx.get("entry_archetype") or ctx.get("current_archetype"),
+        "entry_tier": ctx.get("entry_tier"),
+        "entry_subtier": ctx.get("entry_subtier"),
+        "momentum": momentum,
+        "trend": trend,
+        "leadership_phase": ctx.get("leadership_phase"),
+        "lifecycle_phase": ctx.get("lifecycle_phase"),
+        "prior_lifecycle_phase": ctx.get("prior_lifecycle_phase"),
+        "leadership_transition": ctx.get("leadership_transition"),
+        "leadership_score": ctx.get("prior_avg_peak"),
+        "leadership_rank": ctx.get("leadership_rank"),
+        "leadership_delta_5m": ctx.get("leadership_delta_5m"),
+        "leadership_delta_15m": ctx.get("leadership_delta_15m"),
+        "leadership_delta_30m": ctx.get("leadership_delta_30m") or ctx.get("delta_30m"),
+        "leadership_delta_60m": ctx.get("leadership_delta_60m"),
+        "market_os_engine": ctx.get("market_os_engine"),
+        "market_lifecycle_state": ctx.get("market_lifecycle_state"),
+        "market_heat_regime": ctx.get("market_heat_regime"),
+        "market_heat_score": ctx.get("market_heat_score"),
+        "coin_health_mode": coin_health.get("coin_health_mode"),
+        "coin_health_reason": coin_health.get("coin_health_reason"),
+        "coin_form_mode": coin_form.get("coin_form_mode"),
+        "coin_form_score": coin_form.get("coin_form_score"),
+        "coin_form_reason": coin_form.get("coin_form_reason"),
+        "cqe_quality_score": ctx.get("cqe_quality_score"),
+        "cqe_momentum_accel_30m": cqe_ctx.get("cqe_momentum_accel_30m"),
+        "cqe_trend_accel_30m": cqe_ctx.get("cqe_trend_accel_30m"),
+        "cqe_positive_trend_ratio_30m": cqe_ctx.get("cqe_positive_trend_ratio_30m"),
+        "shadow_emergence_detected": ctx.get("shadow_emergence_detected"),
+        "shadow_emergence_reason": ctx.get("shadow_emergence_reason"),
+        "shadow_cqe_detected": ctx.get("shadow_cqe_detected"),
+        "shadow_cqe_reason": ctx.get("shadow_cqe_reason"),
+        "size_scaling_reason": ctx.get("size_scaling_reason"),
+        "v11_wakeup_approved": ctx.get("v11_wakeup_approved"),
+    }
+    if extra:
+        genome.update(extra)
+    return genome
+
+
+def write_decision_trace_v12(cur, *, signal_id, signal_timestamp, symbol, decision, final_status, final_reason,
+                             entry_allowed=False, is_shadow=None, would_live=False, okx_attempted=False,
+                             okx_success=None, trade_id=None, trace=None, genome=None, metrics=None):
+    if not ENABLE_DECISION_TRACE_V12:
+        return
+    try:
+        ensure_decision_trace_v12_table(cur)
+        cur.execute("""
+            INSERT INTO decision_trace_v12 (
+                bot_version, research_version, data_version, signal_id, signal_timestamp,
+                symbol, direction, decision, final_status, final_reason,
+                entry_allowed, is_shadow, would_live, okx_attempted, okx_success, trade_id,
+                trace, genome, metrics
+            ) VALUES (
+                %s,%s,%s,%s,%s,
+                %s,%s,%s,%s,%s,
+                %s,%s,%s,%s,%s,%s,
+                %s::jsonb,%s::jsonb,%s::jsonb
+            )
+        """, (
+            DATA_VERSION, RESEARCH_PLATFORM_VERSION, DATA_VERSION, signal_id, signal_timestamp,
+            symbol, decision, decision or "NO_ENTRY", final_status, final_reason,
+            bool(entry_allowed), is_shadow, bool(would_live), bool(okx_attempted), okx_success, str(trade_id) if trade_id else None,
+            json_dumps_safe(trace or []), json_dumps_safe(genome or {}), json_dumps_safe(metrics or {}),
+        ))
+    except Exception as e:
+        print(f"⚠️ v12 decision trace write skipped | {symbol} | {e}", flush=True)
+        safe_telemetry_rollback(cur)
 
 
 # =========================
@@ -4078,6 +4210,7 @@ def ensure_schema_once(cur):
     ensure_market_heat_columns(cur)
     ensure_coin_scores_v84_columns(cur)
     ensure_archetype_state_columns(cur)
+    ensure_decision_trace_v12_table(cur)
     if ENABLE_BPT_CQE_LIFECYCLE_SHADOW:
         ensure_bpt_cqe_lifecycle_columns(cur)
     SCHEMA_CHECKS_DONE = True
@@ -9558,6 +9691,54 @@ def score_signal_leadership():
 
         snapshot_count = write_leadership_state_snapshots(cur)
 
+        # v12.0 Research Platform: persist one full decision trace per webhook.
+        try:
+            final_status = "no_entry"
+            if decision == "LONG":
+                final_status = "entry_allowed" if entry_allowed else "blocked"
+            elif decision == "SHORT":
+                final_status = "blocked_short"
+            if okx_attempted and okx_success is True:
+                final_status = "okx_live_entry_confirmed"
+            elif okx_attempted and okx_success is False:
+                final_status = "okx_entry_failed_or_not_confirmed"
+
+            trace_genome = build_trading_genome_v12(
+                symbol, decision, momentum, trend, entry_quality, leadership_context,
+                extra={
+                    "block_reason": block_reason,
+                    "final_status": final_status,
+                    "trace_summary": trace_summary(18),
+                }
+            )
+            write_decision_trace_v12(
+                cur,
+                signal_id=signal_id,
+                signal_timestamp=signal_time,
+                symbol=symbol,
+                decision=decision,
+                final_status=final_status,
+                final_reason=block_reason or final_status,
+                entry_allowed=entry_allowed,
+                is_shadow=False if (okx_attempted and okx_success) else None,
+                would_live=bool(entry_allowed),
+                okx_attempted=okx_attempted,
+                okx_success=okx_success,
+                trade_id=trade_id,
+                trace=decision_trace,
+                genome=trace_genome,
+                metrics={
+                    "price": price,
+                    "momentum": momentum,
+                    "trend": trend,
+                    "entry_quality": entry_quality,
+                    "trace_steps": len(decision_trace),
+                }
+            )
+        except Exception as e:
+            print(f"⚠️ final v12 decision trace skipped | {symbol} | {e}", flush=True)
+            safe_telemetry_rollback(cur)
+
         conn.commit()
         cur.close()
         conn.close()
@@ -9691,44 +9872,11 @@ def webhook():
 
         signal_id, signal_time = cur.fetchone()
 
-        apply_market_heat_to_signal(cur, signal_id)
-        if ENABLE_COIN_SCORE_UPSERT_ON_SIGNAL:
-            upsert_initial_coin_score(cur, symbol)
-            refresh_coin_learning_from_history(cur, symbol, allow_mode_change=True)
-
-        # v9.8: keep untradeable leaders (e.g. TAO on this OKX account) in
-        # signals/leadership data, but do not create probes, lifecycle rows, or
-        # order attempts that generate noise and wasted workload.
-        if is_okx_blocked_symbol(symbol):
-            try:
-                cur.execute("""
-                    UPDATE signals_raw
-                    SET entry_allowed = FALSE,
-                        block_reason = %s
-                    WHERE id = %s
-                """, ("okx_symbol_blocked_not_tradable_on_account", signal_id))
-            except Exception as e:
-                print(f"⚠️ blocked symbol signal annotation failed | {symbol} | {e}", flush=True)
-                safe_telemetry_rollback(cur)
-            conn.commit()
-            print(f"🚫 SYMBOL BLOCKED FROM EXECUTION | {symbol} | OKX_BLOCKED_SYMBOLS", flush=True)
-            return jsonify({
-                "status": "blocked_symbol",
-                "symbol": symbol,
-                "reason": "okx_symbol_blocked_not_tradable_on_account",
-                "version": DATA_VERSION,
-            }), 200
-
-        # ================= ENTRY ENGINE =================
-        entry_allowed = False
-        leadership_context = None
-        entry_quality = None
-        block_reason = None
-
-        # v11.4 DIAGNOSTIC TRACE:
-        # This build is designed to make every signal explain itself.
-        # No more "reason=None" without a clear stage/path.
+        # v12.0 Decision Trace: initialise before any early return so blocked symbols/no-entry alerts are visible.
         decision_trace = []
+        trade_id = None
+        okx_attempted = False
+        okx_success = None
 
         def trace_stage(stage, passed=None, reason=None, details=None):
             try:
@@ -9766,6 +9914,58 @@ def webhook():
             "received",
             f"decision={decision or 'NO_ENTRY'} price={price} mom={round(momentum,3)} trend={round(trend,3)}"
         )
+
+        apply_market_heat_to_signal(cur, signal_id)
+        if ENABLE_COIN_SCORE_UPSERT_ON_SIGNAL:
+            upsert_initial_coin_score(cur, symbol)
+            refresh_coin_learning_from_history(cur, symbol, allow_mode_change=True)
+
+        # v9.8: keep untradeable leaders (e.g. TAO on this OKX account) in
+        # signals/leadership data, but do not create probes, lifecycle rows, or
+        # order attempts that generate noise and wasted workload.
+        if is_okx_blocked_symbol(symbol):
+            try:
+                cur.execute("""
+                    UPDATE signals_raw
+                    SET entry_allowed = FALSE,
+                        block_reason = %s
+                    WHERE id = %s
+                """, ("okx_symbol_blocked_not_tradable_on_account", signal_id))
+            except Exception as e:
+                print(f"⚠️ blocked symbol signal annotation failed | {symbol} | {e}", flush=True)
+                safe_telemetry_rollback(cur)
+            write_decision_trace_v12(
+                cur,
+                signal_id=signal_id,
+                signal_timestamp=signal_time,
+                symbol=symbol,
+                decision=decision,
+                final_status="blocked",
+                final_reason="okx_symbol_blocked_not_tradable_on_account",
+                entry_allowed=False,
+                is_shadow=None,
+                would_live=False,
+                okx_attempted=False,
+                okx_success=None,
+                trade_id=None,
+                trace=decision_trace,
+                genome=build_trading_genome_v12(symbol, decision, momentum, trend),
+                metrics={"price": price, "blocked_symbol": True}
+            )
+            conn.commit()
+            print(f"🚫 SYMBOL BLOCKED FROM EXECUTION | {symbol} | OKX_BLOCKED_SYMBOLS", flush=True)
+            return jsonify({
+                "status": "blocked_symbol",
+                "symbol": symbol,
+                "reason": "okx_symbol_blocked_not_tradable_on_account",
+                "version": DATA_VERSION,
+            }), 200
+
+        # ================= ENTRY ENGINE =================
+        entry_allowed = False
+        leadership_context = None
+        entry_quality = None
+        block_reason = None
 
         if decision == "LONG":
             entry_allowed, leadership_context, block_reason = passes_leadership_engine(
@@ -10498,6 +10698,7 @@ def webhook():
                         flush=True
                     )
 
+                    okx_attempted = True
                     trace_stage("okx_order_attempt", True, "calling_okx_market_order", f"trade_id={trade_id}")
                     okx_entry_result = okx_place_market_order(
                         cur=cur,
@@ -10511,6 +10712,7 @@ def webhook():
                     )
 
                     okx_live_confirmed = okx_entry_result_is_live_confirmed(okx_entry_result)
+                    okx_success = bool(okx_live_confirmed)
 
                     if not okx_live_confirmed:
                         fail_reason = okx_entry_result.get("reason") or okx_entry_result.get("error") or "okx_entry_not_live_confirmed"
