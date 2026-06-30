@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v12.0.1
+# VERSION: v12.0.3
 # TITLE: RESEARCH PLATFORM + DECISION TRACE
 # =========================
 
-print("🧬🧬🧬 MAIN.PY v12.0.1 RESEARCH PLATFORM RUNNING 🧬🧬🧬", flush=True)
+print("🧬🧬🧬 MAIN.PY v12.0.3 RESEARCH PLATFORM RUNNING 🧬🧬🧬", flush=True)
 
 # =========================
 # v10.2.0 CHANGE SUMMARY
@@ -426,11 +426,13 @@ def parse_symbol_set_env(name, default):
 OKX_BLOCKED_SYMBOLS = parse_symbol_set_env("OKX_BLOCKED_SYMBOLS", "TAOUSDT")
 OKX_EST_FEE_RATE_ROUND_TRIP = float(os.environ.get("OKX_EST_FEE_RATE_ROUND_TRIP", "0.002") or 0.002)
 
-DATA_VERSION = "v12.0.2_RESEARCH_PLATFORM"
-RESEARCH_PLATFORM_VERSION = "v12.0.2_DECISION_TRACE_V2"
+DATA_VERSION = "v12.0.3_RESEARCH_PLATFORM"
+RESEARCH_PLATFORM_VERSION = "v12.0.3_OBSERVABILITY_COMPLETE"
 ENABLE_DECISION_TRACE_V12 = os.environ.get("ENABLE_DECISION_TRACE_V12", "true").lower() == "true"
 # If RUNTIME_DDL_ENABLED is false in production, create the table manually with the SQL file supplied.
 ENABLE_DECISION_TRACE_DDL = os.environ.get("ENABLE_DECISION_TRACE_DDL", "false").lower() == "true"
+
+print("✅ v12.0.3 OBSERVABILITY COMPLETE | decision_trace_v12 enabled=" + str(ENABLE_DECISION_TRACE_V12), flush=True)
 
 # =========================
 # 🦄 v6.7 TREND PERSISTENCE + CLEAN NAMING
@@ -9723,53 +9725,12 @@ def score_signal_leadership():
 
         snapshot_count = write_leadership_state_snapshots(cur)
 
-        # v12.0 Research Platform: persist one full decision trace per webhook.
-        try:
-            final_status = "no_entry"
-            if decision == "LONG":
-                final_status = "entry_allowed" if entry_allowed else "blocked"
-            elif decision == "SHORT":
-                final_status = "blocked_short"
-            if okx_attempted and okx_success is True:
-                final_status = "okx_live_entry_confirmed"
-            elif okx_attempted and okx_success is False:
-                final_status = "okx_entry_failed_or_not_confirmed"
-
-            trace_genome = build_trading_genome_v12(
-                symbol, decision, momentum, trend, entry_quality, leadership_context,
-                extra={
-                    "block_reason": block_reason,
-                    "final_status": final_status,
-                    "trace_summary": trace_summary(18),
-                }
-            )
-            write_decision_trace_v12(
-                cur,
-                signal_id=signal_id,
-                signal_timestamp=signal_time,
-                symbol=symbol,
-                decision=decision,
-                final_status=final_status,
-                final_reason=block_reason or final_status,
-                entry_allowed=entry_allowed,
-                is_shadow=False if (okx_attempted and okx_success) else None,
-                would_live=bool(entry_allowed),
-                okx_attempted=okx_attempted,
-                okx_success=okx_success,
-                trade_id=trade_id,
-                trace=decision_trace,
-                genome=trace_genome,
-                metrics={
-                    "price": price,
-                    "momentum": momentum,
-                    "trend": trend,
-                    "entry_quality": entry_quality,
-                    "trace_steps": len(decision_trace),
-                }
-            )
-        except Exception as e:
-            print(f"⚠️ final v12 decision trace skipped | {symbol} | {e}", flush=True)
-            safe_telemetry_rollback(cur)
+        # v12.0.3: Do not write webhook decision traces from the leadership scorer.
+        # This cron route scores historical signals and intentionally has no
+        # live webhook variables such as decision, entry_allowed or decision_trace.
+        # Previous v12.0.2 builds attempted a final trace here and caused
+        # "name 'decision' is not defined" warnings. Webhook traces are written
+        # only inside /webhook where those variables are in scope.
 
         conn.commit()
         cur.close()
