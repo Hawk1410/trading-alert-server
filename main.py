@@ -426,8 +426,8 @@ def parse_symbol_set_env(name, default):
 OKX_BLOCKED_SYMBOLS = parse_symbol_set_env("OKX_BLOCKED_SYMBOLS", "TAOUSDT")
 OKX_EST_FEE_RATE_ROUND_TRIP = float(os.environ.get("OKX_EST_FEE_RATE_ROUND_TRIP", "0.002") or 0.002)
 
-DATA_VERSION = "v12.0.1_RESEARCH_PLATFORM"
-RESEARCH_PLATFORM_VERSION = "v12.0.1_DECISION_TRACE_V1"
+DATA_VERSION = "v12.0.2_RESEARCH_PLATFORM"
+RESEARCH_PLATFORM_VERSION = "v12.0.2_DECISION_TRACE_V2"
 ENABLE_DECISION_TRACE_V12 = os.environ.get("ENABLE_DECISION_TRACE_V12", "true").lower() == "true"
 # If RUNTIME_DDL_ENABLED is false in production, create the table manually with the SQL file supplied.
 ENABLE_DECISION_TRACE_DDL = os.environ.get("ENABLE_DECISION_TRACE_DDL", "false").lower() == "true"
@@ -1605,11 +1605,21 @@ def build_trading_genome_v12(symbol, decision, momentum, trend, entry_quality=No
 def write_decision_trace_v12(cur, *, signal_id, signal_timestamp, symbol, decision, final_status, final_reason,
                              entry_allowed=False, is_shadow=None, would_live=False, okx_attempted=False,
                              okx_success=None, trade_id=None, trace=None, genome=None, metrics=None):
+    """
+    v12.0.2: research trace writer is deliberately isolated from the trading
+    transaction. A trace failure must never roll back or interfere with live
+    signal/trade processing.
+    """
     if not ENABLE_DECISION_TRACE_V12:
         return
+
+    trace_conn = None
+    trace_cur = None
     try:
-        ensure_decision_trace_v12_table(cur)
-        cur.execute("""
+        trace_conn = get_db()
+        trace_cur = trace_conn.cursor()
+        ensure_decision_trace_v12_table(trace_cur)
+        trace_cur.execute("""
             INSERT INTO decision_trace_v12 (
                 bot_version, research_version, data_version, signal_id, signal_timestamp,
                 symbol, direction, decision, final_status, final_reason,
@@ -1627,9 +1637,25 @@ def write_decision_trace_v12(cur, *, signal_id, signal_timestamp, symbol, decisi
             bool(entry_allowed), is_shadow, bool(would_live), bool(okx_attempted), okx_success, str(trade_id) if trade_id else None,
             json_dumps_safe(trace or []), json_dumps_safe(genome or {}), json_dumps_safe(metrics or {}),
         ))
+        trace_conn.commit()
     except Exception as e:
+        try:
+            if trace_conn:
+                trace_conn.rollback()
+        except Exception:
+            pass
         print(f"⚠️ v12 decision trace write skipped | {symbol} | {e}", flush=True)
-        safe_telemetry_rollback(cur)
+    finally:
+        try:
+            if trace_cur:
+                trace_cur.close()
+        except Exception:
+            pass
+        try:
+            if trace_conn:
+                trace_conn.close()
+        except Exception:
+            pass
 
 
 # =========================
