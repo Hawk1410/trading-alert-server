@@ -1,7 +1,7 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v12.0.3
+# VERSION: v12.0.4
 # TITLE: RESEARCH PLATFORM + DECISION TRACE
 # =========================
 
@@ -426,8 +426,8 @@ def parse_symbol_set_env(name, default):
 OKX_BLOCKED_SYMBOLS = parse_symbol_set_env("OKX_BLOCKED_SYMBOLS", "TAOUSDT")
 OKX_EST_FEE_RATE_ROUND_TRIP = float(os.environ.get("OKX_EST_FEE_RATE_ROUND_TRIP", "0.002") or 0.002)
 
-DATA_VERSION = "v12.0.3_RESEARCH_PLATFORM"
-RESEARCH_PLATFORM_VERSION = "v12.0.3_OBSERVABILITY_COMPLETE"
+DATA_VERSION = "v12.0.4_FLIGHT_RECORDER"
+RESEARCH_PLATFORM_VERSION = "v12.0.4_FLIGHT_RECORDER"
 ENABLE_DECISION_TRACE_V12 = os.environ.get("ENABLE_DECISION_TRACE_V12", "true").lower() == "true"
 # If RUNTIME_DDL_ENABLED is false in production, create the table manually with the SQL file supplied.
 ENABLE_DECISION_TRACE_DDL = os.environ.get("ENABLE_DECISION_TRACE_DDL", "false").lower() == "true"
@@ -10771,6 +10771,80 @@ def webhook():
                 f"mom={round(momentum,3)} trend={round(trend,3)} | reason={block_reason} | trace={trace_summary()}",
                 flush=True
             )
+
+        # ================= v12.0.4 FLIGHT RECORDER FINAL TRACE =================
+        # This is intentionally placed after all entry gates / live execution attempts,
+        # and before update/exit processors. One webhook signal gets one terminal
+        # decision trace with the full stage list accumulated above.
+        try:
+            if okx_success is True:
+                final_status_v12 = "opened"
+                final_reason_v12 = "trade_opened"
+            elif okx_attempted:
+                final_status_v12 = "blocked"
+                final_reason_v12 = block_reason or "okx_entry_not_confirmed"
+            else:
+                final_status_v12 = "blocked"
+                final_reason_v12 = block_reason or (
+                    "no_entry_decision_update_only" if decision is None else "blocked_unknown"
+                )
+
+            trace_stage(
+                "terminal_decision",
+                bool(okx_success is True),
+                final_reason_v12,
+                f"status={final_status_v12} entry_allowed={entry_allowed} okx_attempted={okx_attempted}"
+            )
+
+            write_decision_trace_v12(
+                cur,
+                signal_id=signal_id,
+                signal_timestamp=signal_time,
+                symbol=symbol,
+                decision=decision,
+                final_status=final_status_v12,
+                final_reason=final_reason_v12,
+                entry_allowed=bool(entry_allowed),
+                is_shadow=False if okx_success is True else None,
+                would_live=bool(entry_allowed or okx_attempted),
+                okx_attempted=bool(okx_attempted),
+                okx_success=okx_success,
+                trade_id=trade_id,
+                trace=decision_trace,
+                genome=build_trading_genome_v12(
+                    symbol,
+                    decision,
+                    momentum,
+                    trend,
+                    entry_quality=entry_quality,
+                    leadership_context=leadership_context,
+                    extra={
+                        "price": price,
+                        "block_reason": block_reason,
+                        "final_status": final_status_v12,
+                        "final_reason": final_reason_v12,
+                        "okx_attempted": bool(okx_attempted),
+                        "okx_success": okx_success,
+                    }
+                ),
+                metrics={
+                    "price": price,
+                    "momentum": momentum,
+                    "trend": trend,
+                    "entry_allowed": bool(entry_allowed),
+                    "okx_attempted": bool(okx_attempted),
+                    "okx_success": okx_success,
+                    "trace_stage_count": len(decision_trace),
+                }
+            )
+            print(
+                f"🛫 v12.0.4 FLIGHT RECORDER | {symbol} | "
+                f"decision={decision or 'NO_ENTRY'} | status={final_status_v12} | "
+                f"reason={final_reason_v12} | stages={len(decision_trace)}",
+                flush=True,
+            )
+        except Exception as e:
+            print(f"⚠️ v12.0.4 final flight-recorder trace skipped | {symbol} | {e}", flush=True)
 
         # ================= SHADOW CQE EXIT / UPDATE ENGINE =================
         try:
