@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v12.0
+# VERSION: v12.0.1
 # TITLE: RESEARCH PLATFORM + DECISION TRACE
 # =========================
 
-print("🧬🧬🧬 MAIN.PY v12.0 RESEARCH PLATFORM RUNNING 🧬🧬🧬", flush=True)
+print("🧬🧬🧬 MAIN.PY v12.0.1 RESEARCH PLATFORM RUNNING 🧬🧬🧬", flush=True)
 
 # =========================
 # v10.2.0 CHANGE SUMMARY
@@ -426,8 +426,8 @@ def parse_symbol_set_env(name, default):
 OKX_BLOCKED_SYMBOLS = parse_symbol_set_env("OKX_BLOCKED_SYMBOLS", "TAOUSDT")
 OKX_EST_FEE_RATE_ROUND_TRIP = float(os.environ.get("OKX_EST_FEE_RATE_ROUND_TRIP", "0.002") or 0.002)
 
-DATA_VERSION = "v12.0_RESEARCH_PLATFORM"
-RESEARCH_PLATFORM_VERSION = "v12.0_DECISION_TRACE_V1"
+DATA_VERSION = "v12.0.1_RESEARCH_PLATFORM"
+RESEARCH_PLATFORM_VERSION = "v12.0.1_DECISION_TRACE_V1"
 ENABLE_DECISION_TRACE_V12 = os.environ.get("ENABLE_DECISION_TRACE_V12", "true").lower() == "true"
 # If RUNTIME_DDL_ENABLED is false in production, create the table manually with the SQL file supplied.
 ENABLE_DECISION_TRACE_DDL = os.environ.get("ENABLE_DECISION_TRACE_DDL", "false").lower() == "true"
@@ -726,6 +726,8 @@ TOP_FORM_SHADOW_RANK_CUTOFF = int(os.environ.get("TOP_FORM_SHADOW_RANK_CUTOFF", 
 TOP_FORM_RANK_REPORT_LIMIT = int(os.environ.get("TOP_FORM_RANK_REPORT_LIMIT", "10") or 10)
 TOP_FORM_SELECTOR_ENGINE = "TOP3_FORM_SHADOW_SELECTOR"
 TOP_FORM_SHADOW_REASON = "TOP3_FORM_GHOST_PROBE_NO_CAPITAL"
+# v12.0.1: missing in v12.0; used by BPT/CQE shadow lifecycle upgrade logic.
+SHADOW_CQE_REASON = "SHADOW_CQE_GHOST_PROBE_NO_CAPITAL"
 # Keep this false until real probe data confirms the live path.
 ENABLE_TOP3_FORM_LIVE_UPGRADES = env_bool("ENABLE_TOP3_FORM_LIVE_UPGRADES", False)
 # Optional safety rail. False by default because research showed momentum/trend add little inside TOP3 Form.
@@ -1534,6 +1536,10 @@ def ensure_decision_trace_v12_table(cur):
             metrics JSONB NOT NULL DEFAULT '{}'::jsonb
         )
     """)
+    # v12.0.1: harden against the first manual schema that omitted data_version/metrics.
+    # These ALTERs are safe no-ops when columns already exist.
+    cur.execute("ALTER TABLE decision_trace_v12 ADD COLUMN IF NOT EXISTS data_version TEXT")
+    cur.execute("ALTER TABLE decision_trace_v12 ADD COLUMN IF NOT EXISTS metrics JSONB NOT NULL DEFAULT '{}'::jsonb")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_decision_trace_v12_created_at ON decision_trace_v12(created_at DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_decision_trace_v12_signal_id ON decision_trace_v12(signal_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_decision_trace_v12_reason ON decision_trace_v12(final_reason)")
