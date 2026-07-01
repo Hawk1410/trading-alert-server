@@ -1,11 +1,11 @@
 # =========================
 # 🤖 BOT VERSION
 # =========================
-# VERSION: v12.0.4
-# TITLE: RESEARCH PLATFORM + DECISION TRACE
+# VERSION: v12.0.5
+# TITLE: EXECUTION STABILITY PATCH
 # =========================
 
-print("🧬🧬🧬 MAIN.PY v12.0.3 RESEARCH PLATFORM RUNNING 🧬🧬🧬", flush=True)
+print("🛡️🛡️🛡️ MAIN.PY v12.0.5 EXECUTION STABILITY PATCH RUNNING 🛡️🛡️🛡️", flush=True)
 
 # =========================
 # v10.2.0 CHANGE SUMMARY
@@ -1482,6 +1482,92 @@ def safe_update_trade_telemetry(cur, tid, telemetry):
         SET {set_sql}
         WHERE id = %s
     """, values)
+
+
+
+def find_existing_trade_for_signal(cur, signal_id, symbol):
+    """
+    v12.0.5 execution-stability guard.
+    One TradingView signal for one symbol may create at most one trade row.
+    This is intentionally strategy-neutral: it only prevents duplicate execution
+    pipeline inserts from multiple subsystems processing the same signal_id.
+    """
+    if signal_id is None or symbol is None:
+        return None
+    try:
+        cur.execute("""
+            SELECT id, COALESCE(is_shadow, TRUE), status, entry_quality, trade_size_gbp
+            FROM bot_trades_v4
+            WHERE signal_id = %s
+              AND symbol = %s
+            ORDER BY opened_at ASC NULLS LAST, id ASC
+            LIMIT 1
+        """, (signal_id, symbol))
+        row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            "id": row[0],
+            "is_shadow": bool(row[1]),
+            "status": row[2],
+            "entry_quality": row[3],
+            "trade_size_gbp": row[4],
+        }
+    except Exception as e:
+        # Fail open for DB-read problems so strategy availability is not changed by
+        # a telemetry/inspection error. OKX shadow hard-stop below still protects capital.
+        print(f"⚠️ duplicate signal guard read failed | {symbol} | signal_id={signal_id} | {e}", flush=True)
+        safe_telemetry_rollback(cur)
+        return None
+
+
+def duplicate_signal_trade_blocked(cur, symbol, signal_id, path_name):
+    existing = find_existing_trade_for_signal(cur, signal_id, symbol)
+    if not existing:
+        return False
+    print(
+        f"🛡️ DUPLICATE SIGNAL TRADE BLOCKED | path={path_name} | "
+        f"{symbol} | signal_id={signal_id} | existing_id={existing.get('id')} | "
+        f"existing_shadow={existing.get('is_shadow')} | existing_quality={existing.get('entry_quality')}",
+        flush=True,
+    )
+    return True
+
+
+def okx_trade_row_allows_live_entry(cur, trade_id, symbol, action, allow_provisional_shadow_entry=False):
+    """
+    v12.0.5 hard capital guard.
+    Shadow/provisional/no-row trades must never reach a live OKX ENTRY order.
+    Exits continue to be controlled by has_successful_okx_live_entry() at callers.
+    """
+    if action != "entry":
+        return True, "not_entry"
+    if trade_id is None:
+        return False, "missing_trade_id"
+    try:
+        cur.execute("""
+            SELECT COALESCE(is_shadow, TRUE), status, trade_size_gbp, signal_id
+            FROM bot_trades_v4
+            WHERE id = %s
+            LIMIT 1
+        """, (str(trade_id),))
+        row = cur.fetchone()
+        if not row:
+            return False, "trade_row_not_found"
+        is_shadow, status, trade_size_gbp, signal_id = row
+        if bool(is_shadow) and not bool(allow_provisional_shadow_entry):
+            return False, f"shadow_trade_blocked_before_okx:status={status}:size_gbp={trade_size_gbp}:signal_id={signal_id}"
+        if bool(is_shadow) and bool(allow_provisional_shadow_entry):
+            # Some intentional live-entry paths create a provisional is_shadow=TRUE, £0 row
+            # first, then only flip it live after OKX confirms. Allow only those explicit
+            # callers through; accidental shadow execution remains blocked by default.
+            return True, "explicit_provisional_live_entry_allowed"
+        return True, "live_trade_row_confirmed"
+    except Exception as e:
+        # Fail closed. A missed live entry is safer than a shadow reaching OKX.
+        print(f"🚨 OKX ENTRY GUARD FAILED CLOSED | {symbol} | trade_id={trade_id} | {e}", flush=True)
+        safe_telemetry_rollback(cur)
+        return False, f"okx_entry_guard_error:{e}"
 
 def safe_update_signal_telemetry(cur, signal_id, telemetry):
     allowed = {}
@@ -4621,8 +4707,30 @@ def calculate_exit_base_size(entry_price, trade_size_quote):
         return 0
     return round(float(trade_size_quote) / float(entry_price), 8)
 
-def okx_place_market_order(cur, trade_id, symbol, direction, action, price=None, entry_price=None, trade_size_quote=None):
+def okx_place_market_order(cur, trade_id, symbol, direction, action, price=None, entry_price=None, trade_size_quote=None, allow_provisional_shadow_entry=False):
     okx_inst_id = okx_symbol_to_inst_id(symbol)
+
+    okx_allowed, okx_guard_reason = okx_trade_row_allows_live_entry(cur, trade_id, symbol, action, allow_provisional_shadow_entry)
+    if not okx_allowed:
+        request_payload = {
+            "blocked": True,
+            "reason": okx_guard_reason,
+            "symbol": symbol,
+            "trade_id": str(trade_id) if trade_id is not None else None,
+            "direction": direction,
+            "action": action,
+        }
+        log_okx_order(
+            cur, trade_id, symbol, okx_inst_id, action, None, direction,
+            True, request_payload, None, False, okx_guard_reason
+        )
+        print(f"🛡️ OKX ENTRY BLOCKED BY SHADOW/ROW GUARD | {symbol} | id={trade_id} | {okx_guard_reason}", flush=True)
+        return {
+            "success": False,
+            "dry_run": True,
+            "blocked": True,
+            "reason": okx_guard_reason,
+        }
 
     if direction != "LONG":
         request_payload = {
@@ -5275,6 +5383,9 @@ def get_open_same_symbol_shadow_cqe_count(cur, symbol):
 
 
 def open_shadow_cqe_trade(cur, symbol, price, momentum, trend, signal_id, signal_time, cqe_context, leadership_context=None):
+    if duplicate_signal_trade_blocked(cur, symbol, signal_id, "open_shadow_cqe_trade"):
+        return None
+
     cur.execute("""
         INSERT INTO bot_trades_v4 (
             symbol,
@@ -5965,6 +6076,9 @@ def passes_bpt_cqe_probe_gate(cur, symbol, momentum, trend, leadership_context):
 
 
 def open_bpt_cqe_probe_trade(cur, symbol, price, momentum, trend, signal_id, signal_time, leadership_context=None):
+    if duplicate_signal_trade_blocked(cur, symbol, signal_id, "open_bpt_cqe_probe_trade"):
+        return None
+
     lifecycle_row, q = classify_bpt_lifecycle_row(momentum, trend)
     params = get_bpt_row_params(lifecycle_row)
 
@@ -6073,6 +6187,7 @@ def open_bpt_cqe_probe_trade(cur, symbol, price, momentum, trend, signal_id, sig
             price=price,
             entry_price=price,
             trade_size_quote=gbp_to_usdt_quote(BPT_CQE_PROBE_SIZE_GBP),
+            allow_provisional_shadow_entry=True,
         )
         if okx_entry_result_is_live_confirmed(okx_probe_result):
             requested_probe_quote = gbp_to_usdt_quote(BPT_CQE_PROBE_SIZE_GBP)
@@ -6764,6 +6879,7 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
             price=current_price or entry_price,
             entry_price=current_price or entry_price,
             trade_size_quote=gbp_to_usdt_quote(upgrade_size),
+            allow_provisional_shadow_entry=True,
         )
 
         live_scalein_executed = bool(
@@ -7349,6 +7465,9 @@ def passes_persistence_hunter_gate(cur, symbol, momentum, trend, signal_time):
 
 
 def open_persistence_hunter_trade(cur, symbol, price, momentum, trend, signal_id, signal_time, reason, ctx):
+    if duplicate_signal_trade_blocked(cur, symbol, signal_id, "open_persistence_hunter_trade"):
+        return None
+
     cur.execute("""
         INSERT INTO bot_trades_v4 (
             symbol,
@@ -7434,7 +7553,7 @@ def open_persistence_hunter_trade(cur, symbol, price, momentum, trend, signal_id
     ph_live_executed = False
     ph_actual_gbp = 0.0
     if ph_live_requested:
-        ph_order = okx_place_market_order(cur, tid, symbol, "LONG", "entry", price=price, entry_price=price, trade_size_quote=gbp_to_usdt_quote(ph_live_size_gbp))
+        ph_order = okx_place_market_order(cur, tid, symbol, "LONG", "entry", price=price, entry_price=price, trade_size_quote=gbp_to_usdt_quote(ph_live_size_gbp), allow_provisional_shadow_entry=True)
         ph_live_executed = okx_entry_result_is_live_confirmed(ph_order)
         if ph_live_executed:
             actual_quote = float(ph_order.get("actual_quote_size") or gbp_to_usdt_quote(ph_live_size_gbp) or 0)
@@ -9238,6 +9357,9 @@ def open_coin_health_shadow_trade(cur, symbol, direction, price, momentum, trend
 
 def open_trade(cur, symbol, direction, price, momentum, trend, quality,
                signal_id, signal_time, leadership_context):
+    if duplicate_signal_trade_blocked(cur, symbol, signal_id, "open_trade"):
+        return None
+
     entry_snapshot = build_entry_leadership_snapshot(quality, leadership_context)
 
     cur.execute("""
@@ -9348,6 +9470,9 @@ def open_shadow_market_os_trade(cur, symbol, direction, price, momentum, trend, 
                                 signal_id, signal_time, leadership_context, shadow_reason,
                                 model_size_gbp=10.0):
     """v6.9.2: paper/shadow version of live leadership/ROT entries."""
+    if duplicate_signal_trade_blocked(cur, symbol, signal_id, "open_shadow_market_os_trade"):
+        return None
+
     entry_snapshot = build_entry_leadership_snapshot(quality, leadership_context or {})
 
     cur.execute("""
@@ -10701,7 +10826,8 @@ def webhook():
                         action="entry",
                         price=price,
                         entry_price=price,
-                        trade_size_quote=entry_quote_size
+                        trade_size_quote=entry_quote_size,
+                        allow_provisional_shadow_entry=True
                     )
 
                     okx_live_confirmed = okx_entry_result_is_live_confirmed(okx_entry_result)
