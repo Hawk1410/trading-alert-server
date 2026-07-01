@@ -1465,7 +1465,75 @@ def column_exists(cur, table_name, column_name):
     COLUMN_EXISTS_CACHE[key] = exists
     return exists
 
+def trade_coin_selection_telemetry_from_db(cur, tid):
+    """v12.0.7: hard fallback for Phase 1 Telemetry Contract.
+
+    Some legacy trade/probe/shadow insert paths still arrive here without the
+    enriched leadership_context. Since coin_scores is the canonical current coin
+    memory, recover the snapshot directly from DB using the trade row symbol.
+    This prevents Coin Health/Form disappearing from bot_trades_v4 because of
+    context call-order issues.
+    """
+    try:
+        cur.execute("SELECT symbol FROM bot_trades_v4 WHERE id = %s", (tid,))
+        row = cur.fetchone()
+        if not row or not row[0]:
+            return {}
+        symbol = row[0]
+        cur.execute("""
+            SELECT
+                coin_health_mode,
+                coin_form_score, coin_form_mode,
+                form_peak_3h, form_peak_6h, form_peak_12h,
+                form_signals_3h, form_signals_6h, form_signals_12h,
+                form_updated_at
+            FROM coin_scores
+            WHERE symbol = %s
+            LIMIT 1
+        """, (symbol,))
+        cs = cur.fetchone()
+        if not cs:
+            return {
+                "coin_health_mode": "UNKNOWN",
+                "coin_form_mode": "UNKNOWN",
+                "coin_form_reason": "coin_scores_missing",
+            }
+        return {
+            "coin_health_mode": cs[0] or "UNKNOWN",
+            "coin_form_score": cs[1],
+            "coin_form_mode": cs[2] or "UNKNOWN",
+            "coin_form_reason": "coin_scores_fallback_v12_0_7",
+            "form_peak_3h": cs[3],
+            "form_peak_6h": cs[4],
+            "form_peak_12h": cs[5],
+            "form_signals_3h": cs[6],
+            "form_signals_6h": cs[7],
+            "form_signals_12h": cs[8],
+            "form_updated_at": cs[9],
+        }
+    except Exception as e:
+        print(f"⚠️ v12.0.7 coin selection DB fallback failed | trade={tid} | {e}", flush=True)
+        safe_telemetry_rollback(cur)
+        return {}
+
+
 def safe_update_trade_telemetry(cur, tid, telemetry):
+    telemetry = dict(telemetry or {})
+
+    # v12.0.7: always backfill missing Coin Health/Form from coin_scores before
+    # updating bot_trades_v4. This makes all writer paths satisfy the Telemetry
+    # Contract even if they failed to pass an enriched context.
+    needs_coin_backfill = (
+        not telemetry.get("coin_health_mode")
+        or not telemetry.get("coin_form_mode")
+        or telemetry.get("coin_form_score") is None
+    )
+    if needs_coin_backfill:
+        fallback = trade_coin_selection_telemetry_from_db(cur, tid)
+        for k, v in fallback.items():
+            if telemetry.get(k) in (None, ""):
+                telemetry[k] = v
+
     allowed = {}
     for col, val in telemetry.items():
         if column_exists(cur, "bot_trades_v4", col):
@@ -9268,7 +9336,7 @@ def coin_selection_trade_telemetry(ctx):
 
 
 def ensure_trade_selection_context(cur, symbol, ctx=None, path_name="trade_path"):
-    """v12.0.6: enforce Phase 1 Telemetry Contract before bot_trades_v4 inserts.
+    """v12.0.7: enforce Phase 1 Telemetry Contract before bot_trades_v4 inserts.
 
     Some legacy leadership/shadow/probe paths create trade rows before the main
     webhook enrichment stage. This makes Coin Health/Form snapshots local to the
@@ -9280,7 +9348,7 @@ def ensure_trade_selection_context(cur, symbol, ctx=None, path_name="trade_path"
     try:
         return enrich_coin_selection_context(cur, symbol, ctx)
     except Exception as e:
-        print(f"⚠️ v12.0.6 trade selection context fallback | {path_name} | {symbol} | {e}", flush=True)
+        print(f"⚠️ v12.0.7 trade selection context fallback | {path_name} | {symbol} | {e}", flush=True)
         safe_telemetry_rollback(cur)
         ctx.setdefault("coin_health_snapshot", {
             "coin_health_mode": "UNKNOWN",
@@ -9298,7 +9366,7 @@ def ensure_trade_selection_context(cur, symbol, ctx=None, path_name="trade_path"
 
 
 def execution_mode_trade_telemetry(mode, reason=None):
-    """v12.0.6 explicit execution-mode telemetry. Safe no-op until columns exist."""
+    """v12.0.7 explicit execution-mode telemetry. Safe no-op until columns exist."""
     return {
         "execution_mode": mode,
         "execution_mode_reason": reason or mode,
@@ -9527,7 +9595,7 @@ def open_shadow_market_os_trade(cur, symbol, direction, price, momentum, trend, 
                                 model_size_gbp=10.0):
     """v6.9.2: paper/shadow version of live leadership/ROT entries.
 
-    v12.0.6: self-enrich Coin Health/Form because this function can be called
+    v12.0.7: self-enrich Coin Health/Form because this function can be called
     before the main webhook enrichment stage by legacy leadership gates.
     """
     if duplicate_signal_trade_blocked(cur, symbol, signal_id, "open_shadow_market_os_trade"):
