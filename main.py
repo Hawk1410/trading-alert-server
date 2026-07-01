@@ -1717,17 +1717,19 @@ def build_trading_genome_v12(symbol, decision, momentum, trend, entry_quality=No
     genome = {
         "symbol": symbol,
         "decision": decision or "NO_ENTRY",
-        "entry_quality": entry_quality,
+        "entry_quality": entry_quality or ctx.get("entry_quality"),
         "entry_archetype": ctx.get("entry_archetype") or ctx.get("current_archetype"),
         "entry_tier": ctx.get("entry_tier"),
         "entry_subtier": ctx.get("entry_subtier"),
+        "execution_mode": ctx.get("execution_mode"),
+        "execution_mode_reason": ctx.get("execution_mode_reason"),
         "momentum": momentum,
         "trend": trend,
         "leadership_phase": ctx.get("leadership_phase"),
         "lifecycle_phase": ctx.get("lifecycle_phase"),
         "prior_lifecycle_phase": ctx.get("prior_lifecycle_phase"),
         "leadership_transition": ctx.get("leadership_transition"),
-        "leadership_score": ctx.get("prior_avg_peak"),
+        "leadership_score": ctx.get("leadership_score") or ctx.get("prior_avg_peak"),
         "leadership_rank": ctx.get("leadership_rank"),
         "leadership_delta_5m": ctx.get("leadership_delta_5m"),
         "leadership_delta_15m": ctx.get("leadership_delta_15m"),
@@ -1735,13 +1737,17 @@ def build_trading_genome_v12(symbol, decision, momentum, trend, entry_quality=No
         "leadership_delta_60m": ctx.get("leadership_delta_60m"),
         "market_os_engine": ctx.get("market_os_engine"),
         "market_lifecycle_state": ctx.get("market_lifecycle_state"),
+        "market_breadth": ctx.get("market_breadth"),
+        "market_breadth_accel": ctx.get("market_breadth_accel"),
+        "market_strength": ctx.get("market_strength") or ctx.get("market_heat_score"),
         "market_heat_regime": ctx.get("market_heat_regime"),
         "market_heat_score": ctx.get("market_heat_score"),
-        "coin_health_mode": coin_health.get("coin_health_mode"),
-        "coin_health_reason": coin_health.get("coin_health_reason"),
-        "coin_form_mode": coin_form.get("coin_form_mode"),
-        "coin_form_score": coin_form.get("coin_form_score"),
-        "coin_form_reason": coin_form.get("coin_form_reason"),
+        "market_heat_reason": ctx.get("market_heat_reason"),
+        "coin_health_mode": coin_health.get("coin_health_mode") or ctx.get("coin_health_mode"),
+        "coin_health_reason": coin_health.get("coin_health_reason") or ctx.get("coin_health_reason"),
+        "coin_form_mode": coin_form.get("coin_form_mode") or ctx.get("coin_form_mode"),
+        "coin_form_score": coin_form.get("coin_form_score") or ctx.get("coin_form_score"),
+        "coin_form_reason": coin_form.get("coin_form_reason") or ctx.get("coin_form_reason"),
         "cqe_quality_score": ctx.get("cqe_quality_score"),
         "cqe_momentum_accel_30m": cqe_ctx.get("cqe_momentum_accel_30m"),
         "cqe_trend_accel_30m": cqe_ctx.get("cqe_trend_accel_30m"),
@@ -1755,6 +1761,112 @@ def build_trading_genome_v12(symbol, decision, momentum, trend, entry_quality=No
     }
     if extra:
         genome.update(extra)
+    return genome
+
+
+def _v12_fill_genome(genome, key, value):
+    if value is not None and genome.get(key) in (None, ""):
+        genome[key] = value
+
+
+def enrich_decision_genome_v12(cur, genome, *, signal_id=None, trade_id=None, symbol=None,
+                               final_status=None, final_reason=None, entry_allowed=None):
+    """v12.0.8 Phase 1 Telemetry Contract hardening.
+
+    Decision traces are the canonical decision evidence. Some callers build the
+    genome before market/coin/trade context is fully attached, so enrich the
+    genome from the committed telemetry tables immediately before insert. This
+    keeps the trace writer robust without changing trading decisions.
+    """
+    genome = dict(genome or {})
+    _v12_fill_genome(genome, "symbol", symbol)
+    _v12_fill_genome(genome, "final_status", final_status)
+    _v12_fill_genome(genome, "final_reason", final_reason)
+    _v12_fill_genome(genome, "entry_allowed", entry_allowed)
+
+    try:
+        if signal_id is not None:
+            cur.execute("""
+                SELECT symbol, decision, price, momentum, trend,
+                       market_heat_regime, market_heat_score,
+                       market_lifecycle_state, market_breadth, market_breadth_accel,
+                       leadership_score_at_signal, leadership_rank_at_signal, block_reason
+                FROM signals_raw
+                WHERE id = %s
+                LIMIT 1
+            """, (signal_id,))
+            row = cur.fetchone()
+            if row:
+                (sig_symbol, sig_decision, price, momentum, trend, heat_regime, heat_score,
+                 lifecycle_state, breadth, breadth_accel, leadership_score, leadership_rank, block_reason) = row
+                _v12_fill_genome(genome, "symbol", sig_symbol)
+                _v12_fill_genome(genome, "decision", sig_decision or "NO_ENTRY")
+                _v12_fill_genome(genome, "price", price)
+                _v12_fill_genome(genome, "momentum", momentum)
+                _v12_fill_genome(genome, "trend", trend)
+                _v12_fill_genome(genome, "market_heat_regime", heat_regime)
+                _v12_fill_genome(genome, "market_heat_score", heat_score)
+                _v12_fill_genome(genome, "market_lifecycle_state", lifecycle_state)
+                _v12_fill_genome(genome, "market_breadth", breadth)
+                _v12_fill_genome(genome, "market_breadth_accel", breadth_accel)
+                _v12_fill_genome(genome, "market_strength", heat_score)
+                _v12_fill_genome(genome, "leadership_score", leadership_score)
+                _v12_fill_genome(genome, "leadership_rank", leadership_rank)
+                _v12_fill_genome(genome, "block_reason", block_reason)
+                symbol = symbol or sig_symbol
+    except Exception as e:
+        print(f"⚠️ v12.0.8 genome signal enrichment skipped | {symbol} | {e}", flush=True)
+
+    try:
+        if trade_id is not None:
+            cur.execute("""
+                SELECT entry_quality, size_scaling_reason, execution_mode, execution_mode_reason,
+                       market_heat_regime, market_heat_score, market_lifecycle_state_at_entry,
+                       coin_health_mode, coin_form_mode, coin_form_score, coin_form_reason,
+                       trade_size_gbp, is_shadow
+                FROM bot_trades_v4
+                WHERE id::text = %s
+                LIMIT 1
+            """, (str(trade_id),))
+            row = cur.fetchone()
+            if row:
+                (entry_quality, size_reason, exec_mode, exec_reason, heat_regime, heat_score, lifecycle_state,
+                 health_mode, form_mode, form_score, form_reason, trade_size, is_shadow) = row
+                _v12_fill_genome(genome, "entry_quality", entry_quality)
+                _v12_fill_genome(genome, "size_scaling_reason", size_reason)
+                _v12_fill_genome(genome, "execution_mode", exec_mode)
+                _v12_fill_genome(genome, "execution_mode_reason", exec_reason)
+                _v12_fill_genome(genome, "market_heat_regime", heat_regime)
+                _v12_fill_genome(genome, "market_heat_score", heat_score)
+                _v12_fill_genome(genome, "market_lifecycle_state", lifecycle_state)
+                _v12_fill_genome(genome, "coin_health_mode", health_mode)
+                _v12_fill_genome(genome, "coin_form_mode", form_mode)
+                _v12_fill_genome(genome, "coin_form_score", form_score)
+                _v12_fill_genome(genome, "coin_form_reason", form_reason)
+                _v12_fill_genome(genome, "trade_size_gbp", trade_size)
+                _v12_fill_genome(genome, "is_shadow", is_shadow)
+    except Exception as e:
+        print(f"⚠️ v12.0.8 genome trade enrichment skipped | {symbol} | {e}", flush=True)
+
+    try:
+        if symbol and (genome.get("coin_health_mode") in (None, "") or genome.get("coin_form_mode") in (None, "")):
+            cur.execute("""
+                SELECT coin_health_mode, coin_form_mode, coin_form_score, form_updated_at
+                FROM coin_scores
+                WHERE symbol = %s
+                LIMIT 1
+            """, (symbol,))
+            row = cur.fetchone()
+            if row:
+                health_mode, form_mode, form_score, form_updated_at = row
+                _v12_fill_genome(genome, "coin_health_mode", health_mode)
+                _v12_fill_genome(genome, "coin_form_mode", form_mode)
+                _v12_fill_genome(genome, "coin_form_score", form_score)
+                _v12_fill_genome(genome, "form_updated_at", form_updated_at)
+    except Exception as e:
+        print(f"⚠️ v12.0.8 genome coin score enrichment skipped | {symbol} | {e}", flush=True)
+
+    _v12_fill_genome(genome, "execution_mode", "UNKNOWN")
     return genome
 
 
@@ -1775,6 +1887,17 @@ def write_decision_trace_v12(cur, *, signal_id, signal_timestamp, symbol, decisi
         trace_conn = get_db()
         trace_cur = trace_conn.cursor()
         ensure_decision_trace_v12_table(trace_cur)
+        genome_payload = enrich_decision_genome_v12(
+            trace_cur,
+            genome or {},
+            signal_id=signal_id,
+            trade_id=trade_id,
+            symbol=symbol,
+            final_status=final_status,
+            final_reason=final_reason,
+            entry_allowed=entry_allowed,
+        )
+
         trace_cur.execute("""
             INSERT INTO decision_trace_v12 (
                 bot_version, research_version, data_version, signal_id, signal_timestamp,
@@ -1791,7 +1914,7 @@ def write_decision_trace_v12(cur, *, signal_id, signal_timestamp, symbol, decisi
             DATA_VERSION, RESEARCH_PLATFORM_VERSION, DATA_VERSION, signal_id, signal_timestamp,
             symbol, decision, decision or "NO_ENTRY", final_status, final_reason,
             bool(entry_allowed), is_shadow, bool(would_live), bool(okx_attempted), okx_success, str(trade_id) if trade_id else None,
-            json_dumps_safe(trace or []), json_dumps_safe(genome or {}), json_dumps_safe(metrics or {}),
+            json_dumps_safe(trace or []), json_dumps_safe(genome_payload), json_dumps_safe(metrics or {}),
         ))
         trace_conn.commit()
     except Exception as e:
