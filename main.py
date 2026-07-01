@@ -3624,7 +3624,9 @@ def ensure_archetype_state_columns(cur):
         ADD COLUMN IF NOT EXISTS top_form_rank_at_entry INTEGER,
         ADD COLUMN IF NOT EXISTS is_top3_form BOOLEAN DEFAULT FALSE,
         ADD COLUMN IF NOT EXISTS is_top5_form BOOLEAN DEFAULT FALSE,
-        ADD COLUMN IF NOT EXISTS top_form_selector BOOLEAN DEFAULT FALSE
+        ADD COLUMN IF NOT EXISTS top_form_selector BOOLEAN DEFAULT FALSE,
+        ADD COLUMN IF NOT EXISTS execution_mode TEXT,
+        ADD COLUMN IF NOT EXISTS execution_mode_reason TEXT
     """)
 
 
@@ -5386,6 +5388,9 @@ def open_shadow_cqe_trade(cur, symbol, price, momentum, trend, signal_id, signal
     if duplicate_signal_trade_blocked(cur, symbol, signal_id, "open_shadow_cqe_trade"):
         return None
 
+    leadership_context = ensure_trade_selection_context(cur, symbol, leadership_context or {}, "open_shadow_cqe_trade")
+    cqe_context = cqe_context or {}
+
     cur.execute("""
         INSERT INTO bot_trades_v4 (
             symbol,
@@ -5446,6 +5451,7 @@ def open_shadow_cqe_trade(cur, symbol, price, momentum, trend, signal_id, signal
         "trade_size_usdt": 0.0,
         "shadow_reason": "SHADOW_CQE_NO_CAPITAL",
         "size_scaling_reason": "shadow_cqe_no_capital",
+        **execution_mode_trade_telemetry("PROBE_ZERO_CAPITAL", "shadow_cqe_no_capital"),
         "shadow_cqe_detected_at_entry": cqe_context.get("cqe_detected"),
         "shadow_cqe_reason_at_entry": cqe_context.get("cqe_reason"),
         "cqe_quality_score_at_entry": cqe_context.get("cqe_quality_score"),
@@ -6079,6 +6085,8 @@ def open_bpt_cqe_probe_trade(cur, symbol, price, momentum, trend, signal_id, sig
     if duplicate_signal_trade_blocked(cur, symbol, signal_id, "open_bpt_cqe_probe_trade"):
         return None
 
+    leadership_context = ensure_trade_selection_context(cur, symbol, leadership_context or {}, "open_bpt_cqe_probe_trade")
+
     lifecycle_row, q = classify_bpt_lifecycle_row(momentum, trend)
     params = get_bpt_row_params(lifecycle_row)
 
@@ -6149,6 +6157,7 @@ def open_bpt_cqe_probe_trade(cur, symbol, price, momentum, trend, signal_id, sig
         "is_top5_form": bool(top_form_rank_snapshot.get("is_top5_form")),
         "size_scaling_reason": GHOST_PROBE_LABEL if ghost_probe_active else (leadership_context or {}).get("size_scaling_reason"),
         "shadow_reason": TOP_FORM_SHADOW_REASON if top_form_shadow_probe else (GHOST_PROBE_LABEL if ghost_probe_active else None),
+        **execution_mode_trade_telemetry("PROBE_ZERO_CAPITAL" if ghost_probe_active else ("LIVE_PROBE_PENDING" if live_probe_enabled else "SHADOW_ENGINE"), TOP_FORM_SHADOW_REASON if top_form_shadow_probe else (GHOST_PROBE_LABEL if ghost_probe_active else "bpt_probe_pending")),
         "leadership_mode": (leadership_context or {}).get("leadership_mode"),
         "trade_size_gbp": model_probe_size_gbp,
         "dynamic_trade_size_gbp": model_probe_size_gbp,
@@ -6194,6 +6203,8 @@ def open_bpt_cqe_probe_trade(cur, symbol, price, momentum, trend, signal_id, sig
             actual_probe_quote = float(okx_probe_result.get("actual_quote_size") or requested_probe_quote)
             actual_probe_gbp = usdt_quote_to_gbp(actual_probe_quote)
             safe_update_trade_telemetry(cur, trade_id, {
+                **execution_mode_trade_telemetry("LIVE_CAPITAL", "bpt_probe_live_entry_executed"),
+                "is_shadow": False,
                 "trade_size_gbp": actual_probe_gbp,
                 "dynamic_trade_size_gbp": actual_probe_gbp,
                 "probe_size_gbp": actual_probe_gbp,
@@ -6907,6 +6918,7 @@ def maybe_confirm_and_upgrade_bpt_trade(cur, tid, sym, entry_price, opened_at, c
                 "entry_price": current_price or entry_price,
                 "peak_pnl_percent": 0,
                 "is_shadow": False,
+                **execution_mode_trade_telemetry("LIVE_CAPITAL", "confirmed_ghost_probe_entered_live_capital"),
                 "size_scaling_reason": "confirmed_ghost_probe_entered_live_capital",
                 "shadow_reason": None,
             } if ghost_probe_active else {}
@@ -7526,6 +7538,7 @@ def open_persistence_hunter_trade(cur, symbol, price, momentum, trend, signal_id
         "trade_size_usdt": 0.0,
         "size_scaling_reason": "PH_MIN_LIVE_PROBE_PENDING" if ph_live_requested else "PH_SHADOW_NO_CAPITAL",
         "shadow_reason": None if ph_live_requested else "PH_SHADOW_NO_CAPITAL",
+        **execution_mode_trade_telemetry("LIVE_PROBE_PENDING" if ph_live_requested else "PROBE_ZERO_CAPITAL", "PH_PROBE" if ph_min_live_probe_allowed else ("PH_GLOBAL_LIVE" if ENABLE_PERSISTENCE_HUNTER_LIVE else "PH_SHADOW_NO_CAPITAL")),
         "live_gate_reason": "PH_PROBE" if ph_min_live_probe_allowed else ("PH_GLOBAL_LIVE" if ENABLE_PERSISTENCE_HUNTER_LIVE else "SHADOW_ONLY"),
         "lifecycle_row": PH_LIFECYCLE_ROW,
         "ph_detected": True,
@@ -7560,6 +7573,7 @@ def open_persistence_hunter_trade(cur, symbol, price, momentum, trend, signal_id
             ph_actual_gbp = usdt_quote_to_gbp(actual_quote)
             safe_update_trade_telemetry(cur, tid, {
                 "is_shadow": False,
+                **execution_mode_trade_telemetry("LIVE_CAPITAL", "PH_LIVE_PROBE_EXECUTED" if ph_min_live_probe_allowed else "PH_GLOBAL_LIVE_EXECUTED"),
                 "trade_size_gbp": ph_actual_gbp,
                 "dynamic_trade_size_gbp": ph_actual_gbp,
                 **accounting_entry_telemetry(actual_quote),
@@ -9253,6 +9267,44 @@ def coin_selection_trade_telemetry(ctx):
     return payload
 
 
+def ensure_trade_selection_context(cur, symbol, ctx=None, path_name="trade_path"):
+    """v12.0.6: enforce Phase 1 Telemetry Contract before bot_trades_v4 inserts.
+
+    Some legacy leadership/shadow/probe paths create trade rows before the main
+    webhook enrichment stage. This makes Coin Health/Form snapshots local to the
+    writer path so trade rows do not depend on call-order accidents.
+    """
+    ctx = dict(ctx or {})
+    if ctx.get("coin_health_snapshot") and ctx.get("coin_form_snapshot"):
+        return ctx
+    try:
+        return enrich_coin_selection_context(cur, symbol, ctx)
+    except Exception as e:
+        print(f"⚠️ v12.0.6 trade selection context fallback | {path_name} | {symbol} | {e}", flush=True)
+        safe_telemetry_rollback(cur)
+        ctx.setdefault("coin_health_snapshot", {
+            "coin_health_mode": "UNKNOWN",
+            "coin_health_reason": f"{path_name}_snapshot_error",
+            "coin_dead_streak": 0,
+            "coin_recovery_streak": 0,
+        })
+        ctx.setdefault("coin_form_snapshot", {
+            "coin_form_mode": "UNKNOWN",
+            "coin_form_score": None,
+            "coin_form_reason": f"{path_name}_snapshot_error",
+            "form_updated_at": datetime.now(timezone.utc),
+        })
+        return ctx
+
+
+def execution_mode_trade_telemetry(mode, reason=None):
+    """v12.0.6 explicit execution-mode telemetry. Safe no-op until columns exist."""
+    return {
+        "execution_mode": mode,
+        "execution_mode_reason": reason or mode,
+    }
+
+
 def is_okx_blocked_symbol(symbol):
     return normalize_symbol(symbol).replace("-", "") in OKX_BLOCKED_SYMBOLS
 
@@ -9309,6 +9361,8 @@ def open_coin_health_shadow_trade(cur, symbol, direction, price, momentum, trend
     shadow_reason = (health_snapshot or {}).get("coin_health_reason") or "coin_health_shadow"
     ctx = dict(leadership_context or {})
     ctx["market_os_engine"] = COIN_HEALTH_SHADOW_ENTRY_QUALITY
+    ctx["coin_health_snapshot"] = health_snapshot
+    ctx = ensure_trade_selection_context(cur, symbol, ctx, "open_coin_health_shadow_trade")
 
     trade_id = open_shadow_market_os_trade(
         cur,
@@ -9360,6 +9414,7 @@ def open_trade(cur, symbol, direction, price, momentum, trend, quality,
     if duplicate_signal_trade_blocked(cur, symbol, signal_id, "open_trade"):
         return None
 
+    leadership_context = ensure_trade_selection_context(cur, symbol, leadership_context or {}, "open_trade")
     entry_snapshot = build_entry_leadership_snapshot(quality, leadership_context)
 
     cur.execute("""
@@ -9422,6 +9477,7 @@ def open_trade(cur, symbol, direction, price, momentum, trend, quality,
             "market_os_engine": entry_snapshot.get("market_os_engine"),
             "size_scaling_reason": "okx_entry_pending_provisional",
             "shadow_reason": "okx_entry_pending_provisional",
+            **execution_mode_trade_telemetry("LIVE_CAPITAL_PENDING", "okx_entry_pending_provisional"),
         }
         entry_optional_telemetry.update(lifecycle_trade_telemetry_from_context(leadership_context))
         entry_optional_telemetry.update(market_context_trade_telemetry(leadership_context))
@@ -9469,10 +9525,15 @@ def open_trade(cur, symbol, direction, price, momentum, trend, quality,
 def open_shadow_market_os_trade(cur, symbol, direction, price, momentum, trend, quality,
                                 signal_id, signal_time, leadership_context, shadow_reason,
                                 model_size_gbp=10.0):
-    """v6.9.2: paper/shadow version of live leadership/ROT entries."""
+    """v6.9.2: paper/shadow version of live leadership/ROT entries.
+
+    v12.0.6: self-enrich Coin Health/Form because this function can be called
+    before the main webhook enrichment stage by legacy leadership gates.
+    """
     if duplicate_signal_trade_blocked(cur, symbol, signal_id, "open_shadow_market_os_trade"):
         return None
 
+    leadership_context = ensure_trade_selection_context(cur, symbol, leadership_context or {}, "open_shadow_market_os_trade")
     entry_snapshot = build_entry_leadership_snapshot(quality, leadership_context or {})
 
     cur.execute("""
@@ -9526,6 +9587,7 @@ def open_shadow_market_os_trade(cur, symbol, direction, price, momentum, trend, 
         "market_os_engine": (leadership_context or {}).get("market_os_engine"),
         "size_scaling_reason": shadow_reason,
         "shadow_reason": shadow_reason,
+        **execution_mode_trade_telemetry("SHADOW_ENGINE" if float(model_size_gbp or 0) > 0 else "PROBE_ZERO_CAPITAL", shadow_reason),
         **lifecycle_trade_telemetry_from_context(leadership_context),
         **market_context_trade_telemetry(leadership_context),
         **coin_selection_trade_telemetry(leadership_context),
@@ -10854,6 +10916,7 @@ def webhook():
                             "dynamic_trade_size_gbp": actual_entry_gbp_size,
                             "is_shadow": False,
                             "shadow_reason": None,
+                            **execution_mode_trade_telemetry("LIVE_CAPITAL", "okx_live_entry_confirmed"),
                             **accounting_entry_telemetry(actual_entry_quote_size),
                             "size_scaling_reason": leadership_context.get("size_scaling_reason") or "okx_live_entry_confirmed",
                         })
